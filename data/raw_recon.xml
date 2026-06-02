@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.94 scan initiated Tue Jun  2 11:35:36 2026 as: nmap -sV -F -oX /data/raw_recon.xml stayfit.pk -->
+<nmaprun scanner="nmap" args="nmap -sV -F -oX /data/raw_recon.xml stayfit.pk" start="1780400136" startstr="Tue Jun  2 11:35:36 2026" version="7.94" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="100" services="7,9,13,21-23,25-26,37,53,79-81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,443-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995,1025-1029,1110,1433,1720,1723,1755,1900,2000-2001,2049,2121,2717,3000,3128,3306,3389,3986,4899,5000,5009,5051,5060,5101,5190,5357,5432,5631,5666,5800,5900,6000-6001,6646,7070,8000,8008-8009,8080-8081,8443,8888,9100,9999-10000,32768,49152-49157"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<hosthint><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="216.198.79.1" addrtype="ipv4"/>
+<hostnames>
+<hostname name="stayfit.pk" type="user"/>
+</hostnames>
+</hosthint>
+<host starttime="1780400137" endtime="1780400210"><status state="up" reason="reset" reason_ttl="63"/>
+<address addr="216.198.79.1" addrtype="ipv4"/>
+<hostnames>
+<hostname name="stayfit.pk" type="user"/>
+</hostnames>
+<ports><extraports state="filtered" count="98">
+<extrareasons reason="no-response" count="98" proto="tcp" ports="7,9,13,21-23,25-26,37,53,79,81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,444-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995,1025-1029,1110,1433,1720,1723,1755,1900,2000-2001,2049,2121,2717,3000,3128,3306,3389,3986,4899,5000,5009,5051,5060,5101,5190,5357,5432,5631,5666,5800,5900,6000-6001,6646,7070,8000,8008-8009,8080-8081,8443,8888,9100,9999-10000,32768,49152-49157"/>
+</extraports>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="63"/><service name="http" product="Vercel" servicefp="SF-Port80-TCP:V=7.94%I=7%D=6/2%Time=6A1EC012%P=x86_64-alpine-linux-musl%r(GetRequest,8A,&quot;HTTP/1\.0\x20308\x20Permanent\x20Redirect\r\nContent-Type:\x20text/plain\r\nLocation:\x20https:///\r\nRefresh:\x200;url=https:///\r\nserver:\x20Vercel\r\n\r\nRedirecting\.\.\.&quot;)%r(HTTPOptions,8A,&quot;HTTP/1\.0\x20308\x20Permanent\x20Redirect\r\nContent-Type:\x20text/plain\r\nLocation:\x20https:///\r\nRefresh:\x200;url=https:///\r\nserver:\x20Vercel\r\n\r\nRedirecting\.\.\.&quot;)%r(FourOhFourRequest,D0,&quot;HTTP/1\.0\x20308\x20Permanent\x20Redirect\r\nContent-Type:\x20text/plain\r\nLocation:\x20https:///nice%20ports%2C/Tri%6Eity\.txt%2ebak\r\nRefresh:\x200;url=https:///nice%20ports%2C/Tri%6Eity\.txt%2ebak\r\nserver:\x20Vercel\r\n\r\nRedirecting\.\.\.&quot;);" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="63"/><service name="https" product="Vercel" servicefp="SF-Port443-TCP:V=7.94%T=SSL%I=7%D=6/2%Time=6A1EC018%P=x86_64-alpine-linux-musl%r(HTTPOptions,1B3,&quot;HTTP/1\.0\x20404\x20Not\x20Found\r\nCache-Control:\x20public,\x20max-age=0,\x20must-revalidate\r\nContent-Length:\x20107\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nDate:\x20Tue,\x2002\x20Jun\x202026\x2011:35:52\x20GMT\r\nServer:\x20Vercel\r\nStrict-Transport-Security:\x20max-age=63072000\r\nX-Vercel-Error:\x20DEPLOYMENT_NOT_FOUND\r\nX-Vercel-Id:\x20bom1::k5wx5-1780400152443-ce6e4d47b9c3\r\n\r\nThe\x20deployment\x20could\x20not\x20be\x20found\x20on\x20Vercel\.\n\nDEPLOYMENT_NOT_FOUND\n\nbom1::k5wx5-1780400152443-ce6e4d47b9c3\n&quot;)%r(FourOhFourRequest,1B3,&quot;HTTP/1\.0\x20404\x20Not\x20Found\r\nCache-Control:\x20public,\x20max-age=0,\x20must-revalidate\r\nContent-Length:\x20107\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nDate:\x20Tue,\x2002\x20Jun\x202026\x2011:35:52\x20GMT\r\nServer:\x20Vercel\r\nStrict-Transport-Security:\x20max-age=63072000\r\nX-Vercel-Error:\x20DEPLOYMENT_NOT_FOUND\r\nX-Vercel-Id:\x20bom1::sf4tp-1780400152700-ec0c5481f2cf\r\n\r\nThe\x20deployment\x20could\x20not\x20be\x20found\x20on\x20Vercel\.\n\nDEPLOYMENT_NOT_FOUND\n\nbom1::sf4tp-1780400152700-ec0c5481f2cf\n&quot;)%r(GenericLines,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;)%r(RTSPRequest,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;)%r(Help,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;)%r(SSLSessionReq,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;)%r(TLSSessionReq,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;)%r(Kerberos,67,&quot;HTTP/1\.1\x20400\x20Bad\x20Request\r\nContent-Type:\x20text/plain;\x20charset=utf-8\r\nConnection:\x20close\r\n\r\n400\x20Bad\x20Request&quot;);" tunnel="ssl" method="probed" conf="10"/></port>
+</ports>
+<times srtt="13027" rttvar="23893" to="108599"/>
+</host>
+<runstats><finished time="1780400210" timestr="Tue Jun  2 11:36:50 2026" summary="Nmap done at Tue Jun  2 11:36:50 2026; 1 IP address (1 host up) scanned in 73.72 seconds" elapsed="73.72" exit="success"/><hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>

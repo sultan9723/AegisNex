@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # SERVICE 1: Infrastructure Surface Profiler
+  # ============================================================================
+  network_recon:
+    build:
+      context: ../modules/network-recon
+      dockerfile: Dockerfile
+    volumes:
+      - ../data:/data
+    command: ["stayfit.pk"] # Default target host domain parameter for the profile scan
+
+  # ============================================================================
+  # SERVICE 2: Web Application & API Security Auditor
+  # ============================================================================
+  app_audit:
+    build:
+      context: ../modules/app-audit
+      dockerfile: Dockerfile
+    volumes:
+      - ../data:/data
+    command: ["https://stayfit.pk"] # Default target web URL parameter
+    depends_on:
+      - network_recon # Enforces sequential pipeline staging
