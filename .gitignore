@@ -1,0 +1,14 @@
+# Ignore data output
+/data/*.json
+
+# Ignore environment/secrets
+.env
+.env.*
+
+# Ignore logs
+*.log
+
+# Ignore system/IDE files
+.DS_Store
+.vscode/
+.idea/
