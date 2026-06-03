@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run tests
+        id: pytest
+        run: python -m pytest tests --junitxml=pytest-results.xml
+      - name: Test summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import pathlib
+          import xml.etree.ElementTree as ET
+
+          report_path = pathlib.Path("pytest-results.xml")
+          if not report_path.exists():
+              print("No pytest report found.")
+              raise SystemExit(0)
+
+          root = ET.parse(report_path).getroot()
+          tests = int(root.attrib.get("tests", 0))
+          failures = int(root.attrib.get("failures", 0))
+          errors = int(root.attrib.get("errors", 0))
+          skipped = int(root.attrib.get("skipped", 0))
+          passed = tests - failures - errors - skipped
+          print(f"Tests: {tests} | Passed: {passed} | Failures: {failures} | Errors: {errors} | Skipped: {skipped}")
+          PY

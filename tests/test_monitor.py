@@ -1,0 +1,23 @@
+import sys
+import types
+from pathlib import Path
+
+from src.monitor import SystemResourceMonitor
+
+
+def test_get_stats_returns_cpu_and_ram(tmp_path: Path, monkeypatch) -> None:
+    dummy_psutil = types.SimpleNamespace(
+        cpu_percent=lambda interval=None: 12.5,
+        virtual_memory=lambda: types.SimpleNamespace(percent=42.0),
+    )
+    monkeypatch.setitem(sys.modules, "psutil", dummy_psutil)
+
+    log_path = tmp_path / "agentx.log"
+    monitor = SystemResourceMonitor(log_file=str(log_path))
+
+    result = monitor.run({})
+
+    assert result["status"] == "ok"
+    assert result["cpu_percent"] == 12.5
+    assert result["ram_percent"] == 42.0
+    assert log_path.exists()
