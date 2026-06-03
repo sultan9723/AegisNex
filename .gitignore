@@ -8,6 +8,11 @@
 # Ignore logs
 *.log
 
+# Ignore Python virtual environments/cache
+.venv/
+__pycache__/
+*.pyc
+
 # Ignore system/IDE files
 .DS_Store
 .vscode/
