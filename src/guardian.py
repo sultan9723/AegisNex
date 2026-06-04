@@ -25,6 +25,7 @@ class Guardian:
         restart_history_path: str | Path = "restart_history.json",
         health_checks: Optional[List[HealthCheck]] = None,
         incident_manager: Optional[IncidentManager] = None,
+        storage_repository: Any | None = None,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.health_checker = health_checker
@@ -35,6 +36,7 @@ class Guardian:
         self.restart_history_path = Path(restart_history_path)
         self.health_checks = health_checks or []
         self.incident_manager = incident_manager
+        self.storage_repository = storage_repository
         self.logger = logger or logging.getLogger("agentx.guardian")
         self.restart_history = self._load_restart_history()
 
@@ -102,6 +104,7 @@ class Guardian:
                     )
                     action["alert"] = self.notifier.send_email_alert(message)
                 self._update_incident_remediation(incident, action)
+                self._record_remediation_action(name, incident, action)
                 actions.append(action)
 
         return {"health": health_report, "actions": actions}
@@ -175,6 +178,22 @@ class Guardian:
         if not self.incident_manager:
             return
         self.incident_manager.resolve_service_incidents(service_name)
+
+    def _record_remediation_action(
+        self,
+        service_name: str,
+        incident: Any | None,
+        action: Dict[str, Any],
+    ) -> None:
+        if not self.storage_repository:
+            return
+        self.storage_repository.save_remediation_action(
+            service_name=service_name,
+            action=str(action.get("action", "restart")),
+            successful=action.get("status") == "ok",
+            incident_id=getattr(incident, "incident_id", None),
+            details=action,
+        )
 
     def _should_restart(self, container_name: str) -> bool:
         return self._restart_decision(container_name)["allowed"]

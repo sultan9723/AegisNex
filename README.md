@@ -155,6 +155,55 @@ Open Grafana at `http://localhost:3000` with `admin` / `admin`.
 Dashboard documentation and screenshot placeholders are in
 `docs/grafana/README.md`.
 
+## Persistent Storage
+AegisNex stores historical operational data in SQLite through
+`src/storage.py`. The database is created automatically at the configured
+location:
+
+```yaml
+storage:
+  database_path: aegisnex.db
+```
+
+Tables:
+
+- `incidents` - incident creation, status, remediation flags, and resolution timestamps.
+- `notifications` - notification send attempts and outcomes.
+- `remediations` - restart/remediation action history.
+- `metrics_snapshots` - system, container, incident, remediation, and notification metric snapshots.
+
+Repository:
+
+```python
+from src.storage import AegisNexRepository
+
+repository = AegisNexRepository("aegisnex.db")
+rows = repository.fetch_all("incidents")
+```
+
+Example queries:
+
+```sql
+SELECT service_name, COUNT(*) AS incident_count
+FROM incidents
+GROUP BY service_name
+ORDER BY incident_count DESC;
+
+SELECT timestamp, cpu_percent, memory_percent, disk_percent
+FROM metrics_snapshots
+ORDER BY timestamp DESC
+LIMIT 50;
+
+SELECT service_name, COUNT(*) AS failed_restarts
+FROM remediations
+WHERE successful = 0
+GROUP BY service_name;
+
+SELECT provider, status, COUNT(*) AS events
+FROM notifications
+GROUP BY provider, status;
+```
+
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).
 - Keep logs under version control exclusion (already handled in `.gitignore`).

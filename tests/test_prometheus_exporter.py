@@ -143,7 +143,10 @@ def test_prometheus_exporter_renders_metrics_text(tmp_path: Path, monkeypatch) -
     payload, content_type = PrometheusExporter(build_services(tmp_path)).render()
     body = payload.decode("utf-8")
 
-    assert "text/plain" in content_type
+    assert content_type.split(";", 1)[0] in {
+        "text/plain",
+        "application/openmetrics-text",
+    }
     assert "aegisnex_system_cpu_usage_percent" in body
     assert "aegisnex_incidents_total" in body
 

@@ -56,10 +56,12 @@ class IncidentManager:
         history_path: str | Path = "incident_history.json",
         notification_providers: Optional[List[NotificationProvider]] = None,
         notification_history_path: str | Path = "notification_history.json",
+        storage_repository: Any | None = None,
     ) -> None:
         self.history_path = Path(history_path)
         self.notification_history_path = Path(notification_history_path)
         self.notification_providers = notification_providers or []
+        self.storage_repository = storage_repository
         self.incidents: List[Incident] = self._load_incidents()
         self.notification_events: List[Dict[str, Any]] = self._load_notification_events()
 
@@ -94,6 +96,7 @@ class IncidentManager:
         )
         self.incidents.append(incident)
         self._save_incidents()
+        self._save_incident_to_storage(incident)
         self._notify_created(incident)
         return incident
 
@@ -112,6 +115,7 @@ class IncidentManager:
             if key in allowed_fields:
                 setattr(incident, key, value)
         self._save_incidents()
+        self._save_incident_to_storage(incident)
         return incident
 
     def resolve_incident(self, incident_id: str) -> Incident:
@@ -119,6 +123,7 @@ class IncidentManager:
         incident.status = "resolved"
         incident.resolved_timestamp = utc_timestamp()
         self._save_incidents()
+        self._save_incident_to_storage(incident)
         self._notify_resolved(incident)
         return incident
 
@@ -132,6 +137,7 @@ class IncidentManager:
         if resolved:
             self._save_incidents()
             for incident in resolved:
+                self._save_incident_to_storage(incident)
                 self._notify_resolved(incident)
         return resolved
 
@@ -187,6 +193,10 @@ class IncidentManager:
             encoding="utf-8",
         )
 
+    def _save_incident_to_storage(self, incident: Incident) -> None:
+        if self.storage_repository:
+            self.storage_repository.save_incident(incident)
+
     def _notify_created(self, incident: Incident) -> List[NotificationResult]:
         results = [
             provider.notify_incident_created(incident)
@@ -212,18 +222,19 @@ class IncidentManager:
         if not results:
             return
         for result in results:
-            self.notification_events.append(
-                {
-                    "timestamp": utc_timestamp(),
-                    "event_type": event_type,
-                    "incident_id": incident.incident_id,
-                    "service_name": incident.service_name,
-                    "provider": result.provider,
-                    "status": result.status,
-                    "attempts": result.attempts,
-                    "message": result.message,
-                }
-            )
+            event = {
+                "timestamp": utc_timestamp(),
+                "event_type": event_type,
+                "incident_id": incident.incident_id,
+                "service_name": incident.service_name,
+                "provider": result.provider,
+                "status": result.status,
+                "attempts": result.attempts,
+                "message": result.message,
+            }
+            self.notification_events.append(event)
+            if self.storage_repository:
+                self.storage_repository.save_notification_event(event)
         self._save_notification_events()
 
     def _load_notification_events(self) -> List[Dict[str, Any]]:

@@ -18,6 +18,7 @@ from src.notifier import Notifier
 from src.notifications.factory import build_notification_providers
 from src.orchestrator import SystemHealthChecker
 from src.scanner import SecurityScanner
+from src.storage import AegisNexRepository
 
 
 def setup_logging(log_dir: Path) -> None:
@@ -162,6 +163,7 @@ def main() -> int:
         subject=config.smtp.subject,
         logger=logging.getLogger("agentx.notifier"),
     )
+    storage_repository = AegisNexRepository(config.storage.database_path)
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
@@ -173,7 +175,9 @@ def main() -> int:
         incident_manager=IncidentManager(
             config.incidents.history_path,
             notification_providers=build_notification_providers(config),
+            storage_repository=storage_repository,
         ),
+        storage_repository=storage_repository,
         logger=logging.getLogger("agentx.guardian"),
     )
     agent.register_command("guardian", guardian)

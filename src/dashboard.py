@@ -16,6 +16,7 @@ from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
 from src.orchestrator import SystemHealthChecker
 from src.prometheus_exporter import PrometheusExporter
+from src.storage import AegisNexRepository
 
 try:
     from fastapi import Request as FastAPIRequest
@@ -35,6 +36,7 @@ class DashboardServices:
     incident_manager: IncidentManager
     guardian: Guardian
     restart_history_path: Path
+    storage_repository: Any | None = None
 
 
 def create_services(config_path: str | Path = "config.yaml") -> DashboardServices:
@@ -48,7 +50,11 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         client_timeout_seconds=config.docker.client_timeout_seconds,
         restart_timeout_seconds=config.docker.restart_timeout_seconds,
     )
-    incident_manager = IncidentManager(config.incidents.history_path)
+    storage_repository = AegisNexRepository(config.storage.database_path)
+    incident_manager = IncidentManager(
+        config.incidents.history_path,
+        storage_repository=storage_repository,
+    )
     health_checker = SystemHealthChecker(monitor=monitor, docker_scanner=docker_scanner)
     guardian = Guardian(
         health_checker=health_checker,
@@ -58,6 +64,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
         incident_manager=incident_manager,
+        storage_repository=storage_repository,
     )
     return DashboardServices(
         monitor=monitor,
@@ -65,6 +72,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         incident_manager=incident_manager,
         guardian=guardian,
         restart_history_path=Path(config.guardian.restart_history_path),
+        storage_repository=storage_repository,
     )
 
 
