@@ -125,19 +125,18 @@ class OperationalReporter:
                     SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_incidents,
                     SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
                 FROM incidents
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp >= ?
                 """,
-                _window_params(window),
+                _window_start_param(window),
             ).fetchone()
             recovery_rows = connection.execute(
                 """
                 SELECT timestamp, resolved_timestamp
                 FROM incidents
                 WHERE timestamp >= ?
-                    AND timestamp < ?
                     AND resolved_timestamp IS NOT NULL
                 """,
-                _window_params(window),
+                _window_start_param(window),
             ).fetchall()
 
         recovery_seconds = [
@@ -163,9 +162,9 @@ class OperationalReporter:
                     COUNT(*) AS total,
                     SUM(CASE WHEN successful = 1 THEN 1 ELSE 0 END) AS successful
                 FROM remediations
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp >= ?
                 """,
-                _window_params(window),
+                _window_start_param(window),
             ).fetchone()
         total = int(row["total"] or 0)
         successful = int(row["successful"] or 0)
@@ -184,9 +183,9 @@ class OperationalReporter:
                     COUNT(*) AS total,
                     SUM(CASE WHEN status IN ('ok', 'sent', 'success') THEN 1 ELSE 0 END) AS successful
                 FROM notifications
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp >= ?
                 """,
-                _window_params(window),
+                _window_start_param(window),
             ).fetchone()
         total = int(row["total"] or 0)
         successful = int(row["successful"] or 0)
@@ -205,12 +204,12 @@ class OperationalReporter:
                 """
                 SELECT service_name, COUNT(*) AS incident_count
                 FROM incidents
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp >= ?
                 GROUP BY service_name
                 ORDER BY incident_count DESC, service_name ASC
                 LIMIT ?
                 """,
-                (*_window_params(window), limit),
+                (*_window_start_param(window), limit),
             ).fetchall()
         return [
             {
@@ -232,9 +231,9 @@ class OperationalReporter:
                     MIN({column}) AS minimum,
                     MAX({column}) AS maximum
                 FROM metrics_snapshots
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp >= ?
                 """,
-                _window_params(window),
+                _window_start_param(window),
             ).fetchone()
         return {
             "average": round(float(row["average"] or 0.0), 2),
@@ -245,8 +244,8 @@ class OperationalReporter:
     def _service_health(
         self, window: ReportWindow, service_name: str | None = None
     ) -> list[dict[str, Any]]:
-        filters = ["timestamp >= ?", "timestamp < ?"]
-        params: list[Any] = list(_window_params(window))
+        filters = ["timestamp >= ?"]
+        params: list[Any] = list(_window_start_param(window))
         if service_name:
             filters.append("service_name = ?")
             params.append(service_name)
@@ -391,6 +390,10 @@ def _parse_timestamp(value: str) -> datetime:
 
 def _window_params(window: ReportWindow) -> tuple[str, str]:
     return (_format_timestamp(window.start), _format_timestamp(window.end))
+
+
+def _window_start_param(window: ReportWindow) -> tuple[str]:
+    return (_format_timestamp(window.start),)
 
 
 def _percentage(numerator: int, denominator: int) -> float:

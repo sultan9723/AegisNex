@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sqlite3
 
 from src.incidents import Incident
 from src.reporting import OperationalReporter
@@ -185,3 +186,150 @@ def test_empty_database_report_returns_zero_metrics(tmp_path: Path) -> None:
     assert report["summary"]["total_incidents"] == 0
     assert report["summary"]["auto_remediation_success_rate"] == 0.0
     assert report["trends"]["cpu"]["average"] == 0.0
+
+
+def test_weekly_report_counts_inserted_rows_with_future_clock_skew(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "aegisnex.db"
+    AegisNexRepository(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO incidents (
+                incident_id,
+                timestamp,
+                severity,
+                service_name,
+                incident_type,
+                description,
+                health_check_results,
+                remediation_attempted,
+                remediation_successful,
+                status,
+                resolved_timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "INC-FUTURE",
+                "2026-06-04T13:00:00Z",
+                "critical",
+                "api",
+                "container_status",
+                "api stopped",
+                "[]",
+                1,
+                1,
+                "resolved",
+                "2026-06-04T13:05:00Z",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO notifications (
+                timestamp,
+                event_type,
+                incident_id,
+                service_name,
+                provider,
+                status,
+                attempts,
+                message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-06-04T13:00:01Z",
+                "incident_created",
+                "INC-FUTURE",
+                "api",
+                "email",
+                "ok",
+                1,
+                "",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO remediations (
+                timestamp,
+                service_name,
+                action,
+                successful,
+                incident_id,
+                details
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-06-04T13:00:02Z",
+                "api",
+                "restart",
+                1,
+                "INC-FUTURE",
+                "{}",
+            ),
+        )
+
+    report = OperationalReporter(db_path).weekly_report(now=NOW)
+
+    assert report["summary"]["total_incidents"] == 1
+    assert report["summary"]["resolved_incidents"] == 1
+    assert report["summary"]["remediation_attempts"] == 1
+    assert report["summary"]["notification_attempts"] == 1
+    assert report["summary"]["average_recovery_seconds"] == 300.0
+
+
+def test_monthly_report_counts_inserted_rows_using_incident_timestamp_column(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "aegisnex.db"
+    AegisNexRepository(db_path)
+    with sqlite3.connect(db_path) as connection:
+        columns = [
+            row[1]
+            for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
+        ]
+        assert "timestamp" in columns
+        for incident_id, timestamp in (
+            ("INC-WEEKLY", "2026-06-03T12:00:00Z"),
+            ("INC-MONTHLY", "2026-05-20T12:00:00Z"),
+            ("INC-OLD", "2026-04-20T12:00:00Z"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO incidents (
+                    incident_id,
+                    timestamp,
+                    severity,
+                    service_name,
+                    incident_type,
+                    description,
+                    health_check_results,
+                    remediation_attempted,
+                    remediation_successful,
+                    status,
+                    resolved_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    incident_id,
+                    timestamp,
+                    "high",
+                    "api",
+                    "health_check_failed",
+                    "api failed",
+                    "[]",
+                    0,
+                    0,
+                    "active",
+                    None,
+                ),
+            )
+
+    reporter = OperationalReporter(db_path)
+
+    assert reporter.weekly_report(now=NOW)["summary"]["total_incidents"] == 1
+    assert reporter.monthly_report(now=NOW)["summary"]["total_incidents"] == 2
