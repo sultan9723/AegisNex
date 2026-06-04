@@ -1,7 +1,9 @@
 import json
 import logging
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
+import builtins
 
 import pytest
 
@@ -57,16 +59,63 @@ class FakeScanner:
         return {"status": "ok"}
 
 
+class FakeOperationalReporter:
+    exported = None
+
+    def __init__(self, database_path):
+        self.database_path = database_path
+
+    def weekly_report(self):
+        return {
+            "report_type": "weekly",
+            "summary": {"total_incidents": 1},
+        }
+
+    def monthly_report(self):
+        return {
+            "report_type": "monthly",
+            "summary": {"total_incidents": 2},
+        }
+
+    def export_report(self, report, output_path, report_format):
+        FakeOperationalReporter.exported = (report, output_path, report_format)
+        return output_path
+
+
 def patch_runtime(monkeypatch) -> None:
     monkeypatch.setattr(entrypoint, "setup_logging", lambda path: None)
     monkeypatch.setattr(entrypoint.Config, "load", lambda config_path: build_config())
-    monkeypatch.setattr(entrypoint, "AgentX", FakeAgent)
-    monkeypatch.setattr(entrypoint, "SystemResourceMonitor", lambda **kwargs: object())
-    monkeypatch.setattr(entrypoint, "DockerScanner", lambda **kwargs: SimpleNamespace(include_all=True))
-    monkeypatch.setattr(entrypoint, "SystemHealthChecker", lambda **kwargs: object())
-    monkeypatch.setattr(entrypoint, "Notifier", lambda **kwargs: object())
-    monkeypatch.setattr(entrypoint, "Guardian", lambda **kwargs: object())
-    monkeypatch.setattr(entrypoint, "SecurityScanner", FakeScanner)
+    monkeypatch.setattr(entrypoint, "OperationalReporter", FakeOperationalReporter)
+    monkeypatch.setattr(
+        entrypoint,
+        "run_monitor",
+        lambda config: _print_fake_command("monitor", "System resource usage:"),
+    )
+    monkeypatch.setattr(
+        entrypoint,
+        "run_docker_command",
+        lambda config, command_name, heading: _print_fake_command(command_name, heading),
+    )
+    monkeypatch.setattr(entrypoint, "run_scan", _fake_run_scan)
+    monkeypatch.setattr(entrypoint, "print_latest_report", _fake_print_latest_report)
+
+
+def _print_fake_command(command_name: str, heading: str) -> int:
+    print(heading)
+    print(json.dumps({"executed": command_name, "payload": {}}, indent=2))
+    return 0
+
+
+def _fake_run_scan(data_dir: str) -> int:
+    FakeScanner(data_dir).run_scan()
+    return 0
+
+
+def _fake_print_latest_report(data_dir: str, logger: logging.Logger) -> int:
+    return entrypoint.load_report(
+        Path(data_dir) / "unified_threat_matrix.json",
+        logger,
+    )
 
 
 def test_parse_args_accepts_config_path() -> None:
@@ -74,6 +123,22 @@ def test_parse_args_accepts_config_path() -> None:
 
     assert args.monitor is True
     assert args.config == "custom.yaml"
+
+
+def test_parse_args_accepts_operational_report_options() -> None:
+    args = entrypoint.parse_args(
+        [
+            "--weekly-report",
+            "--report-format",
+            "csv",
+            "--output-dir",
+            "out",
+        ]
+    )
+
+    assert args.weekly_report is True
+    assert args.report_format == "csv"
+    assert args.output_dir == "out"
 
 
 def test_load_report_prints_existing_report(tmp_path: Path, capsys) -> None:
@@ -138,6 +203,66 @@ def test_main_report_loads_scanner_output(monkeypatch, tmp_path: Path, capsys) -
 
     assert entrypoint.main() == 0
     assert "example.org" in capsys.readouterr().out
+
+
+def test_main_generates_operational_report(monkeypatch, tmp_path: Path, capsys) -> None:
+    patch_runtime(monkeypatch)
+    FakeOperationalReporter.exported = None
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "entrypoint.py",
+            "--weekly-report",
+            "--report-format",
+            "pdf",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert entrypoint.main() == 0
+    output = capsys.readouterr().out
+    assert "Wrote weekly operational report" in output
+    assert '"total_incidents": 1' in output
+    assert FakeOperationalReporter.exported[2] == "pdf"
+
+
+def test_operational_report_does_not_import_docker(monkeypatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    original_import = builtins.__import__
+
+    def fail_on_docker_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"docker", "src.docker_scanner"}:
+            raise ModuleNotFoundError("No module named 'docker'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_on_docker_import)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "entrypoint.py",
+            "--weekly-report",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert entrypoint.main() == 0
+
+
+def test_entrypoint_import_does_not_require_docker(monkeypatch) -> None:
+    original_import = builtins.__import__
+
+    def fail_on_docker_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name in {"docker", "src.docker_scanner"}:
+            raise ModuleNotFoundError("No module named 'docker'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_on_docker_import)
+
+    reloaded_entrypoint = importlib.reload(entrypoint)
+
+    assert reloaded_entrypoint.parse_args(["--weekly-report"]).weekly_report is True
 
 
 def test_main_returns_error_when_config_validation_fails(monkeypatch) -> None:

@@ -1,0 +1,24 @@
+section,metric,value
+metadata,report_type,weekly
+metadata,generated_at,2026-06-04T13:53:26.451761Z
+window,start,2026-05-28T13:53:26.451761Z
+window,end,2026-06-04T13:53:26.451761Z
+window,label,Last 7 days
+summary,total_incidents,0
+summary,active_incidents,0
+summary,resolved_incidents,0
+summary,average_recovery_seconds,0.0
+summary,remediation_attempts,0
+summary,successful_remediations,0
+summary,failed_remediations,0
+summary,auto_remediation_success_rate,0.0
+summary,notification_attempts,0
+summary,successful_notifications,0
+summary,failed_notifications,0
+summary,notification_success_rate,0.0
+trend.cpu,average,0.0
+trend.cpu,minimum,0.0
+trend.cpu,maximum,0.0
+trend.memory,average,0.0
+trend.memory,minimum,0.0
+trend.memory,maximum,0.0
