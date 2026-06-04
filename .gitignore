@@ -23,3 +23,8 @@ __pycache__/
 restart_history.json
 incident_history.json
 logs/
+notification_history.json
+restart_history.json
+incident_history.json
+.coverage
+logs/

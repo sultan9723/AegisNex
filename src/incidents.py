@@ -55,10 +55,13 @@ class IncidentManager:
         self,
         history_path: str | Path = "incident_history.json",
         notification_providers: Optional[List[NotificationProvider]] = None,
+        notification_history_path: str | Path = "notification_history.json",
     ) -> None:
         self.history_path = Path(history_path)
+        self.notification_history_path = Path(notification_history_path)
         self.notification_providers = notification_providers or []
         self.incidents: List[Incident] = self._load_incidents()
+        self.notification_events: List[Dict[str, Any]] = self._load_notification_events()
 
     def create_incident(
         self,
@@ -138,6 +141,9 @@ class IncidentManager:
     def get_active_incidents(self) -> List[Incident]:
         return [incident for incident in self.incidents if incident.status == "active"]
 
+    def list_notification_events(self) -> List[Dict[str, Any]]:
+        return list(self.notification_events)
+
     def _find_active(self, service_name: str, incident_type: str) -> Optional[Incident]:
         for incident in self.get_active_incidents():
             if (
@@ -182,13 +188,60 @@ class IncidentManager:
         )
 
     def _notify_created(self, incident: Incident) -> List[NotificationResult]:
-        return [
+        results = [
             provider.notify_incident_created(incident)
             for provider in self.notification_providers
         ]
+        self._record_notification_results("incident_created", incident, results)
+        return results
 
     def _notify_resolved(self, incident: Incident) -> List[NotificationResult]:
-        return [
+        results = [
             provider.notify_incident_resolved(incident)
             for provider in self.notification_providers
         ]
+        self._record_notification_results("incident_resolved", incident, results)
+        return results
+
+    def _record_notification_results(
+        self,
+        event_type: str,
+        incident: Incident,
+        results: List[NotificationResult],
+    ) -> None:
+        if not results:
+            return
+        for result in results:
+            self.notification_events.append(
+                {
+                    "timestamp": utc_timestamp(),
+                    "event_type": event_type,
+                    "incident_id": incident.incident_id,
+                    "service_name": incident.service_name,
+                    "provider": result.provider,
+                    "status": result.status,
+                    "attempts": result.attempts,
+                    "message": result.message,
+                }
+            )
+        self._save_notification_events()
+
+    def _load_notification_events(self) -> List[Dict[str, Any]]:
+        if not self.notification_history_path.exists():
+            return []
+        try:
+            payload = json.loads(
+                self.notification_history_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [event for event in payload if isinstance(event, dict)]
+
+    def _save_notification_events(self) -> None:
+        self.notification_history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.notification_history_path.write_text(
+            json.dumps(self.notification_events, indent=2),
+            encoding="utf-8",
+        )
