@@ -1,26 +1,47 @@
 {
   "report_type": "weekly",
-  "generated_at": "2026-06-04T13:53:10.738732Z",
+  "generated_at": "2026-06-04T14:21:50.839064Z",
   "window": {
-    "start": "2026-05-28T13:53:10.738732Z",
-    "end": "2026-06-04T13:53:10.738732Z",
+    "start": "2026-05-28T14:21:50.839064Z",
+    "end": "2026-06-04T14:21:50.839064Z",
     "label": "Last 7 days"
   },
   "summary": {
-    "total_incidents": 0,
-    "active_incidents": 0,
-    "resolved_incidents": 0,
-    "average_recovery_seconds": 0.0,
-    "remediation_attempts": 0,
-    "successful_remediations": 0,
+    "total_incidents": 7,
+    "active_incidents": 3,
+    "resolved_incidents": 4,
+    "average_recovery_seconds": 51.64,
+    "remediation_attempts": 13,
+    "successful_remediations": 13,
     "failed_remediations": 0,
-    "auto_remediation_success_rate": 0.0,
-    "notification_attempts": 0,
+    "auto_remediation_success_rate": 100.0,
+    "notification_attempts": 33,
     "successful_notifications": 0,
-    "failed_notifications": 0,
+    "failed_notifications": 33,
     "notification_success_rate": 0.0
   },
-  "top_failing_services": [],
+  "top_failing_services": [
+    {
+      "service_name": "deploy-app_audit-1",
+      "incident_count": 2
+    },
+    {
+      "service_name": "deploy-network_recon-1",
+      "incident_count": 2
+    },
+    {
+      "service_name": "aegis-failing",
+      "incident_count": 1
+    },
+    {
+      "service_name": "aegis-nginx",
+      "incident_count": 1
+    },
+    {
+      "service_name": "aegis-redis",
+      "incident_count": 1
+    }
+  ],
   "trends": {
     "cpu": {
       "average": 0.0,
