@@ -1,0 +1,43 @@
+{
+  "uid": "aegisnex-incidents",
+  "title": "AegisNex Incidents",
+  "tags": ["aegisnex", "incidents"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Incidents",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_incidents_active"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Resolved Incidents",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_incidents_resolved"}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Incidents",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_incidents_total"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Incident Trends",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {"refId": "A", "expr": "aegisnex_incidents_active", "legendFormat": "active"},
+        {"refId": "B", "expr": "aegisnex_incidents_resolved", "legendFormat": "resolved"},
+        {"refId": "C", "expr": "aegisnex_incidents_total", "legendFormat": "total"}
+      ]
+    }
+  ]
+}
