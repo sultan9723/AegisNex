@@ -1,0 +1,44 @@
+monitoring:
+  cpu_interval_seconds: 0.1
+  watchdog_interval_seconds: 300
+  thresholds:
+    cpu_percent: 90
+    memory_percent: 90
+    disk_percent: 90
+
+docker:
+  include_all: true
+  client_timeout_seconds: 10
+  restart_timeout_seconds: 10
+
+guardian:
+  restart_cooldown_seconds: 300
+  max_restart_attempts: 3
+  restart_history_path: restart_history.json
+
+incidents:
+  history_path: incident_history.json
+
+health_checks:
+  docker:
+    enabled: true
+  http:
+    enabled: false
+    timeout_seconds: 5
+    expected_status: 200
+    endpoints:
+  tcp:
+    enabled: false
+    timeout_seconds: 5
+    targets:
+
+smtp:
+  enabled: false
+  host: smtp.gmail.com
+  port: 587
+  timeout_seconds: 10
+  starttls: true
+  username: ""
+  password: ""
+  recipient: ""
+  subject: AegisNex Alert

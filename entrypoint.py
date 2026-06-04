@@ -8,8 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from src.agent import AgentX
+from src.config import Config, ConfigError
 from src.docker_scanner import DockerScanner
 from src.guardian import Guardian
+from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
+from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
 from src.orchestrator import SystemHealthChecker
@@ -76,6 +79,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="data",
         help="Directory containing telemetry JSON files",
     )
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="Path to AegisNex YAML configuration",
+    )
     return parser.parse_args(argv)
 
 
@@ -89,15 +97,51 @@ def load_report(output_path: Path, logger: logging.Logger) -> int:
     return 0
 
 
+def build_health_checks(config: Config, docker_scanner: DockerScanner) -> list[Any]:
+    health_checks: list[Any] = []
+    if config.health_checks.docker.enabled:
+        health_checks.append(DockerHealthCheck(docker_scanner=docker_scanner))
+    if config.health_checks.http.enabled:
+        health_checks.append(
+            HttpHealthCheck(
+                endpoints=config.health_checks.http.endpoints,
+                timeout_seconds=config.health_checks.http.timeout_seconds,
+                expected_status=config.health_checks.http.expected_status,
+            )
+        )
+    if config.health_checks.tcp.enabled:
+        health_checks.append(
+            TcpHealthCheck(
+                targets=config.health_checks.tcp.targets,
+                timeout_seconds=config.health_checks.tcp.timeout_seconds,
+            )
+        )
+    return health_checks
+
+
 def main() -> int:
     args = parse_args()
     setup_logging(Path("logs"))
     logger = logging.getLogger("entrypoint")
+    try:
+        config = Config.load(args.config)
+    except ConfigError as exc:
+        logger.error("Configuration validation failed: %s", exc)
+        return 1
 
     agent = AgentX(logger=logging.getLogger("agentx"))
-    monitor = SystemResourceMonitor(logger=logging.getLogger("agentx.monitor"))
+    monitor = SystemResourceMonitor(
+        logger=logging.getLogger("agentx.monitor"),
+        cpu_interval_seconds=config.monitoring.cpu_interval_seconds,
+        thresholds=config.monitoring.thresholds,
+    )
     agent.register_command("monitor", monitor)
-    docker_scanner = DockerScanner(logger=logging.getLogger("agentx.docker"))
+    docker_scanner = DockerScanner(
+        logger=logging.getLogger("agentx.docker"),
+        include_all=config.docker.include_all,
+        client_timeout_seconds=config.docker.client_timeout_seconds,
+        restart_timeout_seconds=config.docker.restart_timeout_seconds,
+    )
     agent.register_command("docker", docker_scanner)
     health_checker = SystemHealthChecker(
         monitor=monitor,
@@ -105,11 +149,27 @@ def main() -> int:
         logger=logging.getLogger("agentx.health"),
     )
     agent.register_command("health", health_checker)
-    notifier = Notifier(logger=logging.getLogger("agentx.notifier"))
+    notifier = Notifier(
+        enabled=config.smtp.enabled,
+        smtp_host=config.smtp.host,
+        smtp_port=config.smtp.port,
+        smtp_timeout_seconds=config.smtp.timeout_seconds,
+        starttls=config.smtp.starttls,
+        email_user=config.smtp.username,
+        email_pass=config.smtp.password,
+        email_to=config.smtp.recipient,
+        subject=config.smtp.subject,
+        logger=logging.getLogger("agentx.notifier"),
+    )
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
         notifier=notifier,
+        restart_cooldown_seconds=config.guardian.restart_cooldown_seconds,
+        max_restart_attempts=config.guardian.max_restart_attempts,
+        restart_history_path=config.guardian.restart_history_path,
+        health_checks=build_health_checks(config, docker_scanner),
+        incident_manager=IncidentManager(config.incidents.history_path),
         logger=logging.getLogger("agentx.guardian"),
     )
     agent.register_command("guardian", guardian)
