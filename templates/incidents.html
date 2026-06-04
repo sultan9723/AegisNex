@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Incidents{% endblock %}
+{% block content %}
+<section class="page-header">
+  <h1>Incidents</h1>
+  <span>{{ active_incidents | length }} active</span>
+</section>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Incident ID</th>
+        <th>Severity</th>
+        <th>Service</th>
+        <th>Status</th>
+        <th>Created timestamp</th>
+        <th>Resolved timestamp</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for incident in active_incidents + resolved_incidents %}
+      <tr>
+        <td>{{ incident.incident_id }}</td>
+        <td>{{ incident.severity }}</td>
+        <td>{{ incident.service_name }}</td>
+        <td>{{ incident.status }}</td>
+        <td>{{ incident.timestamp }}</td>
+        <td>{{ incident.resolved_timestamp or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

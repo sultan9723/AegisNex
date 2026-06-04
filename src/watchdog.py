@@ -15,6 +15,7 @@ from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
 from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
+from src.notifications.factory import build_notification_providers
 from src.orchestrator import SystemHealthChecker
 
 
@@ -107,7 +108,10 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
         health_checks=build_health_checks(config, docker_scanner),
-        incident_manager=IncidentManager(config.incidents.history_path),
+        incident_manager=IncidentManager(
+            config.incidents.history_path,
+            notification_providers=build_notification_providers(config),
+        ),
         logger=guardian_logger,
     )
 

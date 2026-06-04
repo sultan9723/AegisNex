@@ -1,5 +1,6 @@
 import sys
 import types
+import logging
 from pathlib import Path
 
 from src.monitor import SystemResourceMonitor
@@ -13,6 +14,7 @@ def test_get_stats_returns_cpu_and_ram(tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.setitem(sys.modules, "psutil", dummy_psutil)
 
+    logging.getLogger("agentx.monitor").handlers.clear()
     log_path = tmp_path / "agentx.log"
     monitor = SystemResourceMonitor(log_file=str(log_path))
 

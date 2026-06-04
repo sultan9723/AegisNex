@@ -13,6 +13,7 @@
 .venv/
 __pycache__/
 *.pyc
+.coverage
 
 # Ignore system/IDE files
 .DS_Store

@@ -1,3 +1,7 @@
 docker
+fastapi
+httpx
+jinja2
 psutil
 pytest
+uvicorn

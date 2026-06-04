@@ -15,6 +15,7 @@ from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
 from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
+from src.notifications.factory import build_notification_providers
 from src.orchestrator import SystemHealthChecker
 from src.scanner import SecurityScanner
 
@@ -169,7 +170,10 @@ def main() -> int:
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
         health_checks=build_health_checks(config, docker_scanner),
-        incident_manager=IncidentManager(config.incidents.history_path),
+        incident_manager=IncidentManager(
+            config.incidents.history_path,
+            notification_providers=build_notification_providers(config),
+        ),
         logger=logging.getLogger("agentx.guardian"),
     )
     agent.register_command("guardian", guardian)

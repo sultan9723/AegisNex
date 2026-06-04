@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Actions{% endblock %}
+{% block content %}
+<section class="page-header">
+  <h1>Remediation Actions</h1>
+  <span>{{ actions | length }} recorded</span>
+</section>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Service</th>
+        <th>Action</th>
+        <th>Successful</th>
+        <th>Incident ID</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for action in actions %}
+      <tr>
+        <td>{{ action.timestamp }}</td>
+        <td>{{ action.service_name }}</td>
+        <td>{{ action.action }}</td>
+        <td>{{ action.successful }}</td>
+        <td>{{ action.incident_id }}</td>
+        <td>{{ action.source }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

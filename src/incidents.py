@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from src.notifications.base import NotificationProvider, NotificationResult
+
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -49,8 +51,13 @@ class Incident:
 
 
 class IncidentManager:
-    def __init__(self, history_path: str | Path = "incident_history.json") -> None:
+    def __init__(
+        self,
+        history_path: str | Path = "incident_history.json",
+        notification_providers: Optional[List[NotificationProvider]] = None,
+    ) -> None:
         self.history_path = Path(history_path)
+        self.notification_providers = notification_providers or []
         self.incidents: List[Incident] = self._load_incidents()
 
     def create_incident(
@@ -84,6 +91,7 @@ class IncidentManager:
         )
         self.incidents.append(incident)
         self._save_incidents()
+        self._notify_created(incident)
         return incident
 
     def update_incident(self, incident_id: str, **updates: Any) -> Incident:
@@ -108,6 +116,7 @@ class IncidentManager:
         incident.status = "resolved"
         incident.resolved_timestamp = utc_timestamp()
         self._save_incidents()
+        self._notify_resolved(incident)
         return incident
 
     def resolve_service_incidents(self, service_name: str) -> List[Incident]:
@@ -119,6 +128,8 @@ class IncidentManager:
                 resolved.append(incident)
         if resolved:
             self._save_incidents()
+            for incident in resolved:
+                self._notify_resolved(incident)
         return resolved
 
     def list_incidents(self) -> List[Incident]:
@@ -169,3 +180,15 @@ class IncidentManager:
             ),
             encoding="utf-8",
         )
+
+    def _notify_created(self, incident: Incident) -> List[NotificationResult]:
+        return [
+            provider.notify_incident_created(incident)
+            for provider in self.notification_providers
+        ]
+
+    def _notify_resolved(self, incident: Incident) -> List[NotificationResult]:
+        return [
+            provider.notify_incident_resolved(incident)
+            for provider in self.notification_providers
+        ]

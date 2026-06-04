@@ -73,6 +73,21 @@ Run background watchdog (continuous):
 python -m src.watchdog
 ```
 
+### 6) Run the dashboard
+Install dashboard dependencies from `requirements.txt`, then start FastAPI with
+Uvicorn:
+
+```bash
+uvicorn src.dashboard:create_app --factory --host 0.0.0.0 --port 8000
+```
+
+Dashboard routes:
+
+- `/` - Operational overview with CPU, memory, disk, network, containers, and incident counts.
+- `/containers` - Container status, Docker health, restart count, and last check timestamp.
+- `/incidents` - Active and resolved incident history.
+- `/actions` - Remediation action history from incidents and restart tracking.
+
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).
 - Keep logs under version control exclusion (already handled in `.gitignore`).
@@ -125,6 +140,53 @@ Example:
   "resolved_timestamp": null
 }
 ```
+
+## Notification Providers
+AegisNex can notify on incident creation and resolution through configured
+providers in `config.yaml`.
+
+Supported providers:
+
+- Email
+- Slack webhook
+- Discord webhook
+
+Each provider supports enable/disable, retry attempts, retry delay, timeout, and
+custom message templates.
+
+Example:
+
+```yaml
+notifications:
+  email:
+    enabled: true
+    retry_attempts: 2
+    retry_delay_seconds: 1
+    timeout_seconds: 10
+    host: smtp.gmail.com
+    port: 587
+    starttls: true
+    username: ""
+    password: ""
+    sender: ""
+    recipient: ops@example.com
+    subject: AegisNex Incident
+    message_template: "[{severity}] {service_name}: {description} ({incident_id})"
+    resolution_template: "[RESOLVED] {service_name}: {description} ({incident_id})"
+  slack:
+    enabled: true
+    webhook_url: https://hooks.slack.com/services/...
+    retry_attempts: 2
+    retry_delay_seconds: 1
+    timeout_seconds: 10
+  discord:
+    enabled: false
+    webhook_url: https://discord.com/api/webhooks/...
+```
+
+Secrets can also be supplied with environment variables such as
+`NOTIFY_EMAIL_USERNAME`, `NOTIFY_EMAIL_PASSWORD`, `SLACK_WEBHOOK_URL`, and
+`DISCORD_WEBHOOK_URL`.
 
 ## Suggestions & Improvements
 - Add log rotation and alert rate limiting policies per container.

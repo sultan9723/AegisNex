@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Dashboard{% endblock %}
+{% block content %}
+<section class="page-header">
+  <h1>Dashboard</h1>
+  <span>Last check: {{ timestamp }}</span>
+</section>
+
+<section class="metric-grid">
+  <article class="metric"><span>CPU</span><strong>{{ metrics.cpu_percent | default("n/a") }}%</strong></article>
+  <article class="metric"><span>Memory</span><strong>{{ metrics.ram_percent | default("n/a") }}%</strong></article>
+  <article class="metric"><span>Disk</span><strong>{{ metrics.disk_percent | default("n/a") }}%</strong></article>
+  <article class="metric"><span>Running Containers</span><strong>{{ running_containers | length }}</strong></article>
+</section>
+
+<section class="content-grid">
+  <article>
+    <h2>Network</h2>
+    <dl class="stats">
+      <dt>Bytes sent</dt><dd>{{ network.bytes_sent | default("n/a") }}</dd>
+      <dt>Bytes received</dt><dd>{{ network.bytes_recv | default("n/a") }}</dd>
+      <dt>Packets sent</dt><dd>{{ network.packets_sent | default("n/a") }}</dd>
+      <dt>Packets received</dt><dd>{{ network.packets_recv | default("n/a") }}</dd>
+    </dl>
+  </article>
+  <article>
+    <h2>Incidents</h2>
+    <dl class="stats">
+      <dt>Active</dt><dd>{{ active_incidents | length }}</dd>
+      <dt>Resolved</dt><dd>{{ resolved_incidents | length }}</dd>
+    </dl>
+  </article>
+</section>
+{% endblock %}

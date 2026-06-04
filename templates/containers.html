@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Containers{% endblock %}
+{% block content %}
+<section class="page-header">
+  <h1>Containers</h1>
+  <span>Last check: {{ timestamp }}</span>
+</section>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Container name</th>
+        <th>Status</th>
+        <th>Health status</th>
+        <th>Restart count</th>
+        <th>Last check timestamp</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for container in containers %}
+      <tr>
+        <td>{{ container.name }}</td>
+        <td>{{ container.status }}</td>
+        <td>{{ container.health_status }}</td>
+        <td>{{ container.restart_count }}</td>
+        <td>{{ container.last_check_timestamp }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

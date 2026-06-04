@@ -73,6 +73,40 @@ class IncidentConfig:
 
 
 @dataclass(frozen=True)
+class NotificationProviderConfig:
+    enabled: bool
+    retry_attempts: int
+    retry_delay_seconds: float
+    timeout_seconds: int
+    message_template: str
+    resolution_template: str
+
+
+@dataclass(frozen=True)
+class EmailNotificationConfig(NotificationProviderConfig):
+    host: str
+    port: int
+    starttls: bool
+    username: str
+    password: str
+    sender: str
+    recipient: str
+    subject: str
+
+
+@dataclass(frozen=True)
+class WebhookNotificationConfig(NotificationProviderConfig):
+    webhook_url: str
+
+
+@dataclass(frozen=True)
+class NotificationsConfig:
+    email: EmailNotificationConfig
+    slack: WebhookNotificationConfig
+    discord: WebhookNotificationConfig
+
+
+@dataclass(frozen=True)
 class SMTPConfig:
     enabled: bool
     host: str
@@ -91,6 +125,7 @@ class Config:
     docker: DockerConfig
     guardian: GuardianConfig
     incidents: IncidentConfig
+    notifications: NotificationsConfig
     health_checks: HealthChecksConfig
     smtp: SMTPConfig
 
@@ -121,6 +156,10 @@ class Config:
         docker_raw = _section(raw, "docker")
         guardian_raw = _section(raw, "guardian")
         incidents_raw = _section(raw, "incidents")
+        notifications_raw = _section(raw, "notifications")
+        notification_email_raw = _section(notifications_raw, "email")
+        notification_slack_raw = _section(notifications_raw, "slack")
+        notification_discord_raw = _section(notifications_raw, "discord")
         health_checks_raw = _section(raw, "health_checks")
         docker_health_raw = _section(health_checks_raw, "docker")
         http_health_raw = _section(health_checks_raw, "http")
@@ -181,6 +220,56 @@ class Config:
                 history_path=_str(
                     incidents_raw, "history_path", "incident_history.json"
                 )
+            ),
+            notifications=NotificationsConfig(
+                email=EmailNotificationConfig(
+                    **_notification_base(notification_email_raw),
+                    host=_env_str(
+                        "NOTIFY_EMAIL_HOST",
+                        _str(notification_email_raw, "host", "smtp.gmail.com"),
+                    ),
+                    port=_env_int(
+                        "NOTIFY_EMAIL_PORT", _int(notification_email_raw, "port", 587)
+                    ),
+                    starttls=_env_bool(
+                        "NOTIFY_EMAIL_STARTTLS",
+                        _bool(notification_email_raw, "starttls", True),
+                    ),
+                    username=_env_str(
+                        "NOTIFY_EMAIL_USERNAME",
+                        _str(notification_email_raw, "username", ""),
+                    ),
+                    password=_env_str(
+                        "NOTIFY_EMAIL_PASSWORD",
+                        _str(notification_email_raw, "password", ""),
+                    ),
+                    sender=_env_str(
+                        "NOTIFY_EMAIL_SENDER",
+                        _str(notification_email_raw, "sender", ""),
+                    ),
+                    recipient=_env_str(
+                        "NOTIFY_EMAIL_RECIPIENT",
+                        _str(notification_email_raw, "recipient", ""),
+                    ),
+                    subject=_env_str(
+                        "NOTIFY_EMAIL_SUBJECT",
+                        _str(notification_email_raw, "subject", "AegisNex Incident"),
+                    ),
+                ),
+                slack=WebhookNotificationConfig(
+                    **_notification_base(notification_slack_raw),
+                    webhook_url=_env_str(
+                        "SLACK_WEBHOOK_URL",
+                        _str(notification_slack_raw, "webhook_url", ""),
+                    ),
+                ),
+                discord=WebhookNotificationConfig(
+                    **_notification_base(notification_discord_raw),
+                    webhook_url=_env_str(
+                        "DISCORD_WEBHOOK_URL",
+                        _str(notification_discord_raw, "webhook_url", ""),
+                    ),
+                ),
             ),
             health_checks=HealthChecksConfig(
                 docker=DockerHealthCheckConfig(
@@ -252,6 +341,7 @@ class Config:
             raise ConfigError("guardian.restart_history_path cannot be empty.")
         if not self.incidents.history_path.strip():
             raise ConfigError("incidents.history_path cannot be empty.")
+        self._validate_notifications()
         _require_positive_int(
             self.health_checks.http.timeout_seconds,
             "health_checks.http.timeout_seconds",
@@ -302,6 +392,42 @@ class Config:
                     "SMTP is enabled but required values are missing: "
                     + ", ".join(missing)
                 )
+
+    def _validate_notifications(self) -> None:
+        for name, provider in (
+            ("notifications.email", self.notifications.email),
+            ("notifications.slack", self.notifications.slack),
+            ("notifications.discord", self.notifications.discord),
+        ):
+            _require_positive_int(provider.retry_attempts, f"{name}.retry_attempts")
+            if provider.retry_delay_seconds < 0:
+                raise ConfigError(f"{name}.retry_delay_seconds cannot be negative.")
+            _require_positive_int(provider.timeout_seconds, f"{name}.timeout_seconds")
+            if not provider.message_template.strip():
+                raise ConfigError(f"{name}.message_template cannot be empty.")
+            if not provider.resolution_template.strip():
+                raise ConfigError(f"{name}.resolution_template cannot be empty.")
+        if self.notifications.email.enabled:
+            missing = [
+                field
+                for field, value in (
+                    ("host", self.notifications.email.host),
+                    ("username", self.notifications.email.username),
+                    ("password", self.notifications.email.password),
+                    ("recipient", self.notifications.email.recipient),
+                )
+                if not str(value).strip()
+            ]
+            if missing:
+                raise ConfigError(
+                    "notifications.email enabled but missing: " + ", ".join(missing)
+                )
+            if self.notifications.email.port < 1 or self.notifications.email.port > 65535:
+                raise ConfigError("notifications.email.port must be between 1 and 65535.")
+        if self.notifications.slack.enabled and not self.notifications.slack.webhook_url.strip():
+            raise ConfigError("notifications.slack.webhook_url cannot be empty when enabled.")
+        if self.notifications.discord.enabled and not self.notifications.discord.webhook_url.strip():
+            raise ConfigError("notifications.discord.webhook_url cannot be empty when enabled.")
 
 
 def load_env_file(env_path: str | Path = ".env") -> None:
@@ -390,6 +516,25 @@ def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 def _str_map(raw: Mapping[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in raw.items()}
+
+
+def _notification_base(raw: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": _bool(raw, "enabled", False),
+        "retry_attempts": _int(raw, "retry_attempts", 1),
+        "retry_delay_seconds": _float(raw, "retry_delay_seconds", 0),
+        "timeout_seconds": _int(raw, "timeout_seconds", 10),
+        "message_template": _str(
+            raw,
+            "message_template",
+            "[{severity}] {service_name}: {description} ({incident_id})",
+        ),
+        "resolution_template": _str(
+            raw,
+            "resolution_template",
+            "[RESOLVED] {service_name}: {description} ({incident_id})",
+        ),
+    }
 
 
 def _str(raw: Mapping[str, Any], key: str, default: str) -> str:
