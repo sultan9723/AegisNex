@@ -17,6 +17,7 @@ from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
 from src.notifications.factory import build_notification_providers
 from src.orchestrator import SystemHealthChecker
+from src.storage import AegisNexRepository
 
 
 def setup_logging(log_path: Path) -> RotatingFileHandler:
@@ -100,6 +101,7 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
         subject=config.smtp.subject,
         logger=notifier_logger,
     )
+    storage_repository = AegisNexRepository(config.storage.database_path)
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
@@ -111,7 +113,9 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
         incident_manager=IncidentManager(
             config.incidents.history_path,
             notification_providers=build_notification_providers(config),
+            storage_repository=storage_repository,
         ),
+        storage_repository=storage_repository,
         logger=guardian_logger,
     )
 

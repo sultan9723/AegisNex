@@ -8,6 +8,7 @@
 
 # Ignore logs
 *.log
+*.db
 
 # Ignore Python virtual environments/cache
 .venv/

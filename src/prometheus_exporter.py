@@ -26,6 +26,9 @@ class PrometheusExporter:
         metrics.update(self._collect_incident_metrics())
         metrics.update(self._collect_remediation_metrics())
         metrics.update(self._collect_notification_metrics())
+        storage_repository = getattr(self.services, "storage_repository", None)
+        if storage_repository:
+            storage_repository.save_metrics_snapshot(metrics)
         return MetricSnapshot(values=metrics)
 
     def render(self) -> tuple[bytes, str]:

@@ -19,6 +19,9 @@ guardian:
 incidents:
   history_path: incident_history.json
 
+storage:
+  database_path: aegisnex.db
+
 notifications:
   email:
     enabled: false

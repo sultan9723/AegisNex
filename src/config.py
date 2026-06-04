@@ -73,6 +73,11 @@ class IncidentConfig:
 
 
 @dataclass(frozen=True)
+class StorageConfig:
+    database_path: str
+
+
+@dataclass(frozen=True)
 class NotificationProviderConfig:
     enabled: bool
     retry_attempts: int
@@ -125,6 +130,7 @@ class Config:
     docker: DockerConfig
     guardian: GuardianConfig
     incidents: IncidentConfig
+    storage: StorageConfig
     notifications: NotificationsConfig
     health_checks: HealthChecksConfig
     smtp: SMTPConfig
@@ -156,6 +162,7 @@ class Config:
         docker_raw = _section(raw, "docker")
         guardian_raw = _section(raw, "guardian")
         incidents_raw = _section(raw, "incidents")
+        storage_raw = _section(raw, "storage")
         notifications_raw = _section(raw, "notifications")
         notification_email_raw = _section(notifications_raw, "email")
         notification_slack_raw = _section(notifications_raw, "slack")
@@ -220,6 +227,9 @@ class Config:
                 history_path=_str(
                     incidents_raw, "history_path", "incident_history.json"
                 )
+            ),
+            storage=StorageConfig(
+                database_path=_str(storage_raw, "database_path", "aegisnex.db")
             ),
             notifications=NotificationsConfig(
                 email=EmailNotificationConfig(
@@ -341,6 +351,8 @@ class Config:
             raise ConfigError("guardian.restart_history_path cannot be empty.")
         if not self.incidents.history_path.strip():
             raise ConfigError("incidents.history_path cannot be empty.")
+        if not self.storage.database_path.strip():
+            raise ConfigError("storage.database_path cannot be empty.")
         self._validate_notifications()
         _require_positive_int(
             self.health_checks.http.timeout_seconds,

@@ -61,6 +61,7 @@ smtp:
     assert config.guardian.max_restart_attempts == 3
     assert config.guardian.restart_history_path == "restart_history.json"
     assert config.incidents.history_path == "incident_history.json"
+    assert config.storage.database_path == "aegisnex.db"
     assert config.smtp.enabled is True
     assert config.smtp.username == "env-user"
     assert config.smtp.password == "env-pass"
