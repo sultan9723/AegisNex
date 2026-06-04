@@ -1,0 +1,43 @@
+{
+  "uid": "aegisnex-containers",
+  "title": "AegisNex Containers",
+  "tags": ["aegisnex", "containers"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Running Containers",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_containers_running"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Stopped Containers",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_containers_stopped"}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Unhealthy Containers",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_containers_unhealthy"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Container State Trends",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {"refId": "A", "expr": "aegisnex_containers_running", "legendFormat": "running"},
+        {"refId": "B", "expr": "aegisnex_containers_stopped", "legendFormat": "stopped"},
+        {"refId": "C", "expr": "aegisnex_containers_unhealthy", "legendFormat": "unhealthy"}
+      ]
+    }
+  ]
+}

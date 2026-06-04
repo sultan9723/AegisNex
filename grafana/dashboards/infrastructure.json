@@ -1,0 +1,46 @@
+{
+  "uid": "aegisnex-infrastructure",
+  "title": "AegisNex Infrastructure",
+  "tags": ["aegisnex", "infrastructure"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "CPU Usage",
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_system_cpu_usage_percent"}],
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Memory Usage",
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_system_memory_usage_percent"}],
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Disk Usage",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_system_disk_usage_percent"}],
+      "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Network Throughput",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {"refId": "A", "expr": "rate(aegisnex_system_network_bytes_sent[5m])", "legendFormat": "bytes sent/s"},
+        {"refId": "B", "expr": "rate(aegisnex_system_network_bytes_received[5m])", "legendFormat": "bytes received/s"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}
+    }
+  ]
+}

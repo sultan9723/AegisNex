@@ -1,4 +1,24 @@
-nginx
-redis
-postgres
-failing-service
+services:
+  nginx:
+    image: nginx:latest
+    container_name: aegis-nginx
+    ports:
+      - "8080:80"
+
+  redis:
+    image: redis:latest
+    container_name: aegis-redis
+
+  postgres:
+    image: postgres:16
+    container_name: aegis-postgres
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis
+      POSTGRES_DB: aegisdb
+
+  failing-service:
+    image: alpine:latest
+    container_name: aegis-failing
+    command: ["sh", "-c", "sleep 20 && exit 1"]
+    restart: "no"

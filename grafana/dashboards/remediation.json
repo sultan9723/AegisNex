@@ -1,0 +1,43 @@
+{
+  "uid": "aegisnex-remediation",
+  "title": "AegisNex Remediation",
+  "tags": ["aegisnex", "remediation"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Restart Attempts",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_remediation_restart_attempts_total"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Successful Restarts",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_remediation_successful_restarts_total"}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failed Restarts",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"refId": "A", "expr": "aegisnex_remediation_failed_restarts_total"}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Remediation Trends",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 8},
+      "targets": [
+        {"refId": "A", "expr": "aegisnex_remediation_restart_attempts_total", "legendFormat": "attempts"},
+        {"refId": "B", "expr": "aegisnex_remediation_successful_restarts_total", "legendFormat": "successful"},
+        {"refId": "C", "expr": "aegisnex_remediation_failed_restarts_total", "legendFormat": "failed"}
+      ]
+    }
+  ]
+}

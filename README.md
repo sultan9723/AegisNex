@@ -133,6 +133,28 @@ Grafana starter panels:
 - Restart attempts: `aegisnex_remediation_restart_attempts_total`
 - Notification failures: `aegisnex_notifications_failed_total`
 
+## Grafana Dashboards
+AegisNex includes Grafana provisioning, Prometheus datasource configuration,
+Docker Compose support, and dashboard JSON exports under `grafana/`.
+
+Start AegisNex metrics first:
+
+```bash
+uvicorn src.dashboard:create_app --factory --host 0.0.0.0 --port 8000
+```
+
+Then start Grafana and Prometheus:
+
+```bash
+cd grafana
+docker compose up -d
+```
+
+Open Grafana at `http://localhost:3000` with `admin` / `admin`.
+
+Dashboard documentation and screenshot placeholders are in
+`docs/grafana/README.md`.
+
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).
 - Keep logs under version control exclusion (already handled in `.gitignore`).
