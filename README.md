@@ -87,6 +87,51 @@ Dashboard routes:
 - `/containers` - Container status, Docker health, restart count, and last check timestamp.
 - `/incidents` - Active and resolved incident history.
 - `/actions` - Remediation action history from incidents and restart tracking.
+- `/metrics` - Prometheus metrics endpoint.
+
+## Prometheus Metrics
+AegisNex exposes Prometheus metrics from the dashboard application at
+`/metrics`.
+
+Metric names:
+
+- `aegisnex_system_cpu_usage_percent`
+- `aegisnex_system_memory_usage_percent`
+- `aegisnex_system_disk_usage_percent`
+- `aegisnex_system_network_bytes_sent`
+- `aegisnex_system_network_bytes_received`
+- `aegisnex_containers_running`
+- `aegisnex_containers_stopped`
+- `aegisnex_containers_unhealthy`
+- `aegisnex_incidents_active`
+- `aegisnex_incidents_resolved`
+- `aegisnex_incidents_total`
+- `aegisnex_remediation_restart_attempts_total`
+- `aegisnex_remediation_successful_restarts_total`
+- `aegisnex_remediation_failed_restarts_total`
+- `aegisnex_notifications_sent_total`
+- `aegisnex_notifications_failed_total`
+
+Prometheus scrape example:
+
+```yaml
+scrape_configs:
+  - job_name: aegisnex
+    scrape_interval: 15s
+    static_configs:
+      - targets:
+          - localhost:8000
+```
+
+Grafana starter panels:
+
+- CPU: `aegisnex_system_cpu_usage_percent`
+- Memory: `aegisnex_system_memory_usage_percent`
+- Disk: `aegisnex_system_disk_usage_percent`
+- Active incidents: `aegisnex_incidents_active`
+- Container health: `aegisnex_containers_unhealthy`
+- Restart attempts: `aegisnex_remediation_restart_attempts_total`
+- Notification failures: `aegisnex_notifications_failed_total`
 
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).

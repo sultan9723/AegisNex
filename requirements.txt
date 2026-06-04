@@ -3,5 +3,6 @@ fastapi
 httpx
 jinja2
 psutil
+prometheus-client
 pytest
 uvicorn

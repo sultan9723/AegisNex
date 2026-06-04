@@ -15,6 +15,7 @@ from src.incidents import Incident, IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.notifier import Notifier
 from src.orchestrator import SystemHealthChecker
+from src.prometheus_exporter import PrometheusExporter
 
 try:
     from fastapi import Request as FastAPIRequest
@@ -190,7 +191,7 @@ def collect_dashboard_context(services: DashboardServices) -> Dict[str, Any]:
 
 def create_app(services: Optional[DashboardServices] = None) -> Any:
     try:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, Response
         from fastapi.staticfiles import StaticFiles
         from fastapi.templating import Jinja2Templates
     except ModuleNotFoundError as exc:
@@ -242,6 +243,11 @@ def create_app(services: Optional[DashboardServices] = None) -> Any:
             context=context,
             request=request,
         )
+
+    @app.get("/metrics")
+    def metrics() -> Any:
+        payload, content_type = PrometheusExporter(app.state.services).render()
+        return Response(content=payload, media_type=content_type)
 
     return app
 
