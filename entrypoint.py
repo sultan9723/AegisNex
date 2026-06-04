@@ -7,18 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.agent import AgentX
 from src.config import Config, ConfigError
-from src.docker_scanner import DockerScanner
-from src.guardian import Guardian
-from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
-from src.incidents import IncidentManager
-from src.monitor import SystemResourceMonitor
-from src.notifier import Notifier
-from src.notifications.factory import build_notification_providers
-from src.orchestrator import SystemHealthChecker
-from src.scanner import SecurityScanner
-from src.storage import AegisNexRepository
+from src.reporting import OperationalReporter, ReportFormat
 
 
 def setup_logging(log_dir: Path) -> None:
@@ -76,6 +66,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run autonomous guardian mode",
     )
+    action_group.add_argument(
+        "--weekly-report",
+        action="store_true",
+        help="Generate a weekly operational report from SQLite history",
+    )
+    action_group.add_argument(
+        "--monthly-report",
+        action="store_true",
+        help="Generate a monthly operational report from SQLite history",
+    )
     parser.add_argument(
         "--data-dir",
         default="data",
@@ -85,6 +85,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config",
         default="config.yaml",
         help="Path to AegisNex YAML configuration",
+    )
+    parser.add_argument(
+        "--report-format",
+        choices=("json", "csv", "pdf"),
+        default="json",
+        help="Output format for weekly and monthly operational reports",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="reports",
+        help="Directory for generated operational reports",
     )
     return parser.parse_args(argv)
 
@@ -99,7 +110,9 @@ def load_report(output_path: Path, logger: logging.Logger) -> int:
     return 0
 
 
-def build_health_checks(config: Config, docker_scanner: DockerScanner) -> list[Any]:
+def build_health_checks(config: Config, docker_scanner: Any) -> list[Any]:
+    from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
+
     health_checks: list[Any] = []
     if config.health_checks.docker.enabled:
         health_checks.append(DockerHealthCheck(docker_scanner=docker_scanner))
@@ -121,15 +134,66 @@ def build_health_checks(config: Config, docker_scanner: DockerScanner) -> list[A
     return health_checks
 
 
-def main() -> int:
-    args = parse_args()
-    setup_logging(Path("logs"))
-    logger = logging.getLogger("entrypoint")
-    try:
-        config = Config.load(args.config)
-    except ConfigError as exc:
-        logger.error("Configuration validation failed: %s", exc)
-        return 1
+def generate_operational_report(args: argparse.Namespace, config: Config) -> int:
+    reporter = OperationalReporter(config.storage.database_path)
+    report = (
+        reporter.weekly_report()
+        if args.weekly_report
+        else reporter.monthly_report()
+    )
+    report_format: ReportFormat = args.report_format
+    output_path = (
+        Path(args.output_dir)
+        / f"{report['report_type']}_operational_report.{report_format}"
+    )
+    written_path = reporter.export_report(report, output_path, report_format)
+    print(f"Wrote {report['report_type']} operational report: {written_path}")
+    print(json.dumps(report["summary"], indent=2))
+    return 0
+
+
+def run_scan(data_dir: str) -> int:
+    from src.scanner import SecurityScanner
+
+    scanner = SecurityScanner(data_dir=data_dir)
+    scanner.run_scan()
+    return 0
+
+
+def print_latest_report(data_dir: str, logger: logging.Logger) -> int:
+    from src.scanner import SecurityScanner
+
+    scanner = SecurityScanner(data_dir=data_dir)
+    return load_report(scanner.output_matrix, logger)
+
+
+def run_monitor(config: Config) -> int:
+    from src.agent import AgentX
+    from src.monitor import SystemResourceMonitor
+
+    agent = AgentX(logger=logging.getLogger("agentx"))
+    monitor = SystemResourceMonitor(
+        logger=logging.getLogger("agentx.monitor"),
+        cpu_interval_seconds=config.monitoring.cpu_interval_seconds,
+        thresholds=config.monitoring.thresholds,
+    )
+    agent.register_command("monitor", monitor)
+    payload = agent.execute_task("monitor", {})
+    print("System resource usage:")
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def build_docker_agent(config: Config) -> Any:
+    from src.agent import AgentX
+    from src.docker_scanner import DockerScanner
+    from src.guardian import Guardian
+    from src.incidents import IncidentManager
+    from src.monitor import SystemResourceMonitor
+    from src.notifier import Notifier
+    from src.notifications.factory import build_notification_providers
+    from src.orchestrator import SystemHealthChecker
+    from src.storage import AegisNexRepository
 
     agent = AgentX(logger=logging.getLogger("agentx"))
     monitor = SystemResourceMonitor(
@@ -181,37 +245,46 @@ def main() -> int:
         logger=logging.getLogger("agentx.guardian"),
     )
     agent.register_command("guardian", guardian)
+    return agent
 
-    scanner = SecurityScanner(data_dir=args.data_dir)
+
+def run_docker_command(config: Config, command_name: str, heading: str) -> int:
+    agent = build_docker_agent(config)
+    payload = agent.execute_task(command_name, {})
+    print(heading)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def main() -> int:
+    args = parse_args()
+    setup_logging(Path("logs"))
+    logger = logging.getLogger("entrypoint")
+    try:
+        config = Config.load(args.config)
+    except ConfigError as exc:
+        logger.error("Configuration validation failed: %s", exc)
+        return 1
+
+    if args.weekly_report or args.monthly_report:
+        return generate_operational_report(args, config)
+
     if args.scan:
-        scanner.run_scan()
-        return 0
+        return run_scan(args.data_dir)
 
     if args.monitor:
-        payload = agent.execute_task("monitor", {})
-        print("System resource usage:")
-        print(json.dumps(payload, indent=2))
-        return 0
+        return run_monitor(config)
 
     if args.docker:
-        payload = agent.execute_task("docker", {})
-        print("Docker containers:")
-        print(json.dumps(payload, indent=2))
-        return 0
+        return run_docker_command(config, "docker", "Docker containers:")
 
     if args.health:
-        payload = agent.execute_task("health", {})
-        print("System health report:")
-        print(json.dumps(payload, indent=2))
-        return 0
+        return run_docker_command(config, "health", "System health report:")
 
     if args.guardian:
-        payload = agent.execute_task("guardian", {})
-        print("Guardian report:")
-        print(json.dumps(payload, indent=2))
-        return 0
+        return run_docker_command(config, "guardian", "Guardian report:")
 
-    return load_report(scanner.output_matrix, logger)
+    return print_latest_report(args.data_dir, logger)
 
 
 if __name__ == "__main__":

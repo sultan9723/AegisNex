@@ -204,6 +204,64 @@ FROM notifications
 GROUP BY provider, status;
 ```
 
+## Operational Reporting
+AegisNex can generate human-readable reports from historical SQLite data with
+`src/reporting.py`.
+
+Reports:
+
+- Weekly report - last 7 days of incidents, remediation, notifications, and resource trends.
+- Monthly report - last 30 days using the same operational summary model.
+- Service health report - per-service incident counts, active/resolved status, and latest incident timestamp.
+
+CLI usage:
+
+```bash
+python entrypoint.py --weekly-report
+python entrypoint.py --monthly-report --report-format csv
+python entrypoint.py --weekly-report --report-format pdf --output-dir reports
+```
+
+Supported export formats:
+
+- JSON - structured report payload for automation.
+- CSV - flat `section,metric,value` rows for spreadsheets.
+- PDF - lightweight text report for sharing operational summaries.
+
+Example JSON summary:
+
+```json
+{
+  "report_type": "weekly",
+  "summary": {
+    "total_incidents": 3,
+    "active_incidents": 1,
+    "resolved_incidents": 2,
+    "average_recovery_seconds": 900.0,
+    "auto_remediation_success_rate": 50.0,
+    "notification_success_rate": 50.0
+  },
+  "top_failing_services": [
+    {
+      "service_name": "api",
+      "incident_count": 2
+    }
+  ],
+  "trends": {
+    "cpu": {
+      "average": 30.0,
+      "minimum": 20.0,
+      "maximum": 40.0
+    },
+    "memory": {
+      "average": 50.0,
+      "minimum": 40.0,
+      "maximum": 60.0
+    }
+  }
+}
+```
+
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).
 - Keep logs under version control exclusion (already handled in `.gitignore`).

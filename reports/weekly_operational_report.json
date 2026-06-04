@@ -1,0 +1,36 @@
+{
+  "report_type": "weekly",
+  "generated_at": "2026-06-04T13:53:10.738732Z",
+  "window": {
+    "start": "2026-05-28T13:53:10.738732Z",
+    "end": "2026-06-04T13:53:10.738732Z",
+    "label": "Last 7 days"
+  },
+  "summary": {
+    "total_incidents": 0,
+    "active_incidents": 0,
+    "resolved_incidents": 0,
+    "average_recovery_seconds": 0.0,
+    "remediation_attempts": 0,
+    "successful_remediations": 0,
+    "failed_remediations": 0,
+    "auto_remediation_success_rate": 0.0,
+    "notification_attempts": 0,
+    "successful_notifications": 0,
+    "failed_notifications": 0,
+    "notification_success_rate": 0.0
+  },
+  "top_failing_services": [],
+  "trends": {
+    "cpu": {
+      "average": 0.0,
+      "minimum": 0.0,
+      "maximum": 0.0
+    },
+    "memory": {
+      "average": 0.0,
+      "minimum": 0.0,
+      "maximum": 0.0
+    }
+  }
+}
