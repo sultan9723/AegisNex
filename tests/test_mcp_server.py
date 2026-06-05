@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
-
 from src.incidents import Incident
+import src.mcp_server as mcp_server
 from src.mcp_server import (
     AegisNexMCPServices,
     AegisNexMCPTools,
-    create_mcp_server,
 )
+
+
+EXPECTED_MCP_TOOL_NAMES = {
+    "get_system_health",
+    "list_containers",
+    "list_incidents",
+    "get_metrics",
+    "generate_report",
+    "restart_container",
+}
 
 
 class FakeMonitor:
@@ -161,15 +168,34 @@ def test_mcp_tools_restart_container() -> None:
     assert tools.restart_container("")["status"] == "error"
 
 
-def test_create_mcp_server_registers_expected_tools_with_fallback() -> None:
-    server = create_mcp_server(build_services(), allow_fallback=True)
+def test_create_mcp_server_registers_expected_tools_with_fallback(monkeypatch) -> None:
+    monkeypatch.setattr(mcp_server, "FastMCP", None)
 
-    assert set(server.tools) == {
-        "get_system_health",
-        "list_containers",
-        "list_incidents",
-        "get_metrics",
-        "generate_report",
-        "restart_container",
-    }
+    server = mcp_server.create_mcp_server(build_services(), allow_fallback=True)
+
+    assert isinstance(server, mcp_server.FastMCPShim)
+    assert set(server.tools) == EXPECTED_MCP_TOOL_NAMES
     assert server.tools["list_containers"](include_all=True)["status"] == "ok"
+
+
+def test_create_mcp_server_supports_fastmcp_without_tools_attribute(monkeypatch) -> None:
+    registered_tool_names: list[str] = []
+
+    class FakeFastMCP:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def tool(self, name: str | None = None):
+            def decorator(func):
+                registered_tool_names.append(name or func.__name__)
+                return func
+
+            return decorator
+
+    monkeypatch.setattr(mcp_server, "FastMCP", FakeFastMCP)
+
+    server = mcp_server.create_mcp_server(build_services(), allow_fallback=True)
+
+    assert server.name == "AegisNex"
+    assert not hasattr(server, "tools")
+    assert set(registered_tool_names) == EXPECTED_MCP_TOOL_NAMES
