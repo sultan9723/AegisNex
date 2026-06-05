@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Integrations{% endblock %}
+{% block page_label %}Integrations{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Connection Health</span><h1>Integrations</h1><p>Validate observability, AI, and persistence integrations.</p></div>
+  <span class="status-pill status-good">Enterprise ready</span>
+</section>
+<section class="integration-grid">
+  {% for integration in integrations %}
+  <article class="surface integration-card">
+    <div class="integration-icon"><i data-lucide="{{ 'bar-chart-3' if integration.name == 'Grafana' else 'radio-tower' if integration.name == 'Prometheus' else 'container' if integration.name == 'Docker' else 'bot' if integration.name == 'MCP' else 'database' }}"></i></div>
+    <div>
+      <div class="section-head inline"><h2>{{ integration.name }}</h2><span class="status-pill status-{{ 'good' if integration.status in ['connected', 'available', 'configured'] else 'warn' }}">{{ integration.status }}</span></div>
+      <p>{{ integration.description }}</p>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}

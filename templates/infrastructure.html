@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Infrastructure{% endblock %}
+{% block page_label %}Infrastructure{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Host Telemetry</span><h1>Infrastructure</h1><p>System resource utilization and network transport health.</p></div>
+  <span class="status-pill status-{{ 'good' if health_score.score >= 80 else 'warn' if health_score.score >= 60 else 'bad' }}">Health {{ health_score.score }}/100</span>
+</section>
+<section class="kpi-grid">
+  <article class="kpi-card kpi-blue"><div class="kpi-icon"><i data-lucide="cpu"></i></div><span>CPU</span><strong>{{ metrics.cpu_percent | default("n/a") }}%</strong><small>Processor</small></article>
+  <article class="kpi-card kpi-teal"><div class="kpi-icon"><i data-lucide="memory-stick"></i></div><span>Memory</span><strong>{{ metrics.ram_percent | default("n/a") }}%</strong><small>RAM pressure</small></article>
+  <article class="kpi-card kpi-violet"><div class="kpi-icon"><i data-lucide="hard-drive"></i></div><span>Disk</span><strong>{{ metrics.disk_percent | default("n/a") }}%</strong><small>Storage used</small></article>
+  <article class="kpi-card kpi-emerald"><div class="kpi-icon"><i data-lucide="network"></i></div><span>Network</span><strong>{{ network.packets_recv | default("n/a") }}</strong><small>Packets received</small></article>
+</section>
+<section class="lower-grid">
+  <article class="surface"><div class="section-head"><h2>Network Transport</h2><span>Host counters</span></div><dl class="stats-list"><dt>Bytes sent</dt><dd>{{ network.bytes_sent | default("n/a") }}</dd><dt>Bytes received</dt><dd>{{ network.bytes_recv | default("n/a") }}</dd><dt>Packets sent</dt><dd>{{ network.packets_sent | default("n/a") }}</dd><dt>Packets received</dt><dd>{{ network.packets_recv | default("n/a") }}</dd></dl></article>
+  <article class="surface"><div class="section-head"><h2>Health Inputs</h2><span>Score model</span></div><dl class="stats-list"><dt>Active incidents</dt><dd>{{ active_incidents | length }}</dd><dt>Running containers</dt><dd>{{ running_containers | length }}</dd><dt>Total containers</dt><dd>{{ containers | length }}</dd><dt>Last check</dt><dd>{{ timestamp }}</dd></dl></article>
+</section>
+{% endblock %}

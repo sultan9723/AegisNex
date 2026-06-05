@@ -83,11 +83,26 @@ uvicorn src.dashboard:create_app --factory --host 0.0.0.0 --port 8000
 
 Dashboard routes:
 
-- `/` - Operational overview with CPU, memory, disk, network, containers, and incident counts.
+- `/` - Premium observability overview with health score, KPI cards, charts, quick actions, and recent operations.
+- `/infrastructure` - Host CPU, memory, disk, network, and health inputs.
 - `/containers` - Container status, Docker health, restart count, and last check timestamp.
 - `/incidents` - Active and resolved incident history.
+- `/reports` - Weekly and monthly operational report downloads in JSON, CSV, and PDF.
+- `/notifications` - Notification provider statistics and recent delivery events.
+- `/mcp` - MCP tools, example requests, and Claude Desktop configuration.
+- `/integrations` - Grafana, Prometheus, MCP, and database connection health.
+- `/settings` - Workspace security, appearance, and operational scope.
 - `/actions` - Remediation action history from incidents and restart tracking.
 - `/metrics` - Prometheus metrics endpoint.
+
+Dashboard authentication:
+
+- `/register` - Create a dashboard user.
+- `/login` - Authenticate and start a JWT-backed cookie session.
+- `/logout` - Clear the session cookie.
+
+Set `AEGISNEX_JWT_SECRET` in `.env` to a long random value before exposing the
+dashboard beyond local development.
 
 ## Prometheus Metrics
 AegisNex exposes Prometheus metrics from the dashboard application at
@@ -261,6 +276,48 @@ Example JSON summary:
   }
 }
 ```
+
+## MCP Server
+AegisNex exposes a Model Context Protocol server through `src/mcp_server.py`
+using FastMCP.
+
+Start the server:
+
+```bash
+python -m src.mcp_server
+```
+
+Tools:
+
+- `get_system_health` - current system and Docker health report.
+- `list_containers` - list Docker containers, with optional `include_all`.
+- `list_incidents` - list incidents, with optional `status` filtering.
+- `get_metrics` - current system metrics plus the latest persisted metrics snapshot.
+- `generate_report` - generate `weekly`, `monthly`, or `service_health` reports.
+- `restart_container` - restart a Docker container by name.
+
+Claude Desktop configuration example:
+
+```json
+{
+  "mcpServers": {
+    "aegisnex": {
+      "command": "python",
+      "args": [
+        "-m",
+        "src.mcp_server"
+      ],
+      "cwd": "F:\\AegisNex",
+      "env": {
+        "AEGISNEX_JWT_SECRET": "replace_with_a_long_random_secret"
+      }
+    }
+  }
+}
+```
+
+The MCP server reads `config.yaml`, uses the configured SQLite database for
+incidents and reports, and uses Docker for container listing and restarts.
 
 ## Best Practices
 - Use environment variables for secrets (never hardcode credentials).

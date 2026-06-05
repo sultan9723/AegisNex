@@ -1,34 +1,37 @@
 {% extends "base.html" %}
-{% block title %}AegisNex Actions{% endblock %}
+{% block title %}AegisNex Remediation Actions{% endblock %}
+{% block page_label %}Remediation{% endblock %}
 {% block content %}
-<section class="page-header">
-  <h1>Remediation Actions</h1>
-  <span>{{ actions | length }} recorded</span>
+<section class="page-hero compact">
+  <div><span class="eyebrow">Automation History</span><h1>Remediation Actions</h1><p>Review restart actions and remediation outcomes.</p></div>
+  <span class="status-pill status-good">{{ actions | length }} recorded</span>
 </section>
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>Timestamp</th>
-        <th>Service</th>
-        <th>Action</th>
-        <th>Successful</th>
-        <th>Incident ID</th>
-        <th>Source</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for action in actions %}
-      <tr>
-        <td>{{ action.timestamp }}</td>
-        <td>{{ action.service_name }}</td>
-        <td>{{ action.action }}</td>
-        <td>{{ action.successful }}</td>
-        <td>{{ action.incident_id }}</td>
-        <td>{{ action.source }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+<article class="surface table-card">
+  <div class="section-head"><h2>Action Log</h2><span>Guardian automation</span></div>
+  <div class="table-scroll">
+    <table class="premium-table">
+      <thead><tr><th>Timestamp</th><th>Service</th><th>Action</th><th>Successful</th><th>Incident ID</th><th>Source</th></tr></thead>
+      <tbody>
+        {% for action in actions %}
+        <tr>
+          <td>{{ action.timestamp }}</td>
+          <td>{{ action.service_name }}</td>
+          <td>{{ action.action }}</td>
+          <td>
+            {% if action.successful is sameas true %}
+            <span class="badge badge-status-resolved">success</span>
+            {% elif action.successful is sameas false %}
+            <span class="badge badge-status-active">failed</span>
+            {% else %}
+            <span class="badge badge-status-unknown">unknown</span>
+            {% endif %}
+          </td>
+          <td><code>{{ action.incident_id }}</code></td>
+          <td>{{ action.source }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
 {% endblock %}

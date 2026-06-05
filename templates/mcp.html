@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}AegisNex MCP{% endblock %}
+{% block page_label %}MCP{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">AI Operations Interface</span><h1>MCP Server</h1><p>Expose AegisNex operational tools to Claude Desktop and MCP-compatible assistants.</p></div>
+  <span class="status-pill status-good">{{ mcp_tools | length }} tools</span>
+</section>
+<section class="tool-grid">
+  {% for tool in mcp_tools %}
+  <article class="surface tool-card">
+    <div class="section-head"><h2>{{ tool.name }}</h2><span>Tool</span></div>
+    <p>{{ tool.description }}</p>
+    <pre id="tool-{{ loop.index }}">{{ tool.example }}</pre>
+    <button class="action-button" type="button" data-copy="#tool-{{ loop.index }}"><i data-lucide="copy"></i><span>Copy request</span></button>
+  </article>
+  {% endfor %}
+</section>
+<article class="surface code-panel">
+  <div class="section-head"><h2>Claude Desktop Configuration</h2><button class="action-button" type="button" data-copy="#claude-config"><i data-lucide="copy"></i><span>Copy config</span></button></div>
+  <pre id="claude-config">{{ claude_config }}</pre>
+</article>
+{% endblock %}

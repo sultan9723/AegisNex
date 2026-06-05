@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Login{% endblock %}
+{% block content %}
+<section class="auth-page">
+  <article class="card auth-card">
+    <div class="card-header">Login</div>
+    <form method="post" action="/login" class="auth-form">
+      {% if error %}
+      <div class="auth-error" role="alert">{{ error }}</div>
+      {% endif %}
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" value="{{ email | default('') }}" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required>
+      <button type="submit" class="action-button primary-action">Login</button>
+      <p class="auth-link">Need access? <a href="/register">Create an account</a></p>
+    </form>
+  </article>
+</section>
+{% endblock %}

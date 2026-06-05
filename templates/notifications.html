@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Notifications{% endblock %}
+{% block page_label %}Notifications{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Alert Delivery</span><h1>Notifications</h1><p>Monitor provider delivery health and failed alert attempts.</p></div>
+  <span class="status-pill status-{{ 'bad' if notification_stats.failed_notifications else 'good' }}">{{ notification_stats.failed_notifications }} failed</span>
+</section>
+<section class="kpi-grid four">
+  <article class="kpi-card kpi-blue"><div class="kpi-icon"><i data-lucide="mail"></i></div><span>Email</span><strong>{{ notification_stats.email_count }}</strong><small>Events</small></article>
+  <article class="kpi-card kpi-violet"><div class="kpi-icon"><i data-lucide="message-square"></i></div><span>Slack</span><strong>{{ notification_stats.slack_count }}</strong><small>Events</small></article>
+  <article class="kpi-card kpi-teal"><div class="kpi-icon"><i data-lucide="messages-square"></i></div><span>Discord</span><strong>{{ notification_stats.discord_count }}</strong><small>Events</small></article>
+  <article class="kpi-card kpi-rose"><div class="kpi-icon"><i data-lucide="circle-x"></i></div><span>Failed</span><strong>{{ notification_stats.failed_notifications }}</strong><small>Delivery errors</small></article>
+</section>
+<article class="surface table-card">
+  <div class="section-head"><h2>Notification Events</h2><span>Latest 25</span></div>
+  <div class="table-scroll">
+    <table class="premium-table">
+      <thead><tr><th>Timestamp</th><th>Provider</th><th>Status</th><th>Service</th><th>Incident</th><th>Attempts</th></tr></thead>
+      <tbody>
+        {% for notification in notifications %}
+        <tr>
+          <td>{{ notification.timestamp }}</td>
+          <td>{{ notification.provider }}</td>
+          <td><span class="badge badge-status-{{ notification.status }}">{{ notification.status }}</span></td>
+          <td>{{ notification.service_name }}</td>
+          <td><code>{{ notification.incident_id }}</code></td>
+          <td>{{ notification.attempts }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Settings{% endblock %}
+{% block page_label %}Settings{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Workspace Controls</span><h1>Settings</h1><p>Security, theme, and operational preferences for the AegisNex workspace.</p></div>
+  <span class="status-pill status-good">Authenticated</span>
+</section>
+<section class="settings-grid">
+  <article class="surface">
+    <div class="section-head"><h2>Security</h2><span>JWT session</span></div>
+    <dl class="stats-list"><dt>Signed in as</dt><dd>{{ user.email }}</dd><dt>Session type</dt><dd>HTTP-only JWT cookie</dd><dt>Metrics endpoint</dt><dd>Public for Prometheus scrape</dd></dl>
+  </article>
+  <article class="surface">
+    <div class="section-head"><h2>Appearance</h2><span>Local preference</span></div>
+    <p class="muted-copy">Use the theme control in the top bar to switch between dark and light mode. The preference is stored locally in your browser.</p>
+  </article>
+  <article class="surface">
+    <div class="section-head"><h2>Operational Scope</h2><span>Docker Guardian</span></div>
+    <dl class="stats-list"><dt>Containers observed</dt><dd>{{ containers | length }}</dd><dt>Active incidents</dt><dd>{{ active_incidents | length }}</dd><dt>Recorded actions</dt><dd>{{ actions | length }}</dd></dl>
+  </article>
+</section>
+{% endblock %}

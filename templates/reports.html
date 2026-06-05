@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Reports{% endblock %}
+{% block page_label %}Reports{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Operational Reporting</span><h1>Reports</h1><p>Generate executive-ready weekly and monthly operational reports.</p></div>
+  <span class="status-pill status-good">{{ reports | length }} report families</span>
+</section>
+<section class="report-grid">
+  {% for report in reports %}
+  <article class="surface report-card">
+    <div class="section-head"><h2>{{ report.name }}</h2><span>{{ report.payload.window.label | default("Historical") }}</span></div>
+    <div class="report-summary">
+      <div><span>Total incidents</span><strong>{{ report.payload.summary.total_incidents | default(0) }}</strong></div>
+      <div><span>Resolved</span><strong>{{ report.payload.summary.resolved_incidents | default(0) }}</strong></div>
+      <div><span>Remediation success</span><strong>{{ report.payload.summary.auto_remediation_success_rate | default(0) }}%</strong></div>
+    </div>
+    <div class="download-row">
+      <a class="action-button" href="/reports/{{ report.report_type }}/json"><i data-lucide="file-json"></i><span>Download JSON</span></a>
+      <a class="action-button" href="/reports/{{ report.report_type }}/csv"><i data-lucide="table"></i><span>Download CSV</span></a>
+      <a class="action-button" href="/reports/{{ report.report_type }}/pdf"><i data-lucide="file-text"></i><span>Download PDF</span></a>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}

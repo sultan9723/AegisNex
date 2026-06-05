@@ -1,34 +1,187 @@
 {% extends "base.html" %}
-{% block title %}AegisNex Dashboard{% endblock %}
+{% block title %}AegisNex Overview{% endblock %}
+{% block page_label %}Overview{% endblock %}
 {% block content %}
-<section class="page-header">
-  <h1>Dashboard</h1>
-  <span>Last check: {{ timestamp }}</span>
+<section class="hero-panel">
+  <div class="hero-copy">
+    <span class="eyebrow">Autonomous Docker Guardian</span>
+    <h1>Welcome{% if user %}, {{ user.email.split('@')[0] }}{% endif %}</h1>
+    <p>Monitor cloud defense posture, Docker runtime health, incidents, remediations, and operational intelligence from one secure workspace.</p>
+    <div class="hero-meta">
+      <span><i data-lucide="activity"></i> System Health {{ health_score.score }}/100</span>
+      <span><i data-lucide="siren"></i> {{ active_incidents | length }} Active Incidents</span>
+      <span><i data-lucide="boxes"></i> {{ running_containers | length }} Running Containers</span>
+      <span><i data-lucide="clock"></i> Last Check {{ timestamp }}</span>
+    </div>
+  </div>
+  <div class="health-orbit health-{{ health_score.indicator }}">
+    <div class="health-ring" style="--score: {{ health_score.score }};">
+      <div>
+        <span>Health Score</span>
+        <strong>{{ health_score.score }}</strong>
+        <small>{{ health_score.status }}</small>
+      </div>
+    </div>
+  </div>
 </section>
 
-<section class="metric-grid">
-  <article class="metric"><span>CPU</span><strong>{{ metrics.cpu_percent | default("n/a") }}%</strong></article>
-  <article class="metric"><span>Memory</span><strong>{{ metrics.ram_percent | default("n/a") }}%</strong></article>
-  <article class="metric"><span>Disk</span><strong>{{ metrics.disk_percent | default("n/a") }}%</strong></article>
-  <article class="metric"><span>Running Containers</span><strong>{{ running_containers | length }}</strong></article>
+<section class="kpi-grid">
+  <article class="kpi-card kpi-blue">
+    <div class="kpi-icon"><i data-lucide="cpu"></i></div>
+    <span>CPU</span>
+    <strong>{{ metrics.cpu_percent | default("n/a") }}%</strong>
+    <small><i data-lucide="trending-up"></i> Live utilization trend</small>
+  </article>
+  <article class="kpi-card kpi-teal">
+    <div class="kpi-icon"><i data-lucide="memory-stick"></i></div>
+    <span>Memory</span>
+    <strong>{{ metrics.ram_percent | default("n/a") }}%</strong>
+    <small><i data-lucide="activity"></i> Host pressure signal</small>
+  </article>
+  <article class="kpi-card kpi-violet">
+    <div class="kpi-icon"><i data-lucide="hard-drive"></i></div>
+    <span>Disk</span>
+    <strong>{{ metrics.disk_percent | default("n/a") }}%</strong>
+    <small><i data-lucide="shield-check"></i> Capacity risk indicator</small>
+  </article>
+  <article class="kpi-card kpi-emerald">
+    <div class="kpi-icon"><i data-lucide="container"></i></div>
+    <span>Containers</span>
+    <strong>{{ running_containers | length }}</strong>
+    <small><i data-lucide="box"></i> {{ containers | length }} total observed</small>
+  </article>
+  <article class="kpi-card kpi-rose">
+    <div class="kpi-icon"><i data-lucide="triangle-alert"></i></div>
+    <span>Incidents</span>
+    <strong>{{ active_incidents | length }}</strong>
+    <small><i data-lucide="check-circle"></i> {{ resolved_incidents | length }} resolved</small>
+  </article>
 </section>
 
-<section class="content-grid">
-  <article>
-    <h2>Network</h2>
-    <dl class="stats">
-      <dt>Bytes sent</dt><dd>{{ network.bytes_sent | default("n/a") }}</dd>
-      <dt>Bytes received</dt><dd>{{ network.bytes_recv | default("n/a") }}</dd>
-      <dt>Packets sent</dt><dd>{{ network.packets_sent | default("n/a") }}</dd>
-      <dt>Packets received</dt><dd>{{ network.packets_recv | default("n/a") }}</dd>
-    </dl>
+<section class="panel-grid">
+  <article class="surface chart-card">
+    <div class="section-head"><h2>CPU Trend 24h</h2><span class="status-dot status-good">Live</span></div>
+    <div class="chart-box"><canvas id="cpuTrend"></canvas></div>
   </article>
-  <article>
-    <h2>Incidents</h2>
-    <dl class="stats">
-      <dt>Active</dt><dd>{{ active_incidents | length }}</dd>
-      <dt>Resolved</dt><dd>{{ resolved_incidents | length }}</dd>
-    </dl>
+  <article class="surface chart-card">
+    <div class="section-head"><h2>Memory Trend 24h</h2><span class="status-dot status-good">Live</span></div>
+    <div class="chart-box"><canvas id="memoryTrend"></canvas></div>
+  </article>
+  <article class="surface chart-card">
+    <div class="section-head"><h2>Incident Trend</h2><span class="status-dot status-warn">Events</span></div>
+    <div class="chart-box"><canvas id="incidentTrend"></canvas></div>
+  </article>
+  <article class="surface chart-card">
+    <div class="section-head"><h2>Remediation Trend</h2><span class="status-dot status-good">Automation</span></div>
+    <div class="chart-box"><canvas id="remediationTrend"></canvas></div>
   </article>
 </section>
+
+<section class="lower-grid">
+  <article class="surface">
+    <div class="section-head"><h2>Quick Actions</h2><span>Operations</span></div>
+    <div class="quick-actions">
+      <a class="action-button" href="http://localhost:3000" target="_blank"><i data-lucide="bar-chart-3"></i><span>Open Grafana</span></a>
+      <a class="action-button" href="/metrics" target="_blank"><i data-lucide="radio-tower"></i><span>Open Prometheus</span></a>
+      <a class="action-button" href="/reports/weekly/json"><i data-lucide="file-json"></i><span>Generate Weekly Report</span></a>
+      <a class="action-button" href="/reports/monthly/json"><i data-lucide="calendar-days"></i><span>Generate Monthly Report</span></a>
+      <a class="action-button" href="/containers"><i data-lucide="rotate-cw"></i><span>Restart Container</span></a>
+    </div>
+  </article>
+  <article class="surface">
+    <div class="section-head"><h2>Notification Statistics</h2><span>Channels</span></div>
+    <div class="notification-grid">
+      <div><span>Email</span><strong>{{ notification_stats.email_count }}</strong></div>
+      <div><span>Slack</span><strong>{{ notification_stats.slack_count }}</strong></div>
+      <div><span>Discord</span><strong>{{ notification_stats.discord_count }}</strong></div>
+      <div><span>Failed</span><strong>{{ notification_stats.failed_notifications }}</strong></div>
+    </div>
+  </article>
+</section>
+
+<section class="table-grid">
+  <article class="surface table-card">
+    <div class="section-head"><h2>Recent Incidents</h2><a href="/incidents">View all</a></div>
+    <div class="table-scroll">
+      <table class="premium-table">
+        <thead><tr><th>Timestamp</th><th>Severity</th><th>Service</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for incident in recent_incidents %}
+          <tr>
+            <td>{{ incident.timestamp }}</td>
+            <td><span class="badge badge-severity-{{ incident.severity }}">{{ incident.severity }}</span></td>
+            <td>{{ incident.service_name }}</td>
+            <td><span class="badge badge-status-{{ incident.status }}">{{ incident.status }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+  <article class="surface table-card">
+    <div class="section-head"><h2>Recent Remediations</h2><a href="/actions">View all</a></div>
+    <div class="table-scroll">
+      <table class="premium-table">
+        <thead><tr><th>Timestamp</th><th>Service</th><th>Action</th><th>Success</th></tr></thead>
+        <tbody>
+          {% for action in recent_remediations %}
+          <tr>
+            <td>{{ action.timestamp }}</td>
+            <td>{{ action.service_name }}</td>
+            <td>{{ action.action }}</td>
+            <td>
+              {% if action.successful is sameas true %}
+              <span class="badge badge-status-resolved">success</span>
+              {% elif action.successful is sameas false %}
+              <span class="badge badge-status-active">failed</span>
+              {% else %}
+              <span class="badge badge-status-unknown">unknown</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </article>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+  const chartData = {{ chart_data | tojson }};
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function buildGradient(ctx, color) {
+    const gradient = ctx.createLinearGradient(0, 0, 0, 260);
+    gradient.addColorStop(0, color + "66");
+    gradient.addColorStop(1, color + "00");
+    return gradient;
+  }
+  function renderLineChart(id, labels, values, color) {
+    const canvas = document.getElementById(id);
+    const ctx = canvas.getContext("2d");
+    new Chart(ctx, {
+      type: "line",
+      data: { labels, datasets: [{ data: values, borderColor: color, backgroundColor: buildGradient(ctx, color), borderWidth: 2, tension: 0.42, fill: true, pointRadius: 0, pointHoverRadius: 4 }] },
+      options: {
+        animation: { duration: 900, easing: "easeOutQuart" },
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: { legend: { display: false }, tooltip: { backgroundColor: cssVar("--tooltip-bg"), borderColor: cssVar("--line"), borderWidth: 1 } },
+        scales: {
+          x: { ticks: { color: cssVar("--muted") }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: cssVar("--muted") }, grid: { color: cssVar("--grid") } }
+        }
+      }
+    });
+  }
+  renderLineChart("cpuTrend", chartData.metrics.cpu.labels, chartData.metrics.cpu.values, "#5b8cff");
+  renderLineChart("memoryTrend", chartData.metrics.memory.labels, chartData.metrics.memory.values, "#2dd4bf");
+  renderLineChart("incidentTrend", chartData.incidents.labels, chartData.incidents.values, "#fb7185");
+  renderLineChart("remediationTrend", chartData.remediations.labels, chartData.remediations.values, "#f59e0b");
+</script>
 {% endblock %}

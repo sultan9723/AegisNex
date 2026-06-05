@@ -1,23 +1,100 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}AegisNex{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link rel="stylesheet" href="/static/styles.css">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">AegisNex</div>
-      <nav class="nav">
-        <a href="/">Dashboard</a>
-        <a href="/containers">Containers</a>
-        <a href="/incidents">Incidents</a>
-        <a href="/actions">Actions</a>
-      </nav>
-    </header>
-    <main class="page">
-      {% block content %}{% endblock %}
-    </main>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+          <a href="/" class="brand-mark">AegisNex</a>
+          <button class="icon-button sidebar-toggle" type="button" data-sidebar-toggle aria-label="Toggle sidebar">
+            <i data-lucide="panel-left-close"></i>
+          </button>
+        </div>
+        <nav class="sidebar-nav" aria-label="Primary">
+          <a href="/" class="sidebar-link"><i data-lucide="layout-dashboard"></i><span>Overview</span></a>
+          <a href="/infrastructure" class="sidebar-link"><i data-lucide="server"></i><span>Infrastructure</span></a>
+          <a href="/containers" class="sidebar-link"><i data-lucide="boxes"></i><span>Containers</span></a>
+          <a href="/incidents" class="sidebar-link"><i data-lucide="siren"></i><span>Incidents</span></a>
+          <a href="/reports" class="sidebar-link"><i data-lucide="file-bar-chart"></i><span>Reports</span></a>
+          <a href="/notifications" class="sidebar-link"><i data-lucide="bell"></i><span>Notifications</span></a>
+          <a href="/mcp" class="sidebar-link"><i data-lucide="bot"></i><span>MCP</span></a>
+          <a href="/integrations" class="sidebar-link"><i data-lucide="plug"></i><span>Integrations</span></a>
+          <a href="/settings" class="sidebar-link"><i data-lucide="settings"></i><span>Settings</span></a>
+        </nav>
+        <div class="sidebar-footer">
+          {% if user %}
+          <div class="user-chip">
+            <span class="avatar">{{ user.email[:1] | upper }}</span>
+            <span class="user-meta"><strong>{{ user.email }}</strong><small>Workspace Admin</small></span>
+          </div>
+          <a href="/logout" class="sidebar-link logout-link"><i data-lucide="log-out"></i><span>Logout</span></a>
+          {% else %}
+          <a href="/login" class="sidebar-link"><i data-lucide="log-in"></i><span>Login</span></a>
+          <a href="/register" class="sidebar-link"><i data-lucide="user-plus"></i><span>Register</span></a>
+          {% endif %}
+        </div>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <button class="icon-button mobile-menu" type="button" data-sidebar-toggle aria-label="Open sidebar">
+            <i data-lucide="menu"></i>
+          </button>
+          <div class="topbar-title">
+            <span class="eyebrow">Observability Command Center</span>
+            <strong>{% block page_label %}Overview{% endblock %}</strong>
+          </div>
+          <div class="topbar-actions">
+            <button class="theme-toggle" type="button" data-theme-toggle>
+              <i data-lucide="moon"></i>
+              <span>Theme</span>
+            </button>
+          </div>
+        </header>
+        <main class="page">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script>
+      const root = document.documentElement;
+      const savedTheme = localStorage.getItem("aegisnex-theme") || "dark";
+      root.dataset.theme = savedTheme;
+      document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const next = root.dataset.theme === "dark" ? "light" : "dark";
+          root.dataset.theme = next;
+          localStorage.setItem("aegisnex-theme", next);
+        });
+      });
+      document.querySelectorAll("[data-sidebar-toggle]").forEach((button) => {
+        button.addEventListener("click", () => {
+          document.body.classList.toggle("sidebar-collapsed");
+        });
+      });
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.querySelector(button.dataset.copy);
+          if (!target) return;
+          await navigator.clipboard.writeText(target.textContent.trim());
+          button.classList.add("copied");
+          setTimeout(() => button.classList.remove("copied"), 1200);
+        });
+      });
+      if (window.lucide) {
+        window.lucide.createIcons();
+      }
+    </script>
+    {% block scripts %}{% endblock %}
   </body>
 </html>

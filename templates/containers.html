@@ -1,32 +1,28 @@
 {% extends "base.html" %}
 {% block title %}AegisNex Containers{% endblock %}
+{% block page_label %}Containers{% endblock %}
 {% block content %}
-<section class="page-header">
-  <h1>Containers</h1>
-  <span>Last check: {{ timestamp }}</span>
+<section class="page-hero compact">
+  <div><span class="eyebrow">Runtime Inventory</span><h1>Containers</h1><p>{{ containers | length }} containers observed across the Docker host.</p></div>
+  <span class="status-pill status-good">{{ running_containers | length }} running</span>
 </section>
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>Container name</th>
-        <th>Status</th>
-        <th>Health status</th>
-        <th>Restart count</th>
-        <th>Last check timestamp</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for container in containers %}
-      <tr>
-        <td>{{ container.name }}</td>
-        <td>{{ container.status }}</td>
-        <td>{{ container.health_status }}</td>
-        <td>{{ container.restart_count }}</td>
-        <td>{{ container.last_check_timestamp }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+<article class="surface table-card">
+  <div class="section-head"><h2>Container Fleet</h2><span>Last check {{ timestamp }}</span></div>
+  <div class="table-scroll">
+    <table class="premium-table">
+      <thead><tr><th>Container name</th><th>Status</th><th>Health status</th><th>Restart count</th><th>Last check timestamp</th></tr></thead>
+      <tbody>
+        {% for container in containers %}
+        <tr>
+          <td><strong>{{ container.name }}</strong></td>
+          <td><span class="badge badge-status-{{ container.status }}">{{ container.status }}</span></td>
+          <td><span class="badge badge-status-{{ container.health_status }}">{{ container.health_status }}</span></td>
+          <td>{{ container.restart_count }}</td>
+          <td>{{ container.last_check_timestamp }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
 {% endblock %}

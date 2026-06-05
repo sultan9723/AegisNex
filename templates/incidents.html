@@ -1,34 +1,29 @@
 {% extends "base.html" %}
 {% block title %}AegisNex Incidents{% endblock %}
+{% block page_label %}Incidents{% endblock %}
 {% block content %}
-<section class="page-header">
-  <h1>Incidents</h1>
-  <span>{{ active_incidents | length }} active</span>
+<section class="page-hero compact">
+  <div><span class="eyebrow">Incident Command</span><h1>Incidents</h1><p>Track active and resolved operational issues across monitored services.</p></div>
+  <div class="hero-stats"><span>{{ active_incidents | length }} active</span><span>{{ resolved_incidents | length }} resolved</span></div>
 </section>
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th>Incident ID</th>
-        <th>Severity</th>
-        <th>Service</th>
-        <th>Status</th>
-        <th>Created timestamp</th>
-        <th>Resolved timestamp</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for incident in active_incidents + resolved_incidents %}
-      <tr>
-        <td>{{ incident.incident_id }}</td>
-        <td>{{ incident.severity }}</td>
-        <td>{{ incident.service_name }}</td>
-        <td>{{ incident.status }}</td>
-        <td>{{ incident.timestamp }}</td>
-        <td>{{ incident.resolved_timestamp or "" }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
+<article class="surface table-card">
+  <div class="section-head"><h2>Incident Timeline</h2><span>{{ active_incidents | length }} active</span></div>
+  <div class="table-scroll">
+    <table class="premium-table">
+      <thead><tr><th>Incident ID</th><th>Severity</th><th>Service</th><th>Status</th><th>Created timestamp</th><th>Resolved timestamp</th></tr></thead>
+      <tbody>
+        {% for incident in active_incidents + resolved_incidents %}
+        <tr>
+          <td><code>{{ incident.incident_id }}</code></td>
+          <td><span class="badge badge-severity-{{ incident.severity }}">{{ incident.severity }}</span></td>
+          <td>{{ incident.service_name }}</td>
+          <td><span class="badge badge-status-{{ incident.status }}">{{ incident.status }}</span></td>
+          <td>{{ incident.timestamp }}</td>
+          <td>{{ incident.resolved_timestamp or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
 {% endblock %}

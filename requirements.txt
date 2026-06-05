@@ -1,7 +1,9 @@
 docker
 fastapi
+fastapi-users[sqlalchemy]
 httpx
 jinja2
+mcp
 psutil
 prometheus-client
 pytest
