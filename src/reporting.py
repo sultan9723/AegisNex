@@ -117,35 +117,46 @@ class OperationalReporter:
 
     def _incident_summary(self, window: ReportWindow) -> dict[str, Any]:
         with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    COUNT(*) AS total_incidents,
-                    SUM(CASE WHEN status IN ('active', 'acknowledged') THEN 1 ELSE 0 END) AS active_incidents,
-                    SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
-                FROM incidents
-                WHERE timestamp >= ?
-                """,
-                _window_start_param(window),
-            ).fetchone()
-            recovery_rows = connection.execute(
-                """
-                SELECT timestamp, resolved_timestamp
-                FROM incidents
-                WHERE timestamp >= ?
-                    AND resolved_timestamp IS NOT NULL
-                """,
-                _window_start_param(window),
-            ).fetchall()
+            try:
+                row = connection.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_incidents,
+                        SUM(CASE WHEN status IN ('active', 'acknowledged') THEN 1 ELSE 0 END) AS active_incidents,
+                        SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
+                    FROM incidents
+                    WHERE timestamp >= ?
+                    """,
+                    _window_start_param(window),
+                ).fetchone()
+                recovery_rows = connection.execute(
+                    """
+                    SELECT timestamp, resolved_timestamp
+                    FROM incidents
+                    WHERE timestamp >= ?
+                        AND resolved_timestamp IS NOT NULL
+                    """,
+                    _window_start_param(window),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                row = None
+                recovery_rows = []
 
         recovery_seconds = [
-            (_parse_timestamp(row["resolved_timestamp"]) - _parse_timestamp(row["timestamp"])).total_seconds()
-            for row in recovery_rows
-            if row["resolved_timestamp"]
+            (_parse_timestamp(r["resolved_timestamp"]) - _parse_timestamp(r["timestamp"])).total_seconds()
+            for r in recovery_rows
+            if r["resolved_timestamp"]
         ]
         average_recovery_seconds = (
             sum(recovery_seconds) / len(recovery_seconds) if recovery_seconds else 0.0
         )
+        if not row:
+            return {
+                "total_incidents": 0,
+                "active_incidents": 0,
+                "resolved_incidents": 0,
+                "average_recovery_seconds": 0.0,
+            }
         return {
             "total_incidents": int(row["total_incidents"] or 0),
             "active_incidents": int(row["active_incidents"] or 0),
@@ -153,9 +164,22 @@ class OperationalReporter:
             "average_recovery_seconds": round(average_recovery_seconds, 2),
         }
 
+    def _safe_report_query(self, connection: sqlite3.Connection, query: str, params: tuple = ()) -> Any:
+        try:
+            return connection.execute(query, params).fetchone()
+        except sqlite3.OperationalError:
+            return None
+
+    def _safe_report_query_all(self, connection: sqlite3.Connection, query: str, params: tuple = ()) -> list[Any]:
+        try:
+            return connection.execute(query, params).fetchall()
+        except sqlite3.OperationalError:
+            return []
+
     def _remediation_summary(self, window: ReportWindow) -> dict[str, Any]:
         with self._connect() as connection:
-            row = connection.execute(
+            row = self._safe_report_query(
+                connection,
                 """
                 SELECT
                     COUNT(*) AS total,
@@ -164,9 +188,10 @@ class OperationalReporter:
                 WHERE timestamp >= ?
                 """,
                 _window_start_param(window),
-            ).fetchone()
-        total = int(row["total"] or 0)
-        successful = int(row["successful"] or 0)
+            )
+        row_dict = dict(row) if row else {}
+        total = int(row_dict.get("total") or 0)
+        successful = int(row_dict.get("successful") or 0)
         return {
             "remediation_attempts": total,
             "successful_remediations": successful,
@@ -176,7 +201,8 @@ class OperationalReporter:
 
     def _notification_summary(self, window: ReportWindow) -> dict[str, Any]:
         with self._connect() as connection:
-            row = connection.execute(
+            row = self._safe_report_query(
+                connection,
                 """
                 SELECT
                     COUNT(*) AS total,
@@ -185,9 +211,10 @@ class OperationalReporter:
                 WHERE timestamp >= ?
                 """,
                 _window_start_param(window),
-            ).fetchone()
-        total = int(row["total"] or 0)
-        successful = int(row["successful"] or 0)
+            )
+        row_dict = dict(row) if row else {}
+        total = int(row_dict.get("total") or 0)
+        successful = int(row_dict.get("successful") or 0)
         return {
             "notification_attempts": total,
             "successful_notifications": successful,
@@ -199,7 +226,8 @@ class OperationalReporter:
         self, window: ReportWindow, limit: int = 5
     ) -> list[dict[str, Any]]:
         with self._connect() as connection:
-            rows = connection.execute(
+            rows = self._safe_report_query_all(
+                connection,
                 """
                 SELECT service_name, COUNT(*) AS incident_count
                 FROM incidents
@@ -209,7 +237,7 @@ class OperationalReporter:
                 LIMIT ?
                 """,
                 (*_window_start_param(window), limit),
-            ).fetchall()
+            )
         return [
             {
                 "service_name": str(row["service_name"]),
@@ -223,7 +251,8 @@ class OperationalReporter:
         if column not in allowed_columns:
             raise ValueError(f"Unsupported metrics column: {column}")
         with self._connect() as connection:
-            row = connection.execute(
+            row = self._safe_report_query(
+                connection,
                 f"""
                 SELECT
                     AVG({column}) AS average,
@@ -233,11 +262,12 @@ class OperationalReporter:
                 WHERE timestamp >= ?
                 """,
                 _window_start_param(window),
-            ).fetchone()
+            )
+        row_dict = dict(row) if row else {}
         return {
-            "average": round(float(row["average"] or 0.0), 2),
-            "minimum": round(float(row["minimum"] or 0.0), 2),
-            "maximum": round(float(row["maximum"] or 0.0), 2),
+            "average": round(float(row_dict.get("average") or 0.0), 2),
+            "minimum": round(float(row_dict.get("minimum") or 0.0), 2),
+            "maximum": round(float(row_dict.get("maximum") or 0.0), 2),
         }
 
     def _service_health(

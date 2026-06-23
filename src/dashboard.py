@@ -575,7 +575,107 @@ async def run_dashboard_broadcaster(app: Any, interval_seconds: float = DEFAULT_
 
 
 def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
-    return {"integrations": [{"name": "Grafana", "status": "configured" if (BASE_DIR / "grafana").exists() else "not configured", "description": "Provisioned dashboards."}, {"name": "Prometheus", "status": "connected", "description": "Metrics endpoint available."}, {"name": "Docker", "status": "connected", "description": "Container runtime inventory."}, {"name": "MCP", "status": "available", "description": "FastMCP server."}, {"name": "SQLite", "status": "connected", "description": "SQLite persistence."}]}
+    def check_grafana() -> Dict[str, Any]:
+        grafana_dir = BASE_DIR / "grafana"
+        provisioned = grafana_dir.exists()
+        health_url = None
+        dashboard_url = None
+        reachable = False
+        try:
+            import urllib.request
+            import urllib.error
+            config = getattr(services, "config", None)
+            if config and hasattr(config, "integrations") and hasattr(config.integrations, "grafana_url"):
+                health_url = f"{config.integrations.grafana_url.rstrip('/')}/api/health"
+            if not health_url and provisioned:
+                health_url = "http://localhost:3000/api/health"
+            if health_url:
+                req = urllib.request.Request(health_url, method="GET")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status == 200:
+                        reachable = True
+                dashboard_url = health_url.replace("/api/health", "")
+        except Exception:
+            reachable = False
+        status = "connected" if reachable else ("configured" if provisioned else "not configured")
+        return {"name": "Grafana", "status": status, "description": "Provisioned dashboards.", "url": dashboard_url, "reachable": reachable}
+
+    def check_prometheus() -> Dict[str, Any]:
+        prometheus_dir = BASE_DIR / "grafana" / "prometheus"
+        reachable = False
+        scrape_url = None
+        try:
+            import urllib.request
+            import urllib.error
+            config = getattr(services, "config", None)
+            if config and hasattr(config, "integrations") and hasattr(config.integrations, "prometheus_url"):
+                base = config.integrations.prometheus_url.rstrip("/")
+            else:
+                base = "http://localhost:9090"
+            targets_url = f"{base}/api/v1/targets"
+            req = urllib.request.Request(targets_url, method="GET")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    reachable = data.get("status") == "success"
+            scrape_url = f"{base}/metrics"
+        except Exception:
+            reachable = False
+        status = "connected" if reachable else ("configured" if prometheus_dir.exists() else "not configured")
+        return {"name": "Prometheus", "status": status, "description": "Metrics endpoint available.", "url": scrape_url, "reachable": reachable}
+
+    def check_docker() -> Dict[str, Any]:
+        scanner = getattr(services, "docker_scanner", None)
+        reachable = False
+        container_count = 0
+        running_count = 0
+        if scanner is not None:
+            report = scanner.run({"include_all": True})
+            if report.get("status") == "ok":
+                reachable = True
+                containers = report.get("containers", [])
+                container_count = len(containers)
+                running_count = sum(1 for c in containers if c.get("status") == "running")
+        return {"name": "Docker", "status": "connected" if reachable else "disconnected", "description": f"Container runtime inventory ({running_count}/{container_count} running).", "reachable": reachable, "container_count": container_count, "running_count": running_count}
+
+    def check_mcp() -> Dict[str, Any]:
+        reachable = False
+        tools_available = 0
+        try:
+            from src.mcp_server import create_mcp_server
+            server = create_mcp_server()
+            tools = getattr(server, "tools", None)
+            if tools is not None:
+                tools_available = len(tools)
+                reachable = tools_available > 0
+            else:
+                list_fn = getattr(server, "list_tools", None)
+                if callable(list_fn):
+                    try:
+                        import asyncio
+                        result = asyncio.get_event_loop().run_until_complete(list_fn())
+                        tools_available = len(result) if isinstance(result, list) else 0
+                        reachable = tools_available > 0
+                    except Exception:
+                        reachable = False
+        except Exception:
+            reachable = False
+        status = "available" if reachable else "unavailable"
+        return {"name": "MCP", "status": status, "description": f"FastMCP server ({tools_available} tools).", "reachable": reachable, "tool_count": tools_available}
+
+    def check_sqlite() -> Dict[str, Any]:
+        repository = getattr(services, "platform_repository", None)
+        reachable = False
+        try:
+            if repository is not None:
+                _ = repository.fetch_all("incidents", limit=1)
+                reachable = True
+        except Exception:
+            reachable = False
+        status = "connected" if reachable else "disconnected"
+        return {"name": "SQLite", "status": status, "description": "SQLite persistence.", "reachable": reachable}
+
+    return {"integrations": [check_grafana(), check_prometheus(), check_docker(), check_mcp(), check_sqlite()]}
 
 
 def build_mcp_context() -> Dict[str, Any]:
@@ -1030,6 +1130,11 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         logs = repo.list_audit_logs(limit=limit, offset=offset)
         total = repo.fetch_all("audit_logs", limit=0, offset=0)
         return {"logs": logs, "count": len(logs), "total": len(total), "limit": limit, "offset": offset}
+
+    @app.get("/api/reports")
+    def api_reports(request: FastAPIRequest) -> Dict[str, Any]:
+        require_auth(request, app.state.auth_manager)
+        return build_reports_context(app.state.services)
 
     @app.get("/api/reports/{report_type}/{report_format}")
     def api_download_report(report_type: str, report_format: str, request: FastAPIRequest) -> Any:
