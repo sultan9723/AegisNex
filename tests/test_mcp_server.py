@@ -13,6 +13,9 @@ EXPECTED_MCP_TOOL_NAMES = {
     "list_containers",
     "list_incidents",
     "get_metrics",
+    "get_http_monitoring",
+    "get_ssl_monitoring",
+    "get_tcp_monitoring",
     "generate_report",
     "restart_container",
 }
@@ -105,6 +108,41 @@ class FakeRepository:
         return []
 
 
+class FakeHttpMonitor:
+    def run(self, params):
+        return {
+            "status": "ok",
+            "params": params,
+            "availability_percent": 100.0,
+            "available_count": 1,
+            "total_count": 1,
+            "checks": [{"name": params.get("endpoint_name") or "api"}],
+        }
+
+
+class FakeSslMonitor:
+    def run(self, params):
+        return {
+            "status": "ok",
+            "params": params,
+            "warning_count": 0,
+            "total_count": 1,
+            "checks": [{"name": params.get("target_name") or "public"}],
+        }
+
+
+class FakeTcpMonitor:
+    def run(self, params):
+        return {
+            "status": "ok",
+            "params": params,
+            "availability_percent": 100.0,
+            "reachable_count": 1,
+            "total_count": 1,
+            "checks": [{"name": params.get("target_name") or "db"}],
+        }
+
+
 def build_services() -> AegisNexMCPServices:
     return AegisNexMCPServices(
         monitor=FakeMonitor(),
@@ -112,7 +150,10 @@ def build_services() -> AegisNexMCPServices:
         health_checker=FakeHealthChecker(),
         incident_manager=FakeIncidentManager(),
         reporter=FakeReporter(),
-        storage_repository=FakeRepository(),
+        platform_repository=FakeRepository(),
+        http_monitor=FakeHttpMonitor(),
+        ssl_monitor=FakeSslMonitor(),
+        tcp_monitor=FakeTcpMonitor(),
     )
 
 
@@ -145,6 +186,36 @@ def test_mcp_tools_get_metrics_includes_latest_snapshot() -> None:
 
     assert metrics["current"]["cpu_percent"] == 10.0
     assert metrics["latest_snapshot"]["cpu_percent"] == 30
+
+
+def test_mcp_tools_get_http_monitoring() -> None:
+    tools = AegisNexMCPTools(build_services())
+
+    result = tools.get_http_monitoring(endpoint_name="api")
+
+    assert result["status"] == "ok"
+    assert result["params"] == {"endpoint_name": "api"}
+    assert result["checks"][0]["name"] == "api"
+
+
+def test_mcp_tools_get_ssl_monitoring() -> None:
+    tools = AegisNexMCPTools(build_services())
+
+    result = tools.get_ssl_monitoring(target_name="public")
+
+    assert result["status"] == "ok"
+    assert result["params"] == {"target_name": "public"}
+    assert result["checks"][0]["name"] == "public"
+
+
+def test_mcp_tools_get_tcp_monitoring() -> None:
+    tools = AegisNexMCPTools(build_services())
+
+    result = tools.get_tcp_monitoring(target_name="db")
+
+    assert result["status"] == "ok"
+    assert result["params"] == {"target_name": "db"}
+    assert result["checks"][0]["name"] == "db"
 
 
 def test_mcp_tools_generate_reports() -> None:

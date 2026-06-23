@@ -97,6 +97,12 @@ health_checks:
     expected_status: 204
     endpoints:
       api: http://localhost:8080/health
+  ssl:
+    enabled: true
+    timeout_seconds: 6
+    warning_days: 14
+    targets:
+      public: example.com:443
   tcp:
     enabled: true
     timeout_seconds: 3
@@ -115,6 +121,10 @@ health_checks:
     assert config.health_checks.http.endpoints == {
         "api": "http://localhost:8080/health"
     }
+    assert config.health_checks.ssl.enabled is True
+    assert config.health_checks.ssl.timeout_seconds == 6
+    assert config.health_checks.ssl.warning_days == 14
+    assert config.health_checks.ssl.targets == {"public": "example.com:443"}
     assert config.health_checks.tcp.enabled is True
     assert config.health_checks.tcp.timeout_seconds == 3
     assert config.health_checks.tcp.targets == {"db": "localhost:5432"}
@@ -129,6 +139,23 @@ health_checks:
     enabled: true
     targets:
       db: localhost:not-a-port
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        Config.load(config_path=config_path, env_path=tmp_path / ".env")
+
+
+def test_config_rejects_invalid_ssl_target_port(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+health_checks:
+  ssl:
+    enabled: true
+    targets:
+      public: example.com:not-a-port
 """.strip(),
         encoding="utf-8",
     )

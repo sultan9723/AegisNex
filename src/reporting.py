@@ -10,8 +10,6 @@ from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Literal
 
-from src.storage import AegisNexRepository
-
 ReportFormat = Literal["json", "csv", "pdf"]
 
 
@@ -34,7 +32,8 @@ class OperationalReporter:
 
     def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
         self.database_path = Path(database_path)
-        AegisNexRepository(self.database_path)
+        # Database initialization is now handled by PlatformRepository
+        # The AegisNexRepository is deprecated.
 
     def weekly_report(self, now: datetime | None = None) -> dict[str, Any]:
         end = _normalize_datetime(now)
@@ -122,7 +121,7 @@ class OperationalReporter:
                 """
                 SELECT
                     COUNT(*) AS total_incidents,
-                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_incidents,
+                    SUM(CASE WHEN status IN ('active', 'acknowledged') THEN 1 ELSE 0 END) AS active_incidents,
                     SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
                 FROM incidents
                 WHERE timestamp >= ?
