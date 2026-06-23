@@ -259,7 +259,7 @@ class AuthManager:
         self.refresh_token_ttl_seconds = int(
             os.getenv("AEGISNEX_REFRESH_TOKEN_TTL_SECONDS", str(refresh_token_ttl_seconds))
         )
-        self.blacklist = TokenBlacklist(user_store.database_path)
+        self.blacklist = TokenBlacklist(self.user_store.database_path)
 
     def create_access_token(self, user: User) -> str:
         now = datetime.now(timezone.utc)
