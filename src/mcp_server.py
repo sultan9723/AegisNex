@@ -7,11 +7,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from src.config import Config
+from src.http_monitor import HttpEndpointMonitor
 from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.orchestrator import SystemHealthChecker
 from src.reporting import OperationalReporter
-from src.storage import AegisNexRepository
+from src.ssl_monitor import SslCertificateMonitor
+from src.tcp_monitor import TcpTargetMonitor
+from src.platform_db import PlatformRepository, load_database_settings
 
 
 try:
@@ -27,7 +30,10 @@ class AegisNexMCPServices:
     health_checker: Any
     incident_manager: IncidentManager
     reporter: OperationalReporter
-    storage_repository: Any | None = None
+    platform_repository: Any | None = None
+    http_monitor: Any | None = None
+    ssl_monitor: Any | None = None
+    tcp_monitor: Any | None = None
 
 
 class AegisNexMCPTools:
@@ -51,10 +57,19 @@ class AegisNexMCPTools:
             for incident in self.services.incident_manager.list_incidents()
         ]
         if status:
+            normalized = status.lower()
+            if normalized == "active":
+                allowed = {"active", "acknowledged"}
+                incidents = [
+                    incident
+                    for incident in incidents
+                    if str(incident.get("status", "")).lower() in allowed
+                ]
+                return {"status": "ok", "incidents": incidents, "count": len(incidents)}
             incidents = [
                 incident
                 for incident in incidents
-                if str(incident.get("status", "")).lower() == status.lower()
+                if str(incident.get("status", "")).lower() == normalized
             ]
         return {"status": "ok", "incidents": incidents, "count": len(incidents)}
 
@@ -62,7 +77,7 @@ class AegisNexMCPTools:
         """Return current system metrics and latest persisted metrics snapshot."""
         current = dict(self.services.monitor.run({}))
         latest_snapshot: Dict[str, Any] | None = None
-        repository = self.services.storage_repository
+        repository = self.services.platform_repository
         if repository is not None:
             try:
                 snapshots = repository.fetch_all("metrics_snapshots")
@@ -79,6 +94,44 @@ class AegisNexMCPTools:
             "current": current,
             "latest_snapshot": latest_snapshot,
         }
+
+    def get_http_monitoring(self, endpoint_name: Optional[str] = None) -> Dict[str, Any]:
+        """Check configured HTTP endpoints and return availability results."""
+        if self.services.http_monitor is None:
+            return {
+                "status": "disabled",
+                "availability_percent": 100.0,
+                "available_count": 0,
+                "total_count": 0,
+                "checks": [],
+            }
+        params = {"endpoint_name": endpoint_name} if endpoint_name else {}
+        return dict(self.services.http_monitor.run(params))
+
+    def get_ssl_monitoring(self, target_name: Optional[str] = None) -> Dict[str, Any]:
+        """Check configured SSL certificates and return expiry results."""
+        if self.services.ssl_monitor is None:
+            return {
+                "status": "disabled",
+                "warning_count": 0,
+                "total_count": 0,
+                "checks": [],
+            }
+        params = {"target_name": target_name} if target_name else {}
+        return dict(self.services.ssl_monitor.run(params))
+
+    def get_tcp_monitoring(self, target_name: Optional[str] = None) -> Dict[str, Any]:
+        """Check configured TCP host:port targets and return reachability results."""
+        if self.services.tcp_monitor is None:
+            return {
+                "status": "disabled",
+                "availability_percent": 100.0,
+                "reachable_count": 0,
+                "total_count": 0,
+                "checks": [],
+            }
+        params = {"target_name": target_name} if target_name else {}
+        return dict(self.services.tcp_monitor.run(params))
 
     def generate_report(
         self,
@@ -144,19 +197,57 @@ def create_services(config_path: str | Path = "config.yaml") -> AegisNexMCPServi
         monitor=monitor,
         docker_scanner=docker_scanner,
     )
-    repository = AegisNexRepository(config.storage.database_path)
+    platform_repository = PlatformRepository(
+        config.storage.database_url
+        or load_database_settings(config.storage.database_path)
+    )
     incident_manager = IncidentManager(
         config.incidents.history_path,
-        storage_repository=repository,
+        storage_repository=platform_repository,
     )
-    reporter = OperationalReporter(config.storage.database_path)
+    http_monitor = (
+        HttpEndpointMonitor(
+            endpoints=config.health_checks.http.endpoints,
+            timeout_seconds=config.health_checks.http.timeout_seconds,
+            expected_status=config.health_checks.http.expected_status,
+            incident_manager=incident_manager,
+            storage_repository=platform_repository,
+        )
+        if config.health_checks.http.enabled
+        else None
+    )
+    ssl_monitor = (
+        SslCertificateMonitor(
+            targets=config.health_checks.ssl.targets,
+            timeout_seconds=config.health_checks.ssl.timeout_seconds,
+            warning_days=config.health_checks.ssl.warning_days,
+            incident_manager=incident_manager,
+            storage_repository=platform_repository,
+        )
+        if config.health_checks.ssl.enabled
+        else None
+    )
+    tcp_monitor = (
+        TcpTargetMonitor(
+            targets=config.health_checks.tcp.targets,
+            timeout_seconds=config.health_checks.tcp.timeout_seconds,
+            incident_manager=incident_manager,
+            storage_repository=platform_repository,
+        )
+        if config.health_checks.tcp.enabled
+        else None
+    )
+    reporter = OperationalReporter(str(platform_repository._sqlite_path()))
     return AegisNexMCPServices(
         monitor=monitor,
         docker_scanner=docker_scanner,
         health_checker=health_checker,
         incident_manager=incident_manager,
         reporter=reporter,
-        storage_repository=repository,
+        platform_repository=platform_repository,
+        http_monitor=http_monitor,
+        ssl_monitor=ssl_monitor,
+        tcp_monitor=tcp_monitor,
     )
 
 
@@ -190,6 +281,18 @@ def create_mcp_server(
     @mcp.tool()
     def get_metrics() -> Dict[str, Any]:
         return tools.get_metrics()
+
+    @mcp.tool()
+    def get_http_monitoring(endpoint_name: Optional[str] = None) -> Dict[str, Any]:
+        return tools.get_http_monitoring(endpoint_name=endpoint_name)
+
+    @mcp.tool()
+    def get_ssl_monitoring(target_name: Optional[str] = None) -> Dict[str, Any]:
+        return tools.get_ssl_monitoring(target_name=target_name)
+
+    @mcp.tool()
+    def get_tcp_monitoring(target_name: Optional[str] = None) -> Dict[str, Any]:
+        return tools.get_tcp_monitoring(target_name=target_name)
 
     @mcp.tool()
     def generate_report(

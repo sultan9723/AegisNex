@@ -54,6 +54,14 @@ class HttpHealthCheckConfig:
 
 
 @dataclass(frozen=True)
+class SslHealthCheckConfig:
+    enabled: bool
+    timeout_seconds: int
+    warning_days: int
+    targets: dict[str, str]
+
+
+@dataclass(frozen=True)
 class TcpHealthCheckConfig:
     enabled: bool
     timeout_seconds: int
@@ -64,6 +72,7 @@ class TcpHealthCheckConfig:
 class HealthChecksConfig:
     docker: DockerHealthCheckConfig
     http: HttpHealthCheckConfig
+    ssl: SslHealthCheckConfig
     tcp: TcpHealthCheckConfig
 
 
@@ -75,6 +84,7 @@ class IncidentConfig:
 @dataclass(frozen=True)
 class StorageConfig:
     database_path: str
+    database_url: str
 
 
 @dataclass(frozen=True)
@@ -170,6 +180,7 @@ class Config:
         health_checks_raw = _section(raw, "health_checks")
         docker_health_raw = _section(health_checks_raw, "docker")
         http_health_raw = _section(health_checks_raw, "http")
+        ssl_health_raw = _section(health_checks_raw, "ssl")
         tcp_health_raw = _section(health_checks_raw, "tcp")
         smtp_raw = _section(raw, "smtp")
 
@@ -229,7 +240,14 @@ class Config:
                 )
             ),
             storage=StorageConfig(
-                database_path=_str(storage_raw, "database_path", "aegisnex.db")
+                database_path=_str(storage_raw, "database_path", "aegisnex.db"),
+                database_url=_env_str(
+                    "AEGISNEX_DATABASE_URL",
+                    _env_str(
+                        "DATABASE_URL",
+                        _str(storage_raw, "database_url", ""),
+                    ),
+                ),
             ),
             notifications=NotificationsConfig(
                 email=EmailNotificationConfig(
@@ -290,6 +308,12 @@ class Config:
                     timeout_seconds=_int(http_health_raw, "timeout_seconds", 5),
                     expected_status=_int(http_health_raw, "expected_status", 200),
                     endpoints=_str_map(_section(http_health_raw, "endpoints")),
+                ),
+                ssl=SslHealthCheckConfig(
+                    enabled=_bool(ssl_health_raw, "enabled", False),
+                    timeout_seconds=_int(ssl_health_raw, "timeout_seconds", 5),
+                    warning_days=_int(ssl_health_raw, "warning_days", 30),
+                    targets=_str_map(_section(ssl_health_raw, "targets")),
                 ),
                 tcp=TcpHealthCheckConfig(
                     enabled=_bool(tcp_health_raw, "enabled", False),
@@ -362,6 +386,12 @@ class Config:
             self.health_checks.tcp.timeout_seconds,
             "health_checks.tcp.timeout_seconds",
         )
+        _require_positive_int(
+            self.health_checks.ssl.timeout_seconds,
+            "health_checks.ssl.timeout_seconds",
+        )
+        if self.health_checks.ssl.warning_days < 0:
+            raise ConfigError("health_checks.ssl.warning_days cannot be negative.")
         if (
             self.health_checks.http.expected_status < 100
             or self.health_checks.http.expected_status > 599
@@ -370,6 +400,20 @@ class Config:
         for name, endpoint in self.health_checks.http.endpoints.items():
             if not name.strip() or not endpoint.strip():
                 raise ConfigError("health_checks.http.endpoints cannot contain empty values.")
+        for name, target in self.health_checks.ssl.targets.items():
+            if not name.strip() or not target.strip():
+                raise ConfigError("health_checks.ssl.targets cannot contain empty values.")
+            if ":" in target:
+                try:
+                    port = int(target.rsplit(":", 1)[1])
+                except ValueError as exc:
+                    raise ConfigError(
+                        "health_checks.ssl.targets values must use numeric ports."
+                    ) from exc
+                if port < 1 or port > 65535:
+                    raise ConfigError(
+                        "health_checks.ssl.targets ports must be between 1 and 65535."
+                    )
         for name, target in self.health_checks.tcp.targets.items():
             if not name.strip() or not target.strip() or ":" not in target:
                 raise ConfigError(

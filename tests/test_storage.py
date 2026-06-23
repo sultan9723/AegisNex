@@ -33,6 +33,9 @@ def test_repository_creates_database_and_tables(tmp_path: Path) -> None:
         "notifications",
         "remediations",
         "metrics_snapshots",
+        "http_checks",
+        "ssl_checks",
+        "tcp_checks",
     }.issubset(repository.table_names())
 
 
@@ -128,6 +131,87 @@ def test_repository_saves_metrics_snapshot(tmp_path: Path) -> None:
     assert rows[0]["cpu_percent"] == 10
     assert rows[0]["running_containers"] == 3
     assert rows[0]["notifications_failed"] == 2
+
+
+def test_repository_saves_http_checks(tmp_path: Path) -> None:
+    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+
+    repository.save_http_check(
+        {
+            "timestamp": "2026-06-20T12:00:00Z",
+            "name": "api",
+            "url": "http://localhost:8000/health",
+            "status": "ok",
+            "available": True,
+            "expected_status": 200,
+            "status_code": 200,
+            "latency_ms": 12.5,
+            "error": "",
+        }
+    )
+
+    rows = repository.fetch_all("http_checks")
+
+    assert len(rows) == 1
+    assert rows[0]["endpoint_name"] == "api"
+    assert rows[0]["available"] == 1
+    assert rows[0]["status_code"] == 200
+    assert rows[0]["latency_ms"] == 12.5
+
+
+def test_repository_saves_ssl_checks(tmp_path: Path) -> None:
+    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+
+    repository.save_ssl_check(
+        {
+            "timestamp": "2026-06-20T12:00:00Z",
+            "name": "api",
+            "target": "example.com:443",
+            "host": "example.com",
+            "port": 443,
+            "status": "warning",
+            "valid": False,
+            "issuer": "Example CA",
+            "expires_at": "2026-07-01T00:00:00Z",
+            "days_remaining": 10,
+            "warning_days": 30,
+            "error": "",
+        }
+    )
+
+    rows = repository.fetch_all("ssl_checks")
+
+    assert len(rows) == 1
+    assert rows[0]["target_name"] == "api"
+    assert rows[0]["issuer"] == "Example CA"
+    assert rows[0]["days_remaining"] == 10
+    assert rows[0]["valid"] == 0
+
+
+def test_repository_saves_tcp_checks(tmp_path: Path) -> None:
+    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+
+    repository.save_tcp_check(
+        {
+            "timestamp": "2026-06-20T12:00:00Z",
+            "name": "db",
+            "target": "localhost:5432",
+            "host": "localhost",
+            "port": 5432,
+            "status": "ok",
+            "reachable": True,
+            "latency_ms": 4.2,
+            "error": "",
+        }
+    )
+
+    rows = repository.fetch_all("tcp_checks")
+
+    assert len(rows) == 1
+    assert rows[0]["target_name"] == "db"
+    assert rows[0]["host"] == "localhost"
+    assert rows[0]["port"] == 5432
+    assert rows[0]["reachable"] == 1
 
 
 def test_repository_rejects_unknown_table(tmp_path: Path) -> None:

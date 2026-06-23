@@ -44,7 +44,13 @@ class AegisNexRepository:
                     remediation_attempted INTEGER NOT NULL,
                     remediation_successful INTEGER NOT NULL,
                     status TEXT NOT NULL,
-                    resolved_timestamp TEXT
+                    incident_status TEXT NOT NULL DEFAULT 'active',
+                    acknowledged_by TEXT,
+                    acknowledged_at TEXT,
+                    resolved_by TEXT,
+                    resolved_at TEXT,
+                    resolved_timestamp TEXT,
+                    resolution_notes TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS notifications (
@@ -89,8 +95,78 @@ class AegisNexRepository:
                     notifications_sent REAL NOT NULL,
                     notifications_failed REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS http_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    endpoint_name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    available INTEGER NOT NULL,
+                    expected_status INTEGER NOT NULL,
+                    status_code INTEGER,
+                    latency_ms REAL,
+                    error TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS ssl_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    valid INTEGER NOT NULL,
+                    issuer TEXT NOT NULL,
+                    expires_at TEXT,
+                    days_remaining INTEGER,
+                    warning_days INTEGER NOT NULL,
+                    error TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS tcp_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    target_name TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    reachable INTEGER NOT NULL,
+                    latency_ms REAL,
+                    error TEXT NOT NULL
+                );
                 """
             )
+            for statement in self._incident_migration_statements(connection):
+                connection.execute(statement)
+
+    def _incident_migration_statements(self, connection: sqlite3.Connection) -> list[str]:
+        existing = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
+        }
+        columns = {
+            "incident_status": "TEXT NOT NULL DEFAULT 'active'",
+            "acknowledged_by": "TEXT",
+            "acknowledged_at": "TEXT",
+            "resolved_by": "TEXT",
+            "resolved_at": "TEXT",
+            "resolution_notes": "TEXT",
+        }
+        statements = [
+            f"ALTER TABLE incidents ADD COLUMN {name} {definition}"
+            for name, definition in columns.items()
+            if name not in existing
+        ]
+        statements.extend(
+            [
+                "UPDATE incidents SET incident_status = status",
+                "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
+            ]
+        )
+        return statements
 
     def save_incident(self, incident: Incident) -> None:
         with self._connect() as connection:
@@ -107,9 +183,15 @@ class AegisNexRepository:
                     remediation_attempted,
                     remediation_successful,
                     status,
-                    resolved_timestamp
+                    incident_status,
+                    acknowledged_by,
+                    acknowledged_at,
+                    resolved_by,
+                    resolved_at,
+                    resolved_timestamp,
+                    resolution_notes
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(incident_id) DO UPDATE SET
                     severity = excluded.severity,
                     description = excluded.description,
@@ -117,7 +199,13 @@ class AegisNexRepository:
                     remediation_attempted = excluded.remediation_attempted,
                     remediation_successful = excluded.remediation_successful,
                     status = excluded.status,
-                    resolved_timestamp = excluded.resolved_timestamp
+                    incident_status = excluded.incident_status,
+                    acknowledged_by = excluded.acknowledged_by,
+                    acknowledged_at = excluded.acknowledged_at,
+                    resolved_by = excluded.resolved_by,
+                    resolved_at = excluded.resolved_at,
+                    resolved_timestamp = excluded.resolved_timestamp,
+                    resolution_notes = excluded.resolution_notes
                 """,
                 (
                     incident.incident_id,
@@ -130,7 +218,13 @@ class AegisNexRepository:
                     int(incident.remediation_attempted),
                     int(incident.remediation_successful),
                     incident.status,
+                    getattr(incident, "incident_status", incident.status),
+                    getattr(incident, "acknowledged_by", None),
+                    getattr(incident, "acknowledged_at", None),
+                    getattr(incident, "resolved_by", None),
+                    getattr(incident, "resolved_at", incident.resolved_timestamp),
                     incident.resolved_timestamp,
+                    getattr(incident, "resolution_notes", None),
                 ),
             )
 
@@ -244,12 +338,111 @@ class AegisNexRepository:
                 ),
             )
 
+    def save_http_check(self, check: Dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO http_checks (
+                    timestamp,
+                    endpoint_name,
+                    url,
+                    status,
+                    available,
+                    expected_status,
+                    status_code,
+                    latency_ms,
+                    error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(check.get("timestamp", utc_timestamp())),
+                    str(check.get("name", check.get("endpoint_name", ""))),
+                    str(check.get("url", "")),
+                    str(check.get("status", "")),
+                    int(bool(check.get("available", False))),
+                    int(check.get("expected_status", 200)),
+                    check.get("status_code"),
+                    check.get("latency_ms"),
+                    str(check.get("error", "")),
+                ),
+            )
+
+    def save_ssl_check(self, check: Dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ssl_checks (
+                    timestamp,
+                    target_name,
+                    target,
+                    host,
+                    port,
+                    status,
+                    valid,
+                    issuer,
+                    expires_at,
+                    days_remaining,
+                    warning_days,
+                    error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(check.get("timestamp", utc_timestamp())),
+                    str(check.get("name", check.get("target_name", ""))),
+                    str(check.get("target", "")),
+                    str(check.get("host", "")),
+                    int(check.get("port", 443)),
+                    str(check.get("status", "")),
+                    int(bool(check.get("valid", False))),
+                    str(check.get("issuer", "")),
+                    check.get("expires_at"),
+                    check.get("days_remaining"),
+                    int(check.get("warning_days", 30)),
+                    str(check.get("error", "")),
+                ),
+            )
+
+    def save_tcp_check(self, check: Dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO tcp_checks (
+                    timestamp,
+                    target_name,
+                    target,
+                    host,
+                    port,
+                    status,
+                    reachable,
+                    latency_ms,
+                    error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(check.get("timestamp", utc_timestamp())),
+                    str(check.get("name", check.get("target_name", ""))),
+                    str(check.get("target", "")),
+                    str(check.get("host", "")),
+                    int(check.get("port", 0)),
+                    str(check.get("status", "")),
+                    int(bool(check.get("reachable", False))),
+                    check.get("latency_ms"),
+                    str(check.get("error", "")),
+                ),
+            )
+
     def fetch_all(self, table_name: str) -> list[Dict[str, Any]]:
         allowed = {
             "incidents",
             "notifications",
             "remediations",
             "metrics_snapshots",
+            "http_checks",
+            "ssl_checks",
+            "tcp_checks",
         }
         if table_name not in allowed:
             raise ValueError(f"Unsupported table: {table_name}")

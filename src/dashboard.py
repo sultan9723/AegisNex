@@ -29,10 +29,10 @@ from src.orchestrator import SystemHealthChecker
 from src.prometheus_exporter import PrometheusExporter
 from src.reporting import OperationalReporter
 from src.ssl_monitor import SslCertificateMonitor
-from src.storage import AegisNexRepository
 from src.tcp_monitor import TcpTargetMonitor
 from src.platform_db import PlatformRepository, load_database_settings
 from src.websocket_manager import WebSocketManager
+from src.cache import DashboardCache
 
 try:
     from fastapi import Request as FastAPIRequest
@@ -142,7 +142,6 @@ class DashboardServices:
     incident_manager: IncidentManager
     guardian: Guardian
     restart_history_path: Path
-    storage_repository: Any | None = None
     http_monitor: Any | None = None
     ssl_monitor: Any | None = None
     tcp_monitor: Any | None = None
@@ -161,7 +160,6 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         client_timeout_seconds=config.docker.client_timeout_seconds,
         restart_timeout_seconds=config.docker.restart_timeout_seconds,
     )
-    storage_repository = AegisNexRepository(config.storage.database_path)
     platform_repository = PlatformRepository(
         config.storage.database_url
         or load_database_settings(config.storage.database_path)
@@ -179,7 +177,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
         incident_manager=incident_manager,
-        storage_repository=storage_repository,
+        storage_repository=platform_repository,
     )
     http_monitor = (
         HttpEndpointMonitor(
@@ -187,7 +185,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
             timeout_seconds=config.health_checks.http.timeout_seconds,
             expected_status=config.health_checks.http.expected_status,
             incident_manager=incident_manager,
-            storage_repository=storage_repository,
+            storage_repository=platform_repository,
         )
         if config.health_checks.http.enabled
         else None
@@ -198,7 +196,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
             timeout_seconds=config.health_checks.ssl.timeout_seconds,
             warning_days=config.health_checks.ssl.warning_days,
             incident_manager=incident_manager,
-            storage_repository=storage_repository,
+            storage_repository=platform_repository,
         )
         if config.health_checks.ssl.enabled
         else None
@@ -208,7 +206,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
             targets=config.health_checks.tcp.targets,
             timeout_seconds=config.health_checks.tcp.timeout_seconds,
             incident_manager=incident_manager,
-            storage_repository=storage_repository,
+            storage_repository=platform_repository,
         )
         if config.health_checks.tcp.enabled
         else None
@@ -224,7 +222,6 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         incident_manager=incident_manager,
         guardian=guardian,
         restart_history_path=Path(config.guardian.restart_history_path),
-        storage_repository=storage_repository,
         http_monitor=http_monitor,
         ssl_monitor=ssl_monitor,
         tcp_monitor=tcp_monitor,
@@ -344,7 +341,7 @@ def parse_timestamp(value: Any) -> datetime | None:
 
 
 def storage_rows(services: DashboardServices, table_name: str) -> List[Dict[str, Any]]:
-    repository = services.storage_repository
+    repository = services.platform_repository
     if repository is None:
         return []
     try:
@@ -464,7 +461,12 @@ def _boolish(value: Any) -> bool | None:
     return None
 
 
-def collect_dashboard_context(services: DashboardServices) -> Dict[str, Any]:
+def collect_dashboard_context(services: DashboardServices, use_cache: bool = True) -> Dict[str, Any]:
+    cache = getattr(services, "dashboard_cache", None)
+    if use_cache and cache is not None:
+        cached = cache.get_system_metrics()
+        if cached is not None:
+            return cached
     timestamp = utc_now()
     metrics = services.monitor.run({})
     docker_report = services.docker_scanner.run({"include_all": True})
@@ -478,7 +480,7 @@ def collect_dashboard_context(services: DashboardServices) -> Dict[str, Any]:
     remediation_rows = storage_rows(services, "remediations")
     actions = build_remediation_actions(incidents, restart_history)
     container_rows = build_container_rows(containers, restart_history, timestamp)
-    return {
+    result = {
         "timestamp": timestamp,
         "metrics": metrics,
         "network": get_network_stats(),
@@ -493,7 +495,13 @@ def collect_dashboard_context(services: DashboardServices) -> Dict[str, Any]:
         "recent_remediations": build_recent_remediations(remediation_rows, actions),
         "notification_stats": build_notification_statistics(notification_rows),
         "notification_rows": sorted(notification_rows, key=lambda r: str(r.get("timestamp", "")), reverse=True),
+        "http_monitoring": collect_http_monitoring(services),
+        "ssl_monitoring": collect_ssl_monitoring(services),
+        "tcp_monitoring": collect_tcp_monitoring(services),
     }
+    if cache is not None:
+        cache.set_system_metrics(result)
+    return result
 
 
 def build_dashboard_api_snapshot(context: Dict[str, Any]) -> Dict[str, Any]:
@@ -506,6 +514,9 @@ def build_dashboard_api_snapshot(context: Dict[str, Any]) -> Dict[str, Any]:
         "metrics": {"timestamp": context["timestamp"], "metrics": context["metrics"], "network": context["network"], "chart_data": context["chart_data"]["metrics"]},
         "notifications": {"notification_stats": context["notification_stats"], "notifications": context.get("notification_rows", [])[:25], "count": len(context.get("notification_rows", []))},
         "remediations": {"actions": context["actions"], "recent_remediations": context["recent_remediations"], "count": len(context["actions"])},
+        "http_monitoring": context.get("http_monitoring", {"status": "disabled"}),
+        "ssl_monitoring": context.get("ssl_monitoring", {"status": "disabled"}),
+        "tcp_monitoring": context.get("tcp_monitoring", {"status": "disabled"}),
     }
 
 
@@ -544,20 +555,22 @@ def _remediation_key(action: Dict[str, Any]) -> tuple:
 
 async def run_dashboard_broadcaster(app: Any, interval_seconds: float = DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS) -> None:
     previous_context: Dict[str, Any] | None = None
+    manager = app.state.websocket_manager
     while True:
         try:
-            manager = app.state.websocket_manager
             if manager.connection_count:
                 context = collect_dashboard_context(app.state.services)
-                for event in build_realtime_events(context, previous_context):
-                    await manager.broadcast(event)
+                events = build_realtime_events(context, previous_context)
+                for event in events:
+                    await manager.broadcast_with_backoff(event)
+                manager.reset_failures()
                 previous_context = context
             else:
                 previous_context = None
+                manager.reset_failures()
         except Exception as exc:
             import logging
-            logging.getLogger(__name__).error("WebSocket broadcast error: %s", exc, exc_info=True)
-            await asyncio.sleep(min(interval_seconds * 2, 60))
+            logging.getLogger(__name__).error("WebSocket broadcaster error: %s", exc, exc_info=True)
         await asyncio.sleep(interval_seconds)
 
 
@@ -580,7 +593,12 @@ def build_mcp_context() -> Dict[str, Any]:
 
 
 def build_reports_context(services: DashboardServices) -> Dict[str, Any]:
-    return {"reports": [{"name": "Weekly report", "report_type": "weekly", "payload": {}}, {"name": "Monthly report", "report_type": "monthly", "payload": {}}]}
+    return {
+        "reports": [
+            {"name": "Weekly report", "report_type": "weekly", "payload": {"window": {"label": "Last 7 days"}}},
+            {"name": "Monthly report", "report_type": "monthly", "payload": {"window": {"label": "Last 30 days"}}},
+        ]
+    }
 
 
 def build_notifications_context(services: DashboardServices) -> Dict[str, Any]:
@@ -623,7 +641,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     app.state.services = services or create_services()
     app.state.auth_manager = auth_manager or AuthManager()
-    app.state.websocket_manager = WebSocketManager()
+    app.state.dashboard_cache = DashboardCache()
+    app.state.websocket_manager = WebSocketManager(cache=app.state.dashboard_cache)
     app.state.websocket_poll_interval_seconds = float(os.getenv("AEGISNEX_WS_POLL_INTERVAL_SECONDS", str(DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS)))
     app.state.websocket_broadcast_task = None
     app.state.monitoring_engine_task = None
@@ -663,7 +682,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     def render_report_response(report_type: str, report_format: str) -> Any:
         from src.reporting import OperationalReporter
-        database_path = getattr(app.state.services.storage_repository, "database_path", "aegisnex.db")
+        repo = getattr(app.state.services, "platform_repository", None)
+        database_path = str(getattr(repo, "_sqlite_path", lambda: Path("aegisnex.db"))()) if repo else "aegisnex.db"
         reporter = OperationalReporter(database_path)
         report = reporter.weekly_report() if report_type == "weekly" else reporter.monthly_report()
         if report_format == "json":
@@ -822,10 +842,20 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     @app.get("/api/incidents")
     def api_incidents(request: FastAPIRequest) -> Dict[str, Any]:
         require_auth(request, app.state.auth_manager)
-        ctx = api_context_fn()
-        incidents = ctx["active_incidents"] + ctx["resolved_incidents"]
-        incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
-        return {"active_incidents": ctx["active_incidents"], "resolved_incidents": ctx["resolved_incidents"], "recent_incidents": ctx["recent_incidents"], "incidents": incidents, "active_count": len(ctx["active_incidents"]), "resolved_count": len(ctx["resolved_incidents"]), "count": len(incidents)}
+        limit = int(request.query_params.get("limit", 100))
+        offset = int(request.query_params.get("offset", 0))
+        limit = max(1, min(limit, 1000))
+        repo = app.state.services.platform_repository
+        if repo is None:
+            ctx = api_context_fn()
+            incidents = ctx["active_incidents"] + ctx["resolved_incidents"]
+            incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+            return {"active_incidents": ctx["active_incidents"], "resolved_incidents": ctx["resolved_incidents"], "recent_incidents": ctx["recent_incidents"], "incidents": incidents[:limit], "active_count": len(ctx["active_incidents"]), "resolved_count": len(ctx["resolved_incidents"]), "count": len(incidents), "limit": limit, "offset": offset}
+        all_incidents = repo.list_incidents(limit=limit, offset=offset)
+        total = repo.fetch_all("incidents", limit=0, offset=0)
+        active = [i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}]
+        resolved = [i for i in all_incidents if i.get("incident_status") == "resolved"]
+        return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": all_incidents[:6], "incidents": all_incidents, "active_count": len(active), "resolved_count": len(resolved), "count": len(all_incidents), "total": len(total), "limit": limit, "offset": offset}
 
     @app.get("/api/incidents/{incident_id}")
     def api_incident_detail(incident_id: str, request: FastAPIRequest) -> Any:
@@ -994,8 +1024,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         require_auth(request, app.state.auth_manager)
         repo = app.state.services.platform_repository
         if repo is None: return {"logs": [], "count": 0}
-        logs = repo.list_audit_logs(limit=100)
-        return {"logs": logs, "count": len(logs)}
+        limit = int(request.query_params.get("limit", 100))
+        offset = int(request.query_params.get("offset", 0))
+        limit = max(1, min(limit, 1000))
+        logs = repo.list_audit_logs(limit=limit, offset=offset)
+        total = repo.fetch_all("audit_logs", limit=0, offset=0)
+        return {"logs": logs, "count": len(logs), "total": len(total), "limit": limit, "offset": offset}
 
     @app.get("/api/reports/{report_type}/{report_format}")
     def api_download_report(report_type: str, report_format: str, request: FastAPIRequest) -> Any:
@@ -1025,5 +1059,5 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
 try:
     app = create_app()
-except RuntimeError:
+except (RuntimeError, AttributeError):
     app = None
