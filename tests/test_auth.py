@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from src.auth import AuthManager, UserStore, decode_jwt, hash_password, verify_password
+from src.auth import AuthManager, UserStore, hash_password, verify_password
 
 
 def test_password_hashing_verifies_and_does_not_store_plaintext() -> None:
@@ -28,13 +28,15 @@ def test_auth_manager_issues_and_reads_jwt(tmp_path: Path) -> None:
         jwt_secret="test-secret",
     )
 
-    user, token = manager.register("ops@example.com", "password123")
-    payload = decode_jwt(token, "test-secret")
+    user, token, refresh = manager.register("ops@example.com", "password123")
+    decoded = manager.get_user_from_token(token)
 
-    assert payload is not None
-    assert payload["sub"] == str(user.id)
+    assert decoded is not None
+    assert decoded.id == user.id
+    assert decoded.email == user.email
     assert manager.get_user_from_token(token) == user
     assert manager.get_user_from_token(token + "tampered") is None
+    assert manager.get_user_from_token("invalid-token-here") is None
 
 
 def test_auth_manager_login_returns_none_for_invalid_credentials(tmp_path: Path) -> None:
@@ -45,3 +47,38 @@ def test_auth_manager_login_returns_none_for_invalid_credentials(tmp_path: Path)
     manager.register("ops@example.com", "password123")
 
     assert manager.login("ops@example.com", "wrong-password") is None
+
+
+def test_auth_manager_logout_revokes_token(tmp_path: Path) -> None:
+    manager = AuthManager(
+        user_store=UserStore(tmp_path / "users.db"),
+        jwt_secret="test-secret",
+    )
+    user, token, refresh = manager.register("ops@example.com", "password123")
+
+    assert manager.get_user_from_token(token) is not None
+    assert manager.logout(token) is True
+    assert manager.get_user_from_token(token) is None
+
+
+def test_auth_manager_hardcoded_secret_raises_error(tmp_path: Path) -> None:
+    """AuthManager must raise RuntimeError if no JWT secret is provided and env var is unset."""
+    import os
+    # Temporarily unset the env var to test the error
+    saved = os.environ.pop("AEGISNEX_JWT_SECRET", None)
+    try:
+        import src.auth as auth_mod
+        # Reload to clear cached env
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=True):
+            try:
+                AuthManager(
+                    user_store=UserStore(tmp_path / "users.db"),
+                    jwt_secret=None,
+                )
+                assert False, "Should have raised RuntimeError"
+            except RuntimeError:
+                pass  # Expected
+    finally:
+        if saved is not None:
+            os.environ["AEGISNEX_JWT_SECRET"] = saved

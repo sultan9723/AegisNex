@@ -6,5 +6,9 @@ jinja2
 mcp
 psutil
 prometheus-client
+psycopg[binary]
 pytest
 uvicorn
+PyJWT
+slowapi
+python-multipart
