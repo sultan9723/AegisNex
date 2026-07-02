@@ -68,6 +68,7 @@ class FakeRepository:
         from src.storage import AegisNexRepository
 
         self.database_path = database_path
+        self._sqlite_path = str(database_path)
         AegisNexRepository(database_path)
         now = datetime.now(timezone.utc)
         self.rows = {
@@ -104,6 +105,10 @@ class FakeRepository:
             "ssl_checks": [],
             "tcp_checks": [],
         }
+
+    def _connect(self):
+        import sqlite3
+        return sqlite3.connect(str(self.database_path))
 
     def fetch_all(self, table_name):
         return self.rows.get(table_name, [])
@@ -179,6 +184,13 @@ def test_build_container_rows_adds_restart_count_and_timestamp() -> None:
             "health_status": "healthy",
             "restart_count": 3,
             "last_check_timestamp": "2026-06-04T12:00:00Z",
+            "image": "unknown",
+            "started_at": None,
+            "uptime_seconds": None,
+            "cpu_percent": None,
+            "memory_usage_bytes": None,
+            "memory_limit_bytes": None,
+            "memory_percent": None,
         }
     ]
 
@@ -485,6 +497,84 @@ def test_dashboard_routes_redirect_to_login_without_session(tmp_path: Path) -> N
 
     assert status_code == 303
     assert headers["location"] == "/login"
+
+
+def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
+
+    auth_manager = AuthManager(
+        UserStore(tmp_path / "users.db"),
+        jwt_secret="test-secret-32chars-long-please!",
+    )
+    services = build_services(tmp_path)
+    app = create_app(services, auth_manager=auth_manager)
+
+    user, access_token, _ = auth_manager.register("viewer@example.com", "password123")
+    with auth_manager.user_store._connect() as connection:
+        connection.execute("UPDATE users SET role = 'viewer' WHERE id = ?", (user.id,))
+    legacy_token = auth_manager.create_access_token(auth_manager.user_store.get_user_by_id(user.id))
+    cookies = {"aegisnex_session": legacy_token}
+
+    status_code, _body, _headers = asyncio.run(asgi_request(app, "GET", "/api/dashboard", cookies=cookies))
+    assert status_code == 200
+
+    status_code, _body, _headers = asyncio.run(asgi_request(app, "GET", "/api/reports", cookies=cookies))
+    assert status_code == 200
+
+    assert auth_manager.get_user_from_token(legacy_token) is not None
+
+
+def test_websocket_endpoints_accept_authenticated_query_token(tmp_path: Path) -> None:
+    pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
+
+    auth_manager = AuthManager(
+        UserStore(tmp_path / "users.db"),
+        jwt_secret="test-secret-32chars-long-please!",
+    )
+    services = build_services(tmp_path)
+    app = create_app(services, auth_manager=auth_manager)
+    user, token, _ = auth_manager.register("ops@example.com", "password123")
+    assert auth_manager.get_user_from_token(token) is not None
+
+    for path in ("/ws/dashboard", "/ws/targets", "/ws/incidents", "/ws/containers"):
+        messages = asyncio.run(asgi_websocket_handshake(app, path, token=token))
+        assert any(message["type"] == "websocket.accept" for message in messages)
+
+
+async def asgi_websocket_handshake(app, path: str, token: str | None = None) -> list[dict]:
+    messages: list[dict] = []
+    request_sent = False
+    query_string = f"token={token}".encode("utf-8") if token else b""
+    scope = {
+        "type": "websocket",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "scheme": "ws",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": query_string,
+        "headers": [(b"host", b"testserver"), (b"origin", b"http://localhost:3000")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "subprotocols": [],
+    }
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "websocket.connect"}
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send(message):
+        messages.append(message)
+
+    try:
+        await app(scope, receive, send)
+    except Exception:
+        pass
+    return messages
 
 
 @pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")

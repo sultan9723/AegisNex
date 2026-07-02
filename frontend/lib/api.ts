@@ -1,12 +1,27 @@
 export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 ).replace(/\/$/, "");
+
+export const DEFAULT_TIMEOUT_MS = 15_000;
+export const MAX_RETRIES = 2;
 
 export type SystemMetrics = {
   status?: string;
   cpu_percent?: number;
+  cpu_load_1m?: number | null;
+  cpu_load_5m?: number | null;
+  cpu_load_15m?: number | null;
   ram_percent?: number;
+  ram_used_gb?: number;
+  ram_total_gb?: number;
   disk_percent?: number;
+  disk_free_gb?: number;
+  disk_total_gb?: number;
+  network_bytes_sent?: number;
+  network_bytes_recv?: number;
+  uptime_seconds?: number;
+  process_count?: number;
+  warnings?: string[];
 };
 
 export type HealthScore = {
@@ -23,6 +38,12 @@ export type SystemHealthResponse = {
   running_container_count: number;
 };
 
+export type ContainerPort = {
+  container_port: string;
+  host_port: string | null;
+  host_ip: string | null;
+};
+
 export type ContainerRow = {
   name: string;
   status: string;
@@ -32,6 +53,8 @@ export type ContainerRow = {
   image?: string;
   cpu_percent?: number;
   memory_percent?: number;
+  started_at?: string | null;
+  ports?: ContainerPort[];
 };
 
 export type ContainersResponse = {
@@ -259,7 +282,7 @@ export type MonitoringTargetsResponse = {
 
 export type MonitoringTargetPayload = {
   name: string;
-  target_type: "http" | "tcp" | "ssl";
+  target_type: "http" | "tcp" | "ssl" | "dns" | "container";
   address: string;
   expected_status?: number | null;
   timeout_seconds: number;
@@ -296,33 +319,62 @@ export type DashboardRealtimeEvent = {
     | ContainerRow;
 };
 
-async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    cache: "no-store",
-    credentials: "include",
-  });
+function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+}
 
-  if (!response.ok) {
-    throw new Error(`AegisNex API ${path} returned ${response.status}`);
+async function fetchJsonWithRetry<T>(path: string, retries: number = MAX_RETRIES): Promise<T> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+        cache: "no-store",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (response.status === 401) {
+        if (typeof window !== "undefined") {
+          window.location.href = "/login";
+        }
+        throw new Error("Authentication required");
+      }
+
+      if (!response.ok) {
+        throw new Error(`AegisNex API ${path} returned ${response.status}`);
+      }
+
+      return response.json() as Promise<T>;
+    } catch (err) {
+      if (attempt < retries && err instanceof Error && err.name !== "AbortError") {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  return response.json() as Promise<T>;
+  throw new Error(`Failed to fetch ${path} after ${retries + 1} attempts`);
 }
 
 export function getSystemHealth() {
-  return fetchJson<SystemHealthResponse>("/api/system-health");
+  return fetchJsonWithRetry<SystemHealthResponse>("/api/system-health");
 }
 
 export function getContainers() {
-  return fetchJson<ContainersResponse>("/api/containers");
+  return fetchJsonWithRetry<ContainersResponse>("/api/containers");
 }
 
-export function getIncidents() {
-  return fetchJson<IncidentsResponse>("/api/incidents");
+export function getIncidents(limit?: number, offset?: number) {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (offset !== undefined) params.set("offset", String(offset));
+  const qs = params.toString();
+  return fetchJsonWithRetry<IncidentsResponse>(`/api/incidents${qs ? `?${qs}` : ""}`);
 }
 
 export function getIncidentDetail(incidentId: string) {
-  return fetchJson<IncidentDetailResponse>(`/api/incidents/${incidentId}`);
+  return fetchJsonWithRetry<IncidentDetailResponse>(`/api/incidents/${incidentId}`);
 }
 
 export async function acknowledgeIncident(incidentId: string) {
@@ -336,31 +388,31 @@ export async function resolveIncident(incidentId: string, resolutionNotes: strin
 }
 
 export function getMetrics() {
-  return fetchJson<MetricsResponse>("/api/metrics");
+  return fetchJsonWithRetry<MetricsResponse>("/api/metrics");
 }
 
 export function getNotifications() {
-  return fetchJson<NotificationsResponse>("/api/notifications");
+  return fetchJsonWithRetry<NotificationsResponse>("/api/notifications");
 }
 
 export function getRemediations() {
-  return fetchJson<RemediationsResponse>("/api/remediations");
+  return fetchJsonWithRetry<RemediationsResponse>("/api/remediations");
 }
 
 export function getHttpMonitoring() {
-  return fetchJson<HttpMonitoringResponse>("/api/http-monitoring");
+  return fetchJsonWithRetry<HttpMonitoringResponse>("/api/http-monitoring");
 }
 
 export function getSslMonitoring() {
-  return fetchJson<SslMonitoringResponse>("/api/ssl-monitoring");
+  return fetchJsonWithRetry<SslMonitoringResponse>("/api/ssl-monitoring");
 }
 
 export function getTcpMonitoring() {
-  return fetchJson<TcpMonitoringResponse>("/api/tcp-monitoring");
+  return fetchJsonWithRetry<TcpMonitoringResponse>("/api/tcp-monitoring");
 }
 
 export function getMonitoringTargets() {
-  return fetchJson<MonitoringTargetsResponse>("/api/monitoring-targets");
+  return fetchJsonWithRetry<MonitoringTargetsResponse>("/api/monitoring-targets");
 }
 
 export async function createMonitoringTarget(payload: MonitoringTargetPayload) {
@@ -380,7 +432,7 @@ export async function runMonitoringTarget(id: number) {
 }
 
 export function getMonitoringTargetHistory(id: number) {
-  return fetchJson<CheckHistoryResponse>(`/api/monitoring-targets/${id}/history`);
+  return fetchJsonWithRetry<CheckHistoryResponse>(`/api/monitoring-targets/${id}/history`);
 }
 
 async function writeJson<T>(
@@ -388,11 +440,11 @@ async function writeJson<T>(
   method: "POST" | "PUT" | "DELETE",
   payload?: unknown,
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
     method,
     cache: "no-store",
     credentials: "include",
-    headers: payload ? { "content-type": "application/json" } : undefined,
+    headers: payload ? { "Content-Type": "application/json" } : undefined,
     body: payload ? JSON.stringify(payload) : undefined,
   });
 
@@ -405,20 +457,475 @@ async function writeJson<T>(
 
 export function getDashboardWebSocketUrl() {
   const configured = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "");
-  if (configured) return `${configured}/ws/dashboard`;
+  const token = typeof window !== "undefined" ? (window as any).__AEGISNEX_ACCESS_TOKEN__ ?? null : null;
+  if (configured) return `${configured}/ws/dashboard${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 
   const url = new URL(API_BASE_URL);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.pathname = "/ws/dashboard";
   url.search = "";
   url.hash = "";
+  if (token) url.searchParams.set("token", token);
   return url.toString();
 }
 
+export function getDashboardSnapshot() {
+  return fetchJsonWithRetry<DashboardSnapshot>("/api/dashboard");
+}
+
 export function getIntegrations() {
-  return fetchJson<IntegrationsResponse>("/api/integrations");
+  return fetchJsonWithRetry<IntegrationsResponse>("/api/integrations");
+}
+
+export type IntegrationCatalogItem = {
+  integration_id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  config_schema: { credentials: Record<string, unknown>; settings: Record<string, unknown> };
+};
+
+export type IntegrationInstalledRow = {
+  integration_id: string;
+  name: string;
+  description: string;
+  icon: string;
+  category: string;
+  enabled: boolean;
+  credentials: Record<string, string>;
+  settings: Record<string, unknown>;
+  created_at: string;
+};
+
+export function getIntegrationCatalog() {
+  return fetchJsonWithRetry<{ catalog: IntegrationCatalogItem[]; count: number }>("/api/integrations/catalog");
+}
+
+export function getInstalledIntegrations() {
+  return fetchJsonWithRetry<{ integrations: IntegrationInstalledRow[]; count: number }>("/api/integrations/installed");
+}
+
+export function installIntegration(name: string, config: { credentials?: Record<string, string>; settings?: Record<string, unknown> }) {
+  return writeJson<{ status: string; name: string }>("/api/integrations/install", "POST", { name, config });
+}
+
+export function uninstallIntegration(name: string) {
+  return writeJson<{ status: string; name: string }>(`/api/integrations/${name}/uninstall`, "POST");
+}
+
+export function updateIntegration(name: string, config: { credentials?: Record<string, string>; settings?: Record<string, unknown> }) {
+  return writeJson<{ status: string; name: string }>(`/api/integrations/${name}`, "PUT", { config });
+}
+
+export function testIntegrationHealth(name: string) {
+  return writeJson<{ status: string; name: string; health?: unknown; error?: string }>(`/api/integrations/${name}/health`, "POST");
+}
+
+export type SystemInfoResponse = {
+  os: string;
+  hostname: string;
+  uptime_seconds: number | null;
+  docker_version: string | null;
+};
+
+export type AppSettings = {
+  session_timeout?: string;
+  workspace_name?: string;
+  email_notifications?: string;
+  notification_frequency?: string;
+  timezone?: string;
+  theme?: string;
+  accent_color?: string;
+};
+
+export type AppSettingsResponse = {
+  settings: AppSettings;
+  status?: string;
+};
+
+export function getSystemInfo() {
+  return fetchJsonWithRetry<SystemInfoResponse>("/api/system-info");
+}
+
+export function getAppSettings() {
+  return fetchJsonWithRetry<AppSettingsResponse>("/api/settings");
+}
+
+export async function saveAppSettings(payload: Partial<AppSettings>) {
+  return writeJson<AppSettingsResponse>("/api/settings", "PUT", payload);
+}
+
+export async function startContainer(name: string) {
+  return writeJson<Record<string, unknown>>(`/api/containers/${encodeURIComponent(name)}/start`, "POST");
+}
+
+export async function stopContainer(name: string) {
+  return writeJson<Record<string, unknown>>(`/api/containers/${encodeURIComponent(name)}/stop`, "POST");
+}
+
+export async function restartContainer(name: string) {
+  return writeJson<Record<string, unknown>>(`/api/containers/${encodeURIComponent(name)}/restart`, "POST");
+}
+
+export function getContainerLogs(name: string, tail: number = 100) {
+  return fetchJsonWithRetry<{ status: string; container: string; logs: string[]; count: number }>(
+    `/api/containers/${encodeURIComponent(name)}/logs?tail=${tail}`,
+  );
+}
+
+export async function reopenIncident(incidentId: string) {
+  return writeJson<IncidentRow>(`/api/incidents/${incidentId}/reopen`, "POST");
+}
+
+export async function deleteIncident(incidentId: string) {
+  return writeJson<{ status: string }>(`/api/incidents/${incidentId}`, "DELETE");
 }
 
 export function getMCPTools() {
-  return fetchJson<MCPResponse>("/api/mcp");
+  return fetchJsonWithRetry<MCPResponse>("/api/mcp");
+}
+
+// ---- AI Intelligence ----
+
+export type AiChatStep = {
+  node: string;
+  status: string;
+  summary: string;
+};
+
+export type AiChatResponse = {
+  answer: string;
+  goal_achieved: boolean;
+  confidence: number;
+  steps: AiChatStep[];
+  observations: string[];
+  corrections: string[];
+  errors: string[];
+  evidence: string[];
+  reasoning_summary: string;
+  remaining_uncertainty: string;
+  execution_duration_ms: number;
+  provider_used: string;
+  model_used: string;
+};
+
+export type AiPlanResponse = {
+  objective: string;
+  plan: Record<string, unknown>;
+  current_plan: string[];
+  parallel_batches: string[][];
+  missing_info: string[];
+};
+
+export type AiAnalyzeResponse = {
+  objective: string;
+  final_answer: string;
+  goal_achieved: boolean;
+  confidence: number;
+  plan: Record<string, unknown>;
+  executed_steps: string[];
+  observations: string[];
+  corrections: string[];
+  errors: string[];
+};
+
+export type AiHistoryItem = {
+  id: number;
+  request: string;
+  objective: string;
+  result_text: string;
+  confidence: number;
+  goal_achieved: boolean;
+  executed_at: string;
+};
+
+export type AiHistoryResponse = {
+  history: AiHistoryItem[];
+  count: number;
+  total?: number;
+};
+
+export async function postAiChat(request: string) {
+  return writeJson<AiChatResponse>("/api/ai/chat", "POST", { request });
+}
+
+export async function postAiPlan(request: string) {
+  return writeJson<AiPlanResponse>("/api/ai/plan", "POST", { request });
+}
+
+export async function postAiAnalyze(request: string) {
+  return writeJson<AiAnalyzeResponse>("/api/ai/analyze", "POST", { request });
+}
+
+export function getAiHistory(limit?: number, offset?: number) {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (offset !== undefined) params.set("offset", String(offset));
+  const qs = params.toString();
+  return fetchJsonWithRetry<AiHistoryResponse>(`/api/ai/history${qs ? `?${qs}` : ""}`);
+}
+
+export type AiWorkflowResponse = {
+  nodes: string[];
+  edges: { from: string; to: string; condition?: string }[];
+  max_retries: number;
+};
+
+export type AiExecutionsResponse = {
+  executions: Record<string, unknown>[];
+  count: number;
+  total: number;
+  stats: {
+    total: number;
+    successful: number;
+    failed: number;
+    success_rate: number;
+    avg_confidence: number;
+    avg_execution_duration_ms: number;
+  };
+};
+
+export type AiMemoryEntry = Record<string, unknown>;
+
+export type AiMemoryResponse = {
+  entries: AiMemoryEntry[];
+  count: number;
+  total?: number;
+  query?: string;
+  type?: string;
+};
+
+export type AiToolDef = {
+  name: string;
+  description: string;
+  category: string;
+  parameters: { name: string; type: string; description: string; required: boolean }[];
+  permission_level: string;
+  access_mode: string;
+  risk_level: string;
+  requires_approval: boolean;
+  destructive: boolean;
+};
+
+export type AiToolsResponse = {
+  tools: AiToolDef[];
+  count: number;
+};
+
+export type AiApprovalResponse = {
+  status: string;
+  approval_id: string;
+};
+
+export function getAiWorkflows() {
+  return fetchJsonWithRetry<AiWorkflowResponse>("/api/ai/workflows");
+}
+
+export function getAiExecutions(limit?: number, offset?: number) {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (offset !== undefined) params.set("offset", String(offset));
+  const qs = params.toString();
+  return fetchJsonWithRetry<AiExecutionsResponse>(`/api/ai/executions${qs ? `?${qs}` : ""}`);
+}
+
+export function getAiMemory(query?: string, type?: string, limit?: number) {
+  const params = new URLSearchParams();
+  if (query) params.set("query", query);
+  if (type) params.set("type", type);
+  if (limit !== undefined) params.set("limit", String(limit));
+  const qs = params.toString();
+  return fetchJsonWithRetry<AiMemoryResponse>(`/api/ai/memory${qs ? `?${qs}` : ""}`);
+}
+
+export function getAiTools() {
+  return fetchJsonWithRetry<AiToolsResponse>("/api/ai/tools");
+}
+
+export async function postAiApprove(approvalId: string) {
+  return writeJson<AiApprovalResponse>("/api/ai/approve", "POST", { approval_id: approvalId });
+}
+
+export async function postAiReject(approvalId: string) {
+  return writeJson<AiApprovalResponse>("/api/ai/reject", "POST", { approval_id: approvalId });
+}
+
+// ---- Sprint 9: Runbooks, Workflows, Timeline, Policies, Risk ----
+
+export type RunbookStepDef = {
+  name: string;
+  action: string;
+  tool: string;
+  params: Record<string, unknown>;
+  description: string;
+  condition: string;
+  on_failure: string;
+  retry_count: number;
+  requires_approval: boolean;
+  parallel: boolean;
+};
+
+export type RunbookDef = {
+  name: string;
+  description: string;
+  tags: string[];
+  steps: RunbookStepDef[];
+};
+
+export type RunbooksResponse = {
+  runbooks: RunbookDef[];
+  count: number;
+};
+
+export type RunbookExecuteResponse = {
+  status: string;
+  runbook_status: string;
+  step_results: Record<string, unknown>[];
+  error: string;
+};
+
+export type WorkflowStartResponse = {
+  status: string;
+  confidence: number;
+  goal_achieved: boolean;
+  workflow_triggered: string;
+  runbook: string;
+};
+
+export type WorkflowHistoryResponse = {
+  history: Record<string, unknown>[];
+  count: number;
+};
+
+export type TimelineEntry = {
+  type: string;
+  timestamp: string;
+  summary: string;
+  confidence?: number;
+  goal_achieved?: boolean;
+  category?: string;
+  severity?: string;
+};
+
+export type TimelineResponse = {
+  timeline: TimelineEntry[];
+  count: number;
+};
+
+export type PolicyDef = {
+  name: string;
+  description: string;
+  action_pattern: string;
+  condition: string;
+  effect: string;
+  priority: number;
+  enabled: boolean;
+};
+
+export type PoliciesResponse = {
+  policies: PolicyDef[];
+  count: number;
+};
+
+export type RiskAssessmentResponse = {
+  assessment: {
+    score: number;
+    level: string;
+    confidence: number;
+    requires_approval: boolean;
+    impact_estimate: string;
+    factors: string[];
+    auto_execute_allowed: boolean;
+  };
+};
+
+export type ApprovalRespondResponse = {
+  status: string;
+  approval_id: string;
+};
+
+export function getRunbooks() {
+  return fetchJsonWithRetry<RunbooksResponse>("/api/runbooks");
+}
+
+export async function executeRunbook(runbook: string) {
+  return writeJson<RunbookExecuteResponse>("/api/runbooks/execute", "POST", { runbook });
+}
+
+export async function startWorkflow(workflow: string) {
+  return writeJson<WorkflowStartResponse>("/api/workflows/start", "POST", { workflow });
+}
+
+export function getWorkflowHistory(limit?: number) {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  return fetchJsonWithRetry<WorkflowHistoryResponse>(`/api/workflows/history${params.toString() ? `?${params}` : ""}`);
+}
+
+export function getAiTimeline() {
+  return fetchJsonWithRetry<TimelineResponse>("/api/ai/timeline");
+}
+
+export function getAiPolicies() {
+  return fetchJsonWithRetry<PoliciesResponse>("/api/ai/policies");
+}
+
+export function getAiRisk(tool: string) {
+  const params = new URLSearchParams({ tool });
+  return fetchJsonWithRetry<RiskAssessmentResponse>(`/api/ai/risk?${params}`);
+}
+
+export async function respondApproval(approvalId: string, decision: "approve" | "reject") {
+  return writeJson<ApprovalRespondResponse>("/api/approval/respond", "POST", { approval_id: approvalId, decision });
+}
+
+// ---- Enterprise Search ----
+
+export type SearchResult = {
+  domain: string;
+  id: string;
+  title: string;
+  snippet: string;
+  url: string;
+  score: number;
+  metadata: Record<string, unknown>;
+};
+
+export type SearchResponse = {
+  results: SearchResult[];
+  total: number;
+  domains: Record<string, number>;
+  query: string;
+  duration_ms: number;
+};
+
+export type SearchDomainsResponse = {
+  domains: Record<string, number>;
+  total: number;
+};
+
+export type SearchStatsResponse = {
+  index_size: number;
+  domains: Record<string, number>;
+  last_indexed: string | null;
+};
+
+export function searchEnterprise(query: string, domain?: string, limit?: number) {
+  const params = new URLSearchParams({ q: query });
+  if (domain) params.set("domain", domain);
+  if (limit) params.set("limit", String(limit));
+  return fetchJsonWithRetry<SearchResponse>(`/api/search?${params}`);
+}
+
+export function getSearchDomains() {
+  return fetchJsonWithRetry<SearchDomainsResponse>("/api/search/domains");
+}
+
+export function getSearchStats() {
+  return fetchJsonWithRetry<SearchStatsResponse>("/api/search/stats");
+}
+
+export async function reindexSearch(domains?: string[]) {
+  return writeJson<{ status: string }>("/api/search/reindex", "POST", domains ? { domains } : undefined);
 }

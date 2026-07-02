@@ -8,6 +8,7 @@ import enum
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -15,7 +16,35 @@ import sqlite3
 from typing import Any
 from urllib.parse import parse_qs
 
+_logger = logging.getLogger(__name__)
+
 import jwt as pyjwt
+
+try:
+    import hashlib as _hashlib
+    import secrets as _secrets
+    _HAVE_HASH = True
+except ImportError:
+    _HAVE_HASH = False
+
+
+def generate_api_key() -> tuple[str, str, str]:
+    """Generate a new API key.
+
+    Returns:
+        (full_key, key_hash, key_prefix) where full_key is the key to give
+        to the user, key_hash is the stored hash, and key_prefix is a
+        human-readable prefix for identification.
+    """
+    raw = _secrets.token_hex(32)
+    key_prefix = raw[:8]
+    full_key = f"anx_{raw}"
+    key_hash = _hashlib.sha256(full_key.encode()).hexdigest()
+    return full_key, key_hash, key_prefix
+
+
+def hash_api_key(key: str) -> str:
+    return _hashlib.sha256(key.encode()).hexdigest()
 
 
 def utc_timestamp() -> str:
@@ -23,9 +52,50 @@ def utc_timestamp() -> str:
 
 
 class Role(enum.Enum):
-    ADMIN = "admin"
+    SUPER_ADMIN = "super_admin"
+    ADMINISTRATOR = "administrator"
+    SOC_ANALYST = "soc_analyst"
     OPERATOR = "operator"
-    VIEWER = "viewer"
+    READ_ONLY = "read_only"
+    AUDITOR = "auditor"
+
+    def level(self) -> int:
+        return {
+            "super_admin": 100,
+            "administrator": 80,
+            "soc_analyst": 60,
+            "operator": 40,
+            "read_only": 20,
+            "auditor": 10,
+        }[self.value]
+
+    @staticmethod
+    def from_str(value: str) -> "Role":
+        normalized = value.strip().lower()
+        mapping = {
+            "admin": Role.ADMINISTRATOR,
+            "administrator": Role.ADMINISTRATOR,
+            "super_admin": Role.SUPER_ADMIN,
+            "superadmin": Role.SUPER_ADMIN,
+            "soc_analyst": Role.SOC_ANALYST,
+            "soc analyst": Role.SOC_ANALYST,
+            "operator": Role.OPERATOR,
+            "viewer": Role.READ_ONLY,
+            "read_only": Role.READ_ONLY,
+            "readonly": Role.READ_ONLY,
+            "auditor": Role.AUDITOR,
+        }
+        return mapping.get(normalized, Role.READ_ONLY)
+
+    @staticmethod
+    def valid_roles() -> list[str]:
+        return [r.value for r in Role]
+
+    @staticmethod
+    def requires_level(min_role: str) -> list[str]:
+        """Return all roles that meet or exceed the given minimum role level."""
+        min_level = Role.from_str(min_role).level()
+        return [r.value for r in Role if r.level() >= min_level]
 
 
 @dataclass(frozen=True)
@@ -38,15 +108,30 @@ class User:
     is_verified: bool
     role: str
     created_at: str
+    display_name: str = ""
+    last_login: str | None = None
+    mfa_enabled: bool = False
 
     def has_role(self, *roles: str) -> bool:
         return self.role in roles
 
+    def has_minimum_role(self, min_role: str) -> bool:
+        """Check if this user's role is at least the specified level."""
+        try:
+            return Role.from_str(self.role).level() >= Role.from_str(min_role).level()
+        except ValueError:
+            return False
+
     @property
     def display_role(self) -> str:
-        if self.is_superuser:
-            return "Admin"
-        return self.role.capitalize()
+        return {
+            "super_admin": "Super Admin",
+            "administrator": "Administrator",
+            "soc_analyst": "SOC Analyst",
+            "operator": "Operator",
+            "read_only": "Read Only",
+            "auditor": "Auditor",
+        }.get(self.role, self.role.capitalize())
 
 
 class AuthError(ValueError):
@@ -62,8 +147,13 @@ class TokenBlacklist:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+        _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
+        connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA busy_timeout=10000")
+        except sqlite3.OperationalError:
+            pass
         return connection
 
     def _initialize(self) -> None:
@@ -117,8 +207,13 @@ class UserStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+        _logger.debug("UserStore opening connection to %s", self.database_path)
+        connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA busy_timeout=10000")
+        except sqlite3.OperationalError:
+            pass
         return connection
 
     def _initialize(self) -> None:
@@ -132,16 +227,24 @@ class UserStore:
                     is_active INTEGER NOT NULL DEFAULT 1,
                     is_superuser INTEGER NOT NULL DEFAULT 0,
                     is_verified INTEGER NOT NULL DEFAULT 0,
-                    role TEXT NOT NULL DEFAULT 'viewer',
-                    created_at TEXT NOT NULL
+                    role TEXT NOT NULL DEFAULT 'read_only',
+                    created_at TEXT NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    last_login TEXT,
+                    mfa_enabled INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
-            # Add role column if migrating from old schema
-            try:
-                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'viewer'")
-            except sqlite3.OperationalError:
-                pass  # Column already exists
+            # Add columns if migrating from old schema
+            existing = {str(row["name"]) for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+            if "role" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'")
+            if "display_name" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+            if "last_login" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
+            if "mfa_enabled" not in existing:
+                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
 
     def create_user(self, email: str, password: str, role: str = "viewer") -> User:
         normalized_email = normalize_email(email)
@@ -149,8 +252,7 @@ class UserStore:
             raise AuthError("Email is required.")
         if len(password) < 8:
             raise AuthError("Password must be at least 8 characters.")
-        if role not in ("admin", "operator", "viewer"):
-            raise AuthError("Invalid role. Must be admin, operator, or viewer.")
+        normalized_role = Role.from_str(role).value
         try:
             with self._connect() as connection:
                 cursor = connection.execute(
@@ -169,8 +271,8 @@ class UserStore:
                     (
                         normalized_email,
                         hash_password(password),
-                        1 if role == "admin" else 0,
-                        role,
+                        1 if normalized_role in ("super_admin", "administrator") else 0,
+                        normalized_role,
                         utc_timestamp(),
                     ),
                 )
@@ -224,6 +326,21 @@ class UserStore:
             )
             return cursor.rowcount > 0
 
+    def update_last_login(self, user_id: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_login = ? WHERE id = ?",
+                (utc_timestamp(), user_id),
+            )
+
+    def update_display_name(self, user_id: int, display_name: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET display_name = ? WHERE id = ?",
+                (display_name.strip()[:64], user_id),
+            )
+            return cursor.rowcount > 0
+
     def set_verified(self, user_id: int, verified: bool = True) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -231,6 +348,19 @@ class UserStore:
                 (1 if verified else 0, user_id),
             )
             return cursor.rowcount > 0
+
+    def seed_default_admin(self) -> None:
+        admin = self.get_user_by_email("admin")
+        if admin is not None:
+            return
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                VALUES (?, ?, 1, 1, 1, 'administrator', ?)
+                """,
+                ("admin", hash_password("admin"), utc_timestamp()),
+            )
 
 
 class AuthManager:
@@ -335,6 +465,10 @@ class AuthManager:
         user = self.user_store.authenticate(email, password)
         if user is None:
             return None
+        self.user_store.update_last_login(user.id)
+        refreshed = self.user_store.get_user_by_id(user.id)
+        if refreshed is not None:
+            user = refreshed
         return user, self.create_access_token(user), self.create_refresh_token(user)
 
     def logout(self, token: str | None) -> bool:
@@ -395,6 +529,7 @@ def row_to_user(row: sqlite3.Row | None) -> User | None:
         return None
     # Convert to dict for safe access with defaults
     row_dict = dict(row)
+    normalized_role = Role.from_str(str(row_dict.get("role", "read_only"))).value
     return User(
         id=int(row_dict["id"]),
         email=str(row_dict["email"]),
@@ -402,8 +537,11 @@ def row_to_user(row: sqlite3.Row | None) -> User | None:
         is_active=bool(row_dict["is_active"]),
         is_superuser=bool(row_dict["is_superuser"]),
         is_verified=bool(row_dict.get("is_verified", 0)),
-        role=str(row_dict.get("role", "viewer")),
+        role=normalized_role,
         created_at=str(row_dict["created_at"]),
+        display_name=str(row_dict.get("display_name", "")),
+        last_login=str(row_dict["last_login"]) if row_dict.get("last_login") else None,
+        mfa_enabled=bool(row_dict.get("mfa_enabled", 0)),
     )
 
 
