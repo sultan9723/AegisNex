@@ -82,3 +82,15 @@ def test_auth_manager_hardcoded_secret_raises_error(tmp_path: Path) -> None:
     finally:
         if saved is not None:
             os.environ["AEGISNEX_JWT_SECRET"] = saved
+
+
+def test_auth_manager_normalizes_legacy_viewer_role_on_read(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    user, token, _ = AuthManager(store, jwt_secret="test-secret").register("viewer@example.com", "password123")
+
+    with store._connect() as connection:
+        connection.execute("UPDATE users SET role = 'viewer' WHERE id = ?", (user.id,))
+
+    refreshed = store.get_user_by_id(user.id)
+    assert refreshed is not None
+    assert refreshed.role == "read_only"
