@@ -2,6 +2,8 @@ docker
 fastapi
 httpx
 jinja2
+langgraph
+langchain-core
 mcp
 psutil
 prometheus-client

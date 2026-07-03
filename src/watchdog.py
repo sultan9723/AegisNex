@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import RotatingFileHandler
+import signal
 import time
 from pathlib import Path
+from typing import Any
 
 from src.agent import AgentX
 from src.config import Config
@@ -18,6 +20,14 @@ from src.notifier import Notifier
 from src.notifications.factory import build_notification_providers
 from src.orchestrator import SystemHealthChecker
 from src.platform_db import PlatformRepository, load_database_settings
+
+
+_running = True
+
+
+def _handle_signal(signum: int, frame: Any) -> None:
+    global _running
+    _running = False
 
 
 def setup_logging(log_path: Path) -> RotatingFileHandler:
@@ -127,19 +137,26 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
 
 
 def main() -> None:
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
     handler = setup_logging(Path("logs/agent.log"))
     watchdog_logger = build_logger("agentx.watchdog", handler)
     config = Config.load()
     guardian = build_guardian(handler, config)
 
     watchdog_logger.info("Watchdog started")
-    while True:
+    while _running:
         try:
             guardian.run({})
             watchdog_logger.info("Guardian check completed")
         except Exception as exc:
             watchdog_logger.exception("Guardian check failed: %s", exc)
-        time.sleep(config.monitoring.watchdog_interval_seconds)
+        for _ in range(config.monitoring.watchdog_interval_seconds):
+            if not _running:
+                break
+            time.sleep(1)
+    watchdog_logger.info("Watchdog stopped")
 
 
 if __name__ == "__main__":

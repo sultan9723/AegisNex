@@ -21,6 +21,7 @@ incidents:
 
 storage:
   database_path: aegisnex.db
+  database_url: ""
 
 notifications:
   email:
@@ -63,6 +64,11 @@ health_checks:
     timeout_seconds: 5
     expected_status: 200
     endpoints:
+  ssl:
+    enabled: false
+    timeout_seconds: 5
+    warning_days: 30
+    targets:
   tcp:
     enabled: false
     timeout_seconds: 5

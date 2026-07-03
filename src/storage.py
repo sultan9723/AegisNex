@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import logging
 import sqlite3
 from typing import Any, Dict, Iterable, Optional
 
 from src.incidents import Incident, utc_timestamp
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,8 +28,20 @@ class AegisNexRepository:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+        _logger.debug("AegisNexRepository opening connection to %s", self.database_path)
+        connection = sqlite3.connect(
+            self.database_path,
+            timeout=30,
+        )
         connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.OperationalError:
+            pass
         return connection
 
     def _initialize(self) -> None:
@@ -447,7 +462,7 @@ class AegisNexRepository:
         if table_name not in allowed:
             raise ValueError(f"Unsupported table: {table_name}")
         with self._connect() as connection:
-            rows = connection.execute(f"SELECT * FROM {table_name}").fetchall()
+            rows = connection.execute(f"SELECT * FROM [{table_name}]").fetchall()
         return [dict(row) for row in rows]
 
     def table_names(self) -> set[str]:
