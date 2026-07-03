@@ -85,11 +85,13 @@ class IncidentManager:
         notification_providers: Optional[List[NotificationProvider]] = None,
         notification_history_path: str | Path = "notification_history.json",
         storage_repository: Any | None = None,
+        broadcast_callback: Optional[Any] = None,
     ) -> None:
         self.history_path = Path(history_path)
         self.notification_history_path = Path(notification_history_path)
         self.notification_providers = notification_providers or []
         self.storage_repository = storage_repository
+        self.broadcast_callback = broadcast_callback
         self.incidents: List[Incident] = self._load_incidents()
         self.notification_events: List[Dict[str, Any]] = self._load_notification_events()
 
@@ -185,6 +187,27 @@ class IncidentManager:
         self._record_transition(incident, previous_status, incident.status, actor, {"reason": "resolved", "resolution_notes": resolution_notes})
         self._notify_resolved(incident)
         return incident
+
+    def reopen_incident(self, incident_id: str, actor: str = "system") -> Incident:
+        incident = self._get_required(incident_id)
+        previous_status = incident.status
+        incident.status = "active"
+        incident.acknowledged_by = None
+        incident.acknowledged_at = None
+        incident.resolved_by = None
+        incident.resolved_timestamp = None
+        incident.resolution_notes = None
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
+        self._record_transition(incident, previous_status, incident.status, actor, {"reason": "reopened"})
+        return incident
+
+    def delete_incident(self, incident_id: str) -> None:
+        incident = self._get_required(incident_id)
+        self.incidents.remove(incident)
+        self._save_incidents()
+        if self.storage_repository and hasattr(self.storage_repository, "delete_incident"):
+            self.storage_repository.delete_incident(incident_id)
 
     def resolve_service_incidents(
         self,
@@ -301,6 +324,12 @@ class IncidentManager:
             for provider in self.notification_providers
         ]
         self._record_notification_results("incident_created", incident, results)
+        if self.broadcast_callback:
+            try:
+                import asyncio
+                asyncio.ensure_future(self.broadcast_callback("incident_created", incident.to_dict()))
+            except Exception:
+                pass
         return results
 
     def _notify_resolved(self, incident: Incident) -> List[NotificationResult]:
@@ -309,6 +338,12 @@ class IncidentManager:
             for provider in self.notification_providers
         ]
         self._record_notification_results("incident_resolved", incident, results)
+        if self.broadcast_callback:
+            try:
+                import asyncio
+                asyncio.ensure_future(self.broadcast_callback("incident_resolved", incident.to_dict()))
+            except Exception:
+                pass
         return results
 
     def _record_notification_results(

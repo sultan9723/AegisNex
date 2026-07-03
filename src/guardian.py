@@ -64,48 +64,48 @@ class Guardian:
                 self._reset_restart_history(name)
                 self._resolve_service_incidents(name)
                 continue
-            if unhealthy:
-                serialized_results = [
-                    self._serialize_health_result(result) for result in check_results
-                ]
-                incident = self._create_incident(
-                    service_name=name,
-                    status=str(status),
-                    health_check_results=serialized_results,
-                )
-                decision = self._restart_decision(name)
-                if not decision["allowed"]:
-                    skipped = {
-                        "status": "skipped",
-                        "container": name,
-                        "reason": decision["reason"],
-                    }
-                    if incident:
-                        skipped["incident_id"] = incident.incident_id
-                    if check_results:
-                        skipped["health_checks"] = serialized_results
-                    actions.append(skipped)
-                    continue
-                if status == "running" and hasattr(self.docker_scanner, "restart_container"):
-                    action = self.docker_scanner.restart_container(name)
-                else:
-                    action = self.docker_scanner.ensure_running(name)
-                if check_results:
-                    action["health_checks"] = serialized_results
+
+            serialized_results = [
+                self._serialize_health_result(result) for result in check_results
+            ]
+            incident = self._create_incident(
+                service_name=name,
+                status=str(status),
+                health_check_results=serialized_results,
+            )
+            decision = self._restart_decision(name)
+            if not decision["allowed"]:
+                skipped = {
+                    "status": "skipped",
+                    "container": name,
+                    "reason": decision["reason"],
+                }
                 if incident:
-                    action["incident_id"] = incident.incident_id
-                if action.get("status") == "ok" and action.get("action") == "restarted":
-                    self._record_restart_attempt(name)
-                    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    message = (
-                        f"Action: restarted\n"
-                        f"Container: {name}\n"
-                        f"Timestamp: {timestamp}"
-                    )
-                    action["alert"] = self.notifier.send_email_alert(message)
-                self._update_incident_remediation(incident, action)
-                self._record_remediation_action(name, incident, action)
-                actions.append(action)
+                    skipped["incident_id"] = incident.incident_id
+                if check_results:
+                    skipped["health_checks"] = serialized_results
+                actions.append(skipped)
+                continue
+            if status == "running" and hasattr(self.docker_scanner, "restart_container"):
+                action = self.docker_scanner.restart_container(name)
+            else:
+                action = self.docker_scanner.ensure_running(name)
+            if check_results:
+                action["health_checks"] = serialized_results
+            if incident:
+                action["incident_id"] = incident.incident_id
+            if action.get("status") == "ok" and action.get("action") == "restarted":
+                self._record_restart_attempt(name)
+                timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                message = (
+                    f"Action: restarted\n"
+                    f"Container: {name}\n"
+                    f"Timestamp: {timestamp}"
+                )
+                action["alert"] = self.notifier.send_email_alert(message)
+            self._update_incident_remediation(incident, action)
+            self._record_remediation_action(name, incident, action)
+            actions.append(action)
 
         return {"health": health_report, "actions": actions}
 

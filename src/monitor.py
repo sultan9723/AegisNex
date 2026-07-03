@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -60,8 +61,26 @@ class SystemResourceMonitor:
             psutil = self._load_psutil()
             interval = float(params.get("cpu_interval", self.cpu_interval_seconds))
             cpu_percent = float(psutil.cpu_percent(interval=interval))
-            ram_percent = float(psutil.virtual_memory().percent)
-            disk_percent = float(psutil.disk_usage("/").percent)
+            cpu_load = [round(x / psutil.cpu_count() * 100, 1) for x in psutil.getloadavg()] if hasattr(psutil, "getloadavg") else None
+            ram = psutil.virtual_memory()
+            ram_percent = float(ram.percent)
+            disk = psutil.disk_usage("/")
+            disk_percent = float(disk.percent)
+            disk_free_gb = round(disk.free / (1024**3), 2)
+            disk_total_gb = round(disk.total / (1024**3), 2)
+            net = psutil.net_io_counters()
+            uptime_seconds = int(time.time() - psutil.boot_time())
+            process_count = len(psutil.pids())
+            temperature = None
+            if hasattr(psutil, "sensors_temperatures"):
+                try:
+                    temps = psutil.sensors_temperatures()
+                    if temps:
+                        core = temps.get("coretemp") or temps.get("cpu-thermal") or temps.get("cpu_thermal") or []
+                        if core:
+                            temperature = round(core[0].current, 1)
+                except Exception:
+                    pass
             warnings = self._evaluate_thresholds(
                 cpu_percent=cpu_percent,
                 ram_percent=ram_percent,
@@ -70,8 +89,20 @@ class SystemResourceMonitor:
             payload = {
                 "status": "warning" if warnings else "ok",
                 "cpu_percent": cpu_percent,
+                "cpu_load_1m": cpu_load[0] if cpu_load else None,
+                "cpu_load_5m": cpu_load[1] if cpu_load else None,
+                "cpu_load_15m": cpu_load[2] if cpu_load else None,
                 "ram_percent": ram_percent,
+                "ram_used_gb": round(ram.used / (1024**3), 2),
+                "ram_total_gb": round(ram.total / (1024**3), 2),
                 "disk_percent": disk_percent,
+                "disk_free_gb": disk_free_gb,
+                "disk_total_gb": disk_total_gb,
+                "network_bytes_sent": net.bytes_sent,
+                "network_bytes_recv": net.bytes_recv,
+                "uptime_seconds": uptime_seconds,
+                "process_count": process_count,
+                "temperature_celsius": temperature,
                 "warnings": warnings,
             }
             return payload

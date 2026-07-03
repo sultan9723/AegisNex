@@ -20,15 +20,18 @@ class PrometheusExporter:
     def __init__(self, services: Any) -> None:
         self.services = services
 
-    def collect(self) -> MetricSnapshot:
+    def collect(self, persist: bool = True) -> MetricSnapshot:
         metrics = self._collect_system_metrics()
         metrics.update(self._collect_container_metrics())
         metrics.update(self._collect_incident_metrics())
         metrics.update(self._collect_remediation_metrics())
         metrics.update(self._collect_notification_metrics())
-        storage_repository = getattr(self.services, "storage_repository", None)
-        if storage_repository:
-            storage_repository.save_metrics_snapshot(metrics)
+        metrics.update(self._collect_target_metrics())
+        metrics.update(self._collect_container_detail_metrics())
+        if persist:
+            storage_repository = getattr(self.services, "storage_repository", None)
+            if storage_repository:
+                storage_repository.save_metrics_snapshot(metrics)
         return MetricSnapshot(values=metrics)
 
     def render(self) -> tuple[bytes, str]:
@@ -134,6 +137,59 @@ class PrometheusExporter:
         return {
             "aegisnex_notifications_sent_total": float(sent),
             "aegisnex_notifications_failed_total": float(failed),
+        }
+
+    def _collect_target_metrics(self) -> Dict[str, float]:
+        """Collect monitoring target health metrics."""
+        repository = getattr(self.services, "platform_repository", None)
+        if repository is None:
+            return {}
+        try:
+            targets = repository.list_monitoring_targets()
+        except Exception:
+            return {}
+        total = len(targets)
+        active = sum(1 for t in targets if t.get("is_active", True))
+        healthy = 0
+        unhealthy = 0
+        for t in targets:
+            last_error = t.get("last_error")
+            if not t.get("is_active", True):
+                continue
+            if last_error:
+                unhealthy += 1
+            else:
+                healthy += 1
+        return {
+            "aegisnex_targets_total": float(total),
+            "aegisnex_targets_active": float(active),
+            "aegisnex_targets_healthy": float(healthy),
+            "aegisnex_targets_unhealthy": float(unhealthy),
+        }
+
+    def _collect_container_detail_metrics(self) -> Dict[str, float]:
+        """Collect per-container CPU/memory metrics."""
+        docker_payload = self.services.docker_scanner.run({"include_all": True})
+        containers = (
+            docker_payload.get("containers", [])
+            if docker_payload.get("status") == "ok"
+            else []
+        )
+        total_cpu = 0.0
+        total_mem = 0.0
+        container_count = 0
+        for container in containers:
+            cpu = container.get("cpu_percent")
+            mem = container.get("memory_percent")
+            if cpu is not None:
+                total_cpu += float(cpu)
+            if mem is not None:
+                total_mem += float(mem)
+            container_count += 1
+        return {
+            "aegisnex_containers_total_cpu_percent": total_cpu,
+            "aegisnex_containers_total_memory_percent": total_mem,
+            "aegisnex_containers_with_metrics": float(container_count),
         }
 
     @staticmethod

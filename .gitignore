@@ -1,31 +1,40 @@
-# Ignore data output
-/data/*.json
-
-# Ignore environment/secrets
+# Environment and secrets
 .env
 .env.*
 !.env.example
 
-# Ignore logs
-*.log
-*.db
-
-# Ignore Python virtual environments/cache
+# Python virtual environments and caches
 .venv/
+venv/
 __pycache__/
+.pytest_cache/
 *.pyc
 .coverage
 
-# Ignore system/IDE files
+# Local databases and SQLite write-ahead logs
+*.db
+*.db-shm
+*.db-wal
+
+# Node.js dependencies and build output
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Application-generated reports and runtime artifacts
+reports/*.pdf
+reports/*.csv
+reports/*.json
+logs/
+restart_history.json
+incident_history.json
+notification_history.json
+
+# Logs
+*.log
+
+# System and IDE files
 .DS_Store
+Thumbs.db
 .vscode/
 .idea/
-.coverage
-restart_history.json
-incident_history.json
-logs/
-notification_history.json
-restart_history.json
-incident_history.json
-.coverage
-logs/

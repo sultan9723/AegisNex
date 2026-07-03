@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import csv
 import json
+import logging
 from pathlib import Path
 import sqlite3
 from typing import Any, Iterable, Literal
+
+_logger = logging.getLogger(__name__)
 
 ReportFormat = Literal["json", "csv", "pdf"]
 
@@ -111,8 +114,13 @@ class OperationalReporter:
         }
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
+        _logger.debug("OperationalReporter opening connection to %s", self.database_path)
+        connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.OperationalError:
+            pass
         return connection
 
     def _incident_summary(self, window: ReportWindow) -> dict[str, Any]:
