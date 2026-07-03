@@ -1,0 +1,77 @@
+name: CI Debug
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - stabilization/ci-recovery
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Show repository structure
+        run: |
+          echo "===== CURRENT DIRECTORY ====="
+          pwd
+
+          echo "===== ROOT ====="
+          ls -la
+
+          echo "===== SRC ====="
+          ls -R src || true
+
+          echo "===== TELEMETRY ====="
+          ls -R src/telemetry || true
+
+          echo "===== COMPLIANCE ====="
+          ls -R src/compliance || true
+
+          echo "===== INTELLIGENCE ====="
+          ls -R src/intelligence || true
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show Python environment
+        run: |
+          python --version
+          which python
+          python -c "import sys; print(sys.path)"
+
+      - name: Test imports
+        run: |
+          python - <<'PY'
+          import traceback
+
+          modules = [
+              "src",
+              "src.logging_config",
+              "src.compliance",
+              "src.telemetry",
+              "src.intelligence",
+          ]
+
+          for module in modules:
+              try:
+                  __import__(module)
+                  print(f"[OK] {module}")
+              except Exception:
+                  print(f"[FAILED] {module}")
+                  traceback.print_exc()
+          PY
+
+      - name: Run dashboard test only
+        run: |
+          python -m pytest tests/test_dashboard.py -vv
