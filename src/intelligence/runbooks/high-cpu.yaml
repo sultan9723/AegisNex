@@ -1,0 +1,45 @@
+name: high-cpu
+description: Investigate and resolve high CPU usage
+version: "1.0"
+category: performance
+tags:
+  - cpu
+  - performance
+  - metrics
+timeout_seconds: 180
+requires_incident: true
+steps:
+  - name: collect-metrics
+    action: tool
+    tool: metrics
+    description: Collect current system metrics
+    on_failure: stop
+  - name: identify-top-consumers
+    action: tool
+    tool: docker
+    description: Identify top resource-consuming containers
+    on_failure: continue
+  - name: check-health
+    action: tool
+    tool: health
+    description: Check overall system health
+    on_failure: continue
+  - name: restart-heavy-container
+    action: tool
+    tool: docker
+    params:
+      action: restart
+    description: Restart the heaviest container
+    requires_approval: true
+    on_failure: continue
+  - name: verify-metrics
+    action: tool
+    tool: metrics
+    description: Verify CPU has returned to normal
+    on_failure: continue
+  - name: close-incident
+    action: resolve_incident
+    params:
+      resolution_notes: "High CPU resolved by restarting top consumer"
+    description: Close incident
+    on_failure: continue

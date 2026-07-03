@@ -1,0 +1,46 @@
+name: restart-nginx
+description: Restart Nginx service and verify it's running
+version: "1.0"
+category: containers
+tags:
+  - nginx
+  - restart
+  - web
+timeout_seconds: 120
+requires_incident: true
+steps:
+  - name: check-nginx-status
+    action: tool
+    tool: docker
+    params:
+      filter: nginx
+    description: Check current Nginx container status
+    on_failure: stop
+  - name: restart-nginx
+    action: tool
+    tool: docker
+    params:
+      action: restart
+      container: nginx
+    description: Restart the Nginx container
+    requires_approval: true
+    on_failure: stop
+  - name: verify-service
+    action: tool
+    tool: health
+    description: Verify system health after restart
+    on_failure: continue
+  - name: verify-http
+    action: tool
+    tool: target
+    params:
+      action: list
+      target_type: http
+    description: Verify HTTP endpoint is reachable
+    on_failure: continue
+  - name: close-incident
+    action: resolve_incident
+    params:
+      resolution_notes: "Nginx restarted successfully"
+    description: Close the associated incident
+    on_failure: continue
