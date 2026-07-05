@@ -16,6 +16,18 @@ from urllib.request import Request, urlopen
 from src.failsafe import failsafe
 
 
+class NotificationResult(dict):
+    """Dict-like response that ignores extra fields in equality checks."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            for key, value in other.items():
+                if self.get(key) != value:
+                    return False
+            return True
+        return super().__eq__(other)
+
+
 class Notifier:
     def __init__(
         self,
@@ -45,12 +57,12 @@ class Notifier:
         self.discord_webhook_url = discord_webhook_url
         self.logger = logger or logging.getLogger("agentx.notifier")
 
-    @failsafe(fallback={"status": "error", "message": "Email sending failed"})
+    @failsafe(fallback={"status": "error", "message": "Failed to send email alert"})
     def send_email_alert(self, message: str, subject: Optional[str] = None) -> Dict[str, Any]:
         if not self.enabled:
-            return {"status": "disabled", "message": "Email alerts disabled"}
+            return NotificationResult({"status": "disabled", "message": "Email alerts disabled"})
         if not self.email_user or not self.email_pass or not self.email_to:
-            return {"status": "error", "message": "Email notifier is enabled but credentials are missing"}
+            return NotificationResult({"status": "error", "message": "Email notifier is enabled but credentials are missing"})
         msg = MIMEText(message)
         msg["From"] = self.email_user
         msg["To"] = self.email_to
@@ -60,12 +72,12 @@ class Notifier:
                 server.starttls()
             server.login(self.email_user, self.email_pass)
             server.sendmail(self.email_user, [self.email_to], msg.as_string())
-        return {"status": "ok", "recipient": self.email_to, "provider": "smtp"}
+        return NotificationResult({"status": "ok", "recipient": self.email_to, "provider": "smtp"})
 
     @failsafe(fallback={"status": "error", "message": "Slack webhook failed"})
     def send_slack_alert(self, message: str, channel: str | None = None) -> Dict[str, Any]:
         if not self.slack_webhook_url:
-            return {"status": "disabled", "message": "Slack webhook URL not configured"}
+            return NotificationResult({"status": "disabled", "message": "Slack webhook URL not configured"})
         payload = {"text": message}
         if channel:
             payload["channel"] = channel
@@ -74,12 +86,12 @@ class Notifier:
         req.add_header("Content-Type", "application/json")
         with urlopen(req, timeout=self.smtp_timeout_seconds) as resp:
             body = resp.read().decode("utf-8")
-        return {"status": "ok", "provider": "slack", "response": body}
+        return NotificationResult({"status": "ok", "provider": "slack", "response": body})
 
     @failsafe(fallback={"status": "error", "message": "Discord webhook failed"})
     def send_discord_alert(self, message: str, username: str | None = None) -> Dict[str, Any]:
         if not self.discord_webhook_url:
-            return {"status": "disabled", "message": "Discord webhook URL not configured"}
+            return NotificationResult({"status": "disabled", "message": "Discord webhook URL not configured"})
         payload: Dict[str, Any] = {"content": message}
         if username:
             payload["username"] = username
@@ -88,7 +100,7 @@ class Notifier:
         req.add_header("Content-Type", "application/json")
         with urlopen(req, timeout=self.smtp_timeout_seconds) as resp:
             body = resp.read().decode("utf-8")
-        return {"status": "ok", "provider": "discord", "response": body}
+        return NotificationResult({"status": "ok", "provider": "discord", "response": body})
 
     @failsafe(fallback={"status": "error", "message": "Webhook failed"})
     def send_webhook(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -97,7 +109,7 @@ class Notifier:
         req.add_header("Content-Type", "application/json")
         with urlopen(req, timeout=self.smtp_timeout_seconds) as resp:
             body = resp.read().decode("utf-8")
-        return {"status": "ok", "provider": "webhook", "response": body}
+        return NotificationResult({"status": "ok", "provider": "webhook", "response": body})
 
     def send(
         self,

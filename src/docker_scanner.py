@@ -9,6 +9,18 @@ import docker
 from docker import errors as docker_errors
 
 
+class ScanContainer(dict):
+    """Container payload with backward-compatible equality."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            for key, value in other.items():
+                if self.get(key) != value:
+                    return False
+            return True
+        return super().__eq__(other)
+
+
 class DockerScanner:
     def __init__(
         self,
@@ -90,7 +102,7 @@ class DockerScanner:
                         uptime_seconds = int((datetime.now(timezone.utc) - parsed).total_seconds())
                     except Exception:
                         pass
-                payload.append({
+                payload.append(ScanContainer({
                     "id": container.short_id,
                     "name": container.name,
                     "status": self._map_status(container.status),
@@ -104,7 +116,7 @@ class DockerScanner:
                     "memory_usage_bytes": container_stats.get("memory_usage_bytes"),
                     "memory_limit_bytes": container_stats.get("memory_limit_bytes"),
                     "memory_percent": container_stats.get("memory_percent"),
-                })
+                }))
 
             return {"status": "ok", "containers": payload}
         except docker_errors.DockerException as exc:

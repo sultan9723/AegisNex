@@ -61,16 +61,20 @@ class SystemResourceMonitor:
             psutil = self._load_psutil()
             interval = float(params.get("cpu_interval", self.cpu_interval_seconds))
             cpu_percent = float(psutil.cpu_percent(interval=interval))
-            cpu_load = [round(x / psutil.cpu_count() * 100, 1) for x in psutil.getloadavg()] if hasattr(psutil, "getloadavg") else None
+            cpu_count = psutil.cpu_count() if hasattr(psutil, "cpu_count") else 1
+            cpu_count = cpu_count or 1
+            cpu_load = [round(x / cpu_count * 100, 1) for x in psutil.getloadavg()] if hasattr(psutil, "getloadavg") else None
             ram = psutil.virtual_memory()
             ram_percent = float(ram.percent)
             disk = psutil.disk_usage("/")
             disk_percent = float(disk.percent)
-            disk_free_gb = round(disk.free / (1024**3), 2)
-            disk_total_gb = round(disk.total / (1024**3), 2)
-            net = psutil.net_io_counters()
-            uptime_seconds = int(time.time() - psutil.boot_time())
-            process_count = len(psutil.pids())
+            disk_free = getattr(disk, "free", None)
+            disk_total = getattr(disk, "total", None)
+            disk_free_gb = round(disk_free / (1024**3), 2) if disk_free is not None else None
+            disk_total_gb = round(disk_total / (1024**3), 2) if disk_total is not None else None
+            net = psutil.net_io_counters() if hasattr(psutil, "net_io_counters") else None
+            uptime_seconds = int(time.time() - psutil.boot_time()) if hasattr(psutil, "boot_time") else None
+            process_count = len(psutil.pids()) if hasattr(psutil, "pids") else None
             temperature = None
             if hasattr(psutil, "sensors_temperatures"):
                 try:
@@ -98,8 +102,8 @@ class SystemResourceMonitor:
                 "disk_percent": disk_percent,
                 "disk_free_gb": disk_free_gb,
                 "disk_total_gb": disk_total_gb,
-                "network_bytes_sent": net.bytes_sent,
-                "network_bytes_recv": net.bytes_recv,
+                "network_bytes_sent": getattr(net, "bytes_sent", 0) if net is not None else 0,
+                "network_bytes_recv": getattr(net, "bytes_recv", 0) if net is not None else 0,
                 "uptime_seconds": uptime_seconds,
                 "process_count": process_count,
                 "temperature_celsius": temperature,
