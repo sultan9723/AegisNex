@@ -96,7 +96,7 @@ class DockerScanner:
                     "status": self._map_status(container.status),
                     "raw_status": container.status,
                     "health_status": self._health_status(container),
-                    "image": container.image.tags[0] if container.image and container.image.tags else str(container.image.short_id) if container.image else "unknown",
+                    "image": self._container_image(container),
                     "started_at": started_at,
                     "uptime_seconds": uptime_seconds,
                     "ports": self._ports(container),
@@ -218,8 +218,24 @@ class DockerScanner:
                         "host_ip": mapping.get("HostIp"),
                     })
             else:
-                result.append({"container_port": container_port, "host_port": None, "host_ip": None})
+                    result.append({"container_port": container_port, "host_port": None, "host_ip": None})
         return result
+
+    @staticmethod
+    def _container_image(container: Any) -> str:
+        image = getattr(container, "image", None)
+        if image is None:
+            return "unknown"
+
+        tags = getattr(image, "tags", None) or []
+        if tags:
+            return str(tags[0])
+
+        short_id = getattr(image, "short_id", None)
+        if short_id:
+            return str(short_id)
+
+        return "unknown"
 
     def start_container(self, container_name: str) -> Dict[str, Any]:
         try:
