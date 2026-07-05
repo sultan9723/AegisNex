@@ -152,10 +152,9 @@ def main() -> None:
             watchdog_logger.info("Guardian check completed")
         except Exception as exc:
             watchdog_logger.exception("Guardian check failed: %s", exc)
-        for _ in range(config.monitoring.watchdog_interval_seconds):
-            if not _running:
-                break
-            time.sleep(1)
+        if not _running:
+            break
+        time.sleep(config.monitoring.watchdog_interval_seconds)
     watchdog_logger.info("Watchdog stopped")
 
 
