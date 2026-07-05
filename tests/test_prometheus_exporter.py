@@ -156,22 +156,28 @@ def test_dashboard_metrics_route_returns_prometheus_payload(
     monkeypatch,
 ) -> None:
     pytest.importorskip("fastapi")
+    monkeypatch.setenv("AEGISNEX_METRICS_TOKEN", "test-metrics-token")
     monkeypatch.setattr(
         "src.prometheus_exporter.PrometheusExporter._network_stats",
         staticmethod(lambda: {"bytes_sent": 100, "bytes_recv": 200}),
     )
     app = create_app(build_services(tmp_path))
 
-    status_code, body = asyncio.run(asgi_get(app, "/metrics"))
+    status_code, body = asyncio.run(
+        asgi_get(app, "/metrics", {"Authorization": "Bearer test-metrics-token"})
+    )
 
     assert status_code == 200
     assert "aegisnex_system_cpu_usage_percent" in body
     assert "aegisnex_notifications_failed_total" in body
 
 
-async def asgi_get(app, path: str) -> tuple[int, str]:
+async def asgi_get(app, path: str, extra_headers: dict[str, str] | None = None) -> tuple[int, str]:
     messages = []
     request_sent = False
+    headers = [(b"host", b"testserver")]
+    if extra_headers:
+        headers.extend((k.lower().encode("utf-8"), v.encode("utf-8")) for k, v in extra_headers.items())
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -181,7 +187,7 @@ async def asgi_get(app, path: str) -> tuple[int, str]:
         "path": path,
         "raw_path": path.encode("ascii"),
         "query_string": b"",
-        "headers": [(b"host", b"testserver")],
+        "headers": headers,
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
         "root_path": "",

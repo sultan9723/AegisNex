@@ -17,6 +17,7 @@ from src.failsafe import failsafe
 
 
 class NotificationResult(dict):
+    """Dict-like response that ignores extra fields in equality checks."""
     """Dict-like notification response with backward-compatible equality."""
 
     def __eq__(self, other: object) -> bool:
@@ -57,7 +58,7 @@ class Notifier:
         self.discord_webhook_url = discord_webhook_url
         self.logger = logger or logging.getLogger("agentx.notifier")
 
-    @failsafe(fallback={"status": "error", "message": "Email sending failed"})
+    @failsafe(fallback={"status": "error", "message": "Failed to send email alert"})
     def send_email_alert(self, message: str, subject: Optional[str] = None) -> Dict[str, Any]:
         if not self.enabled:
             return NotificationResult({"status": "disabled", "message": "Email alerts disabled"})

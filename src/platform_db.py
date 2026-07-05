@@ -236,7 +236,14 @@ class PlatformRepository:
     def _sqlite_path(self) -> Path:
         parsed = urlparse(self.settings.url)
         if parsed.scheme == "sqlite":
-            return Path(parsed.path.lstrip("/") or "aegisnex.db")
+            raw_path = parsed.path or ""
+            if raw_path.startswith("//"):
+                raw_path = raw_path[1:]
+            elif os.name == "nt" and raw_path.startswith("/") and len(raw_path) > 2 and raw_path[2] == ":":
+                raw_path = raw_path.lstrip("/")
+            elif raw_path.startswith("/"):
+                raw_path = raw_path.lstrip("/")
+            return Path(raw_path or "aegisnex.db")
         return Path(self.settings.url)
 
     def _connect(self) -> Any:
