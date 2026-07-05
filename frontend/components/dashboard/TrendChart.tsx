@@ -2,17 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Tooltip,
-  XAxis,
-  YAxis,
+  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, CartesianGrid,
 } from "recharts";
+import { cn } from "@/lib/utils";
 
-type Datum = { timestamp: string; [key: string]: string | number };
+type TrendData = { timestamp: string; [key: string]: string | number };
 
 export function TrendChart({
   title,
@@ -20,57 +15,108 @@ export function TrendChart({
   dataKey,
   color = "#00E5FF",
   type = "area",
+  className,
 }: {
   title: string;
-  data: Datum[];
+  data: TrendData[];
   dataKey: string;
   color?: string;
   type?: "area" | "bar";
+  className?: string;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(0);
+  const [chartWidth, setChartWidth] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const update = () => setWidth(Math.max(1, Math.floor(element.getBoundingClientRect().width)));
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(element);
+    const updateWidth = () => {
+      if (containerRef.current) {
+        setChartWidth(containerRef.current.offsetWidth);
+      }
+    };
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    if (containerRef.current) observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
 
   return (
-    <div className="rounded-xl border border-border bg-card/90 p-4 shadow-sm">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-        <span className="text-xs text-muted-foreground">24h</span>
-      </div>
-      <div ref={ref} className="h-56 min-w-0">
-        {width > 0 &&
-          (type === "bar" ? (
-            <BarChart width={width} height={224} data={data}>
-              <CartesianGrid stroke="hsl(var(--border))" vertical={false} />
-              <XAxis dataKey="timestamp" stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} />
-              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} width={32} />
-              <Tooltip contentStyle={{ background: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8 }} />
-              <Bar dataKey={dataKey} fill={color} radius={[4, 4, 0, 0]} />
+    <div
+      ref={containerRef}
+      className={cn(
+        "rounded-xl border border-border/70 bg-surface-elevated/80 p-5 shadow-md",
+        "transition-all duration-300 hover:border-border hover:shadow-lg",
+        className
+      )}
+    >
+      <h3 className="mb-4 text-xs font-semibold uppercase tracking-[0.08em] text-text-tertiary">
+        {title}
+      </h3>
+      <div className="h-44">
+        <ResponsiveContainer width="100%" height="100%">
+          {type === "bar" ? (
+            <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -16 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border) / 0.5)" vertical={false} />
+              <XAxis
+                dataKey="timestamp"
+                axisLine={false}
+                tickLine={false}
+                tick={{ fill: "hsl(var(--text-tertiary))", fontSize: 10, fontWeight: 500 }}
+                dy={4}
+              />
+              <YAxis axisLine={false} tickLine={false} tick={{ fill: "hsl(var(--text-tertiary))", fontSize: 10 }} dx={-4} />
+              <Tooltip
+                contentStyle={{
+                  background: "hsl(var(--surface-elevated))",
+                  border: "1px solid hsl(var(--border))",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                }}
+                labelStyle={{ color: "hsl(var(--text-primary))", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: color }}
+              />
+              <Bar dataKey={dataKey} fill={color} radius={[3, 3, 0, 0]} maxBarSize={32} />
             </BarChart>
           ) : (
-            <AreaChart width={width} height={224} data={data}>
+            <AreaChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: -16 }}>
               <defs>
-                <linearGradient id={`${dataKey}-fill`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={color} stopOpacity={0.35} />
-                  <stop offset="95%" stopColor={color} stopOpacity={0} />
+                <linearGradient id={`gradient-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0.02} />
                 </linearGradient>
               </defs>
-              <CartesianGrid stroke="hsl(var(--border))" vertical={false} />
-              <XAxis dataKey="timestamp" stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} />
-              <YAxis stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} width={32} />
-              <Tooltip contentStyle={{ background: "hsl(var(--popover))", border: "1px solid hsl(var(--border))", borderRadius: 8 }} />
-              <Area type="monotone" dataKey={dataKey} stroke={color} strokeWidth={2} fill={`url(#${dataKey}-fill)`} />
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border) / 0.5)" vertical={false} />
+              <XAxis
+                dataKey="timestamp"
+                axisLine={false}
+                tickLine={false}
+                tick={{ fill: "hsl(var(--text-tertiary))", fontSize: 10, fontWeight: 500 }}
+                dy={4}
+              />
+              <YAxis axisLine={false} tickLine={false} tick={{ fill: "hsl(var(--text-tertiary))", fontSize: 10 }} dx={-4} />
+              <Tooltip
+                contentStyle={{
+                  background: "hsl(var(--surface-elevated))",
+                  border: "1px solid hsl(var(--border))",
+                  borderRadius: "8px",
+                  fontSize: "12px",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                }}
+                labelStyle={{ color: "hsl(var(--text-primary))", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: color }}
+              />
+              <Area
+                type="monotone"
+                dataKey={dataKey}
+                stroke={color}
+                strokeWidth={2}
+                fill={`url(#gradient-${dataKey})`}
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 0, fill: color }}
+              />
             </AreaChart>
-          ))}
+          )}
+        </ResponsiveContainer>
       </div>
     </div>
   );

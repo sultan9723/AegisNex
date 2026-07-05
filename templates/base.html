@@ -24,6 +24,7 @@
           <a href="/infrastructure" class="sidebar-link"><i data-lucide="server"></i><span>Infrastructure</span></a>
           <a href="/containers" class="sidebar-link"><i data-lucide="boxes"></i><span>Containers</span></a>
           <a href="/incidents" class="sidebar-link"><i data-lucide="siren"></i><span>Incidents</span></a>
+          <a href="/audit" class="sidebar-link"><i data-lucide="history"></i><span>Audit</span></a>
           <a href="/reports" class="sidebar-link"><i data-lucide="file-bar-chart"></i><span>Reports</span></a>
           <a href="/notifications" class="sidebar-link"><i data-lucide="bell"></i><span>Notifications</span></a>
           <a href="/mcp" class="sidebar-link"><i data-lucide="bot"></i><span>MCP</span></a>
@@ -60,7 +61,7 @@
             </button>
           </div>
         </header>
-        <main class="page">
+        <main class="page-shell">
           {% block content %}{% endblock %}
         </main>
       </div>
@@ -91,6 +92,23 @@
           setTimeout(() => button.classList.remove("copied"), 1200);
         });
       });
+      // Set active sidebar link
+      const currentPath = window.location.pathname;
+      document.querySelectorAll(".sidebar-link").forEach((link) => {
+        const href = link.getAttribute("href");
+        if (href === currentPath || (href !== "/" && currentPath.startsWith(href))) {
+          link.classList.add("active");
+        }
+      });
+
+      // Update theme toggle icon
+      document.querySelectorAll("[data-theme-toggle]").forEach((button) => {
+        const icon = button.querySelector("i");
+        if (icon) {
+          icon.setAttribute("data-lucide", root.dataset.theme === "dark" ? "moon" : "sun");
+        }
+      });
+
       if (window.lucide) {
         window.lucide.createIcons();
       }

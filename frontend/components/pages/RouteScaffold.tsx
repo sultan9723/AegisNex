@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { StatusBadge } from "@/components/common/StatusBadge";
+import { Badge } from "@/components/ui/badge";
 
 export function RouteScaffold({
   title,
@@ -13,14 +13,18 @@ export function RouteScaffold({
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-border bg-card/90 px-4 py-4 shadow-sm">
-        <div className="flex items-center gap-2">
-          <Icon className="size-4 text-primary" />
-          <h1 className="text-lg font-semibold text-foreground">{title}</h1>
-          <StatusBadge status="healthy" label="live" />
+    <div className="space-y-6 animate-fade-in-up">
+      <div className="flex items-start justify-between rounded-xl border border-border/60 bg-surface-elevated/60 px-5 py-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20">
+            <Icon className="size-4" />
+          </div>
+          <div>
+            <h1 className="text-lg font-semibold tracking-tight text-text-primary">{title}</h1>
+            <p className="mt-0.5 text-sm text-text-secondary">{description}</p>
+          </div>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        <Badge variant="success-subtle" dot pulse>live</Badge>
       </div>
       {children}
     </div>

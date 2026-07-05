@@ -1,0 +1,13 @@
+{
+  "asset_target": "unknown_asset",
+  "last_evaluation": "2026-06-03T06:27:16Z",
+  "aggregated_risk_index": "LOW",
+  "infrastructure_metrics": {
+    "total_open_ports": 0,
+    "port_scan_status": "MISSING"
+  },
+  "application_vulnerabilities": {
+    "total_findings": 0,
+    "findings_summary": []
+  }
+}

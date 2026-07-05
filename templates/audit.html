@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}AegisNex Audit Log{% endblock %}
+{% block page_label %}Audit{% endblock %}
+{% block content %}
+<section class="page-hero compact">
+  <div><span class="eyebrow">Audit Trail</span><h1>Audit Logs</h1><p>Chronological record of system operations and configuration changes.</p></div>
+  <div class="hero-stats"><span>{{ logs | length }} entries</span></div>
+</section>
+<article class="surface table-card">
+  <div class="section-head"><h2>Event History</h2></div>
+  <div class="table-scroll">
+    <table class="premium-table">
+      <thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Resource</th></tr></thead>
+      <tbody>
+        {% for log in logs %}
+        <tr>
+          <td>{{ log.timestamp }}</td>
+          <td><span class="badge">{{ log.actor }}</span></td>
+          <td><code>{{ log.action }}</code></td>
+          <td>{{ log.resource_type }}:{{ log.resource_id }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="empty-state">No audit log entries yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</article>
+{% endblock %}
