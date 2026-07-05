@@ -66,8 +66,10 @@ class SystemResourceMonitor:
             ram_percent = float(ram.percent)
             disk = psutil.disk_usage("/")
             disk_percent = float(disk.percent)
-            disk_free_gb = round(disk.free / (1024**3), 2)
-            disk_total_gb = round(disk.total / (1024**3), 2)
+            disk_free = getattr(disk, "free", None)
+            disk_total = getattr(disk, "total", None)
+            disk_free_gb = round(disk_free / (1024**3), 2) if disk_free is not None else None
+            disk_total_gb = round(disk_total / (1024**3), 2) if disk_total is not None else None
             net = psutil.net_io_counters()
             uptime_seconds = int(time.time() - psutil.boot_time())
             process_count = len(psutil.pids())
