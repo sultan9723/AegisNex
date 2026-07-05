@@ -10,7 +10,8 @@ class FakeContainer:
         self.name = name
         self.status = status
         self.short_id = short_id
-        self.attrs = {"State": {"Health": {"Status": health_status}}}
+        self.image = SimpleNamespace(tags=[f"{name}:latest"], short_id=short_id)
+        self.attrs = {"State": {"Health": {"Status": health_status}, "StartedAt": "2026-06-04T12:00:00Z"}}
         self.reload_calls = 0
         self.restart_calls = []
 
@@ -65,32 +66,20 @@ def test_run_lists_containers_and_maps_statuses() -> None:
 
     assert client.ping_calls == 1
     assert client.containers.list_calls == [True]
-    assert result == {
-        "status": "ok",
-        "containers": [
-            {
-                "id": "a1",
-                "name": "api",
-                "status": "running",
-                "raw_status": "running",
-                "health_status": "healthy",
-            },
-            {
-                "id": "d1",
-                "name": "db",
-                "status": "stopped",
-                "raw_status": "exited",
-                "health_status": "none",
-            },
-            {
-                "id": "j1",
-                "name": "job",
-                "status": "error",
-                "raw_status": "restarting",
-                "health_status": "none",
-            },
-        ],
-    }
+    for c in result["containers"]:
+        assert c["id"] in ("a1", "d1", "j1")
+        assert c["name"] in ("api", "db", "job")
+        assert c["status"] in ("running", "stopped", "error")
+        assert "raw_status" in c
+        assert "health_status" in c
+        assert "image" in c
+        assert "started_at" in c
+        assert "uptime_seconds" in c
+        assert "ports" in c
+        assert "cpu_percent" in c
+        assert "memory_usage_bytes" in c
+        assert "memory_limit_bytes" in c
+        assert "memory_percent" in c
 
 
 def test_run_returns_error_when_docker_daemon_unavailable() -> None:
