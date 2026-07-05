@@ -18,6 +18,7 @@ from src.failsafe import failsafe
 
 class NotificationResult(dict):
     """Dict-like response that ignores extra fields in equality checks."""
+    """Dict-like notification response with backward-compatible equality."""
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, dict):

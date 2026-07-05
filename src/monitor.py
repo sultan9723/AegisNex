@@ -75,6 +75,9 @@ class SystemResourceMonitor:
             net = psutil.net_io_counters() if hasattr(psutil, "net_io_counters") else None
             uptime_seconds = int(time.time() - psutil.boot_time()) if hasattr(psutil, "boot_time") else None
             process_count = len(psutil.pids()) if hasattr(psutil, "pids") else None
+            net = psutil.net_io_counters()
+            uptime_seconds = int(time.time() - psutil.boot_time())
+            process_count = len(psutil.pids())
             temperature = None
             if hasattr(psutil, "sensors_temperatures"):
                 try:
