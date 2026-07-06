@@ -1,0 +1,228 @@
+<mxfile host="Electron" agent="Mozilla/5.0" version="24.2.5">
+  <diagram name="AI Workflow (LangGraph)" id="ai-workflow">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="AI Intelligence Engine — LangGraph Workflow" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=24;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="200" y="10" width="700" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- START node -->
+        <mxCell id="start" value="START" style="ellipse;whiteSpace=wrap;html=1;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="475" y="70" width="100" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- START → Planner -->
+        <mxCell id="start-planner" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#37474F;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="start" target="planner">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Planner -->
+        <mxCell id="planner" value="1. Planner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;fontColor=#FFFFFF;strokeColor=#1B5E20;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="140" width="170" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Planner → conditional branches -->
+        <mxCell id="planner-fork" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=2;endArrow=none;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="190"/>
+            <mxPoint x="525" y="220"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Planner → Skill Executor -->
+        <mxCell id="planner-skill" value="[active_skills]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="220"/>
+            <mxPoint x="200" y="220"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="skill-executor" value="2. Skill Executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#388E3C;fontColor=#FFFFFF;strokeColor=#2E7D32;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="200" width="140" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Skill Executor → Tool Executor -->
+        <mxCell id="skill-tool" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#388E3C;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="skill-executor" target="tool-executor">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Planner → Runbook Executor -->
+        <mxCell id="planner-runbook" value="[runbook/trigger]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="220"/>
+            <mxPoint x="525" y="290"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="runbook-executor" value="9. Runbook Executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#43A047;fontColor=#FFFFFF;strokeColor=#388E3C;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="290" width="170" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Runbook Executor → Scheduler -->
+        <mxCell id="runbook-sched" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#43A047;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="runbook-executor" target="scheduler">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Planner → Parallel Supervisor -->
+        <mxCell id="planner-parallel" value="[parallel_batches]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="220"/>
+            <mxPoint x="850" y="220"/>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="parallel-sup" value="10. Parallel Supervisor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4CAF50;fontColor=#FFFFFF;strokeColor=#43A047;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="820" y="200" width="160" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Parallel Supervisor → Scheduler -->
+        <mxCell id="parallel-sched" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4CAF50;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="parallel-sup" target="scheduler">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Planner → Tool Executor -->
+        <mxCell id="planner-tool" value="[plan exists]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="695" y="165"/>
+            <mxPoint x="695" y="310"/>
+            <mxPoint x="650" y="310"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Planner → Goal Evaluator (empty plan) -->
+        <mxCell id="planner-goal-empty" value="[empty plan]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="165"/>
+            <mxPoint x="230" y="165"/>
+            <mxPoint x="230" y="450"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Tool Executor -->
+        <mxCell id="tool-executor" value="3. Tool Executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F57F17;fontColor=#FFFFFF;strokeColor=#E65100;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="350" width="170" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Tool Executor → Verifier -->
+        <mxCell id="tool-verifier" value="[no pending approval]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F57F17;strokeWidth=2;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="525" y="400"/>
+            <mxPoint x="525" y="450"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Verifier -->
+        <mxCell id="verifier" value="4. Verifier" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#0288D1;fontColor=#FFFFFF;strokeColor=#0277BD;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="450" width="170" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Verifier → Goal Evaluator (OK) -->
+        <mxCell id="verifier-goal-ok" value="[ok]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0288D1;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="610" y="475"/>
+            <mxPoint x="700" y="475"/>
+            <mxPoint x="700" y="550"/>
+            <mxPoint x="650" y="550"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Verifier → Self-Corrector (errors) -->
+        <mxCell id="verifier-corrector" value="[errors]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#0288D1;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="440" y="475"/>
+            <mxPoint x="200" y="475"/>
+            <mxPoint x="200" y="450"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Self-Corrector -->
+        <mxCell id="self-corrector" value="5. Self-Corrector" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FF7043;fontColor=#FFFFFF;strokeColor=#E64A19;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="140" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Self-Corrector → Goal Evaluator -->
+        <mxCell id="corrector-goal" value="[end]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF7043;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="130" y="470"/>
+            <mxPoint x="130" y="560"/>
+            <mxPoint x="300" y="560"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Self-Corrector → Planner (replan) -->
+        <mxCell id="corrector-planner" value="[replan]" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#FF7043;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="60" y="450"/>
+            <mxPoint x="60" y="165"/>
+            <mxPoint x="440" y="165"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Scheduler -->
+        <mxCell id="scheduler" value="11. Scheduler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#8D6E63;fontColor=#FFFFFF;strokeColor=#6D4C41;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="660" y="290" width="140" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Scheduler → Tool Executor -->
+        <mxCell id="sched-tool" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#8D6E63;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="scheduler" target="tool-executor">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Risk Assessor + Policy Checker side panel -->
+        <mxCell id="risk-box" value="7. Risk Assessor&#10;Scores 0-1 per tool" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#C62828;fontColor=#FFFFFF;strokeColor=#B71C1C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="820" y="350" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="policy-box" value="8. Policy Checker&#10;6 default policies" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#AD1457;fontColor=#FFFFFF;strokeColor=#880E4F;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="820" y="420" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Tool Executor → Risk/Policy -->
+        <mxCell id="tool-risk" value="governance" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#C62828;strokeWidth=1;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="610" y="375"/>
+            <mxPoint x="820" y="375"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Risk → Policy -->
+        <mxCell id="risk-policy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#AD1457;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="risk-box" target="policy-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Goal Evaluator -->
+        <mxCell id="goal-evaluator" value="6. Goal Evaluator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="550" width="210" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Goal Evaluator → Learning -->
+        <mxCell id="goal-learning" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="goal-evaluator" target="learning">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Learning -->
+        <mxCell id="learning" value="12. Learning" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="630" width="210" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Learning → END -->
+        <mxCell id="learning-end" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6A1B9A;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="learning" target="end">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- END -->
+        <mxCell id="end" value="END" style="ellipse;whiteSpace=wrap;html=1;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="475" y="720" width="100" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- AgentState label -->
+        <mxCell id="state-label" value="All nodes share AgentState TypedDict (30+ fields)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="60" y="700" width="300" height="30" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

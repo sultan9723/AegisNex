@@ -1,0 +1,24 @@
+PLACEHOLDER: Replace with screencast GIF of AegisNex in action.
+
+Recording specification:
+
+Duration: 30-45 seconds
+Resolution: 1280×800
+Framerate: 15 fps
+Tool:  Screen Studio (macOS), OBS + Peek (Linux), or ScreenToGif (Windows)
+
+Scenes to capture (in order):
+
+1. [0-5s] Dashboard overview — landing on main dashboard, KPI cards animate in
+2. [5-12s] Infrastructure monitoring — clicking to infrastructure page, real-time charts updating
+3. [12-20s] AI operations — typing "check system health and containers" in the AI chat, watching workflow execute
+4. [20-25s] Incident response — navigating to incidents, clicking to acknowledge an active incident
+5. [25-30s] Container management — viewing containers, restarting a stopped container
+6. [30-35s] Grafana dashboards — transitioning to Grafana to show the infrastructure dashboard
+7. [35-40s] End — fade out on the AegisNex logo
+
+Styling:
+- Mouse cursor: visible, with click highlight effect
+- Smooth transitions (no abrupt jumps)
+- Clean browser chrome (no bookmarks bar, single tab)
+- Background music: optional, ambient only

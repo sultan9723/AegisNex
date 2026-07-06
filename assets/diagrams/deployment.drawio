@@ -1,0 +1,128 @@
+<mxfile host="Electron" agent="Mozilla/5.0" version="24.2.5">
+  <diagram name="Deployment Architecture" id="deployment">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="Deployment Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=24;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="200" y="10" width="700" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Browser -->
+        <mxCell id="browser" value="Web Browser" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="140" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Nginx -->
+        <mxCell id="nginx" value="Nginx / Caddy&#10;Reverse Proxy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#009688;fontColor=#FFFFFF;strokeColor=#00796B;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="100" width="160" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Browser → Nginx -->
+        <mxCell id="b-nginx" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#37474F;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="200" y="125"/>
+            <mxPoint x="350" y="125"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Frontend (Next.js) -->
+        <mxCell id="frontend" value="Frontend (Next.js 14)&#10;Port 3000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5046E4;fontColor=#FFFFFF;strokeColor=#3B32C4;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="220" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend (FastAPI) -->
+        <mxCell id="backend" value="Backend (FastAPI/Uvicorn)&#10;Port 8000 · 2-4 Workers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E65100;fontColor=#FFFFFF;strokeColor=#BF360C;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="220" width="200" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Nginx → Backend -->
+        <mxCell id="nginx-be" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#009688;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="nginx" target="backend">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Frontend → Backend -->
+        <mxCell id="fe-be" value="HTTP/WS" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#5046E4;strokeWidth=2;endArrow=block;endSize=12;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="240" y="245"/>
+            <mxPoint x="350" y="245"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Nginx → Frontend -->
+        <mxCell id="nginx-fe" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#009688;strokeWidth=1;endArrow=block;endSize=12;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="430" y="150"/>
+            <mxPoint x="150" y="220"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- PostgreSQL -->
+        <mxCell id="postgres" value="PostgreSQL 16+&#10;(Primary DB)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#4169E1;fontColor=#FFFFFF;strokeColor=#3050C0;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="350" y="420" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend → PostgreSQL -->
+        <mxCell id="be-pg" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4169E1;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="backend" target="postgres">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Redis (optional) -->
+        <mxCell id="redis" value="Redis 7+&#10;(Scheduler / Cache)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D32F2F;fontColor=#FFFFFF;strokeColor=#B71C1C;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="630" y="420" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend → Redis -->
+        <mxCell id="be-redis" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D32F2F;strokeWidth=1;endArrow=block;endSize=12;dashed=1;" edge="1" parent="1" source="backend" target="redis">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Docker -->
+        <mxCell id="docker" value="Docker Engine&#10;(Container Mgmt)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2496ED;fontColor=#FFFFFF;strokeColor=#1A7AC4;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="630" y="220" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend → Docker -->
+        <mxCell id="be-docker" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2496ED;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="backend" target="docker">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Prometheus -->
+        <mxCell id="prometheus" value="Prometheus&#10;(Metrics Scraper)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E6522C;fontColor=#FFFFFF;strokeColor=#BF360C;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="420" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend → Prometheus (scrape) -->
+        <mxCell id="be-prom" value="/metrics scrape" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#E6522C;strokeWidth=1;endArrow=block;endSize=12;dashed=1;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="350" y="245"/>
+            <mxPoint x="240" y="445"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Grafana -->
+        <mxCell id="grafana" value="Grafana&#10;(Dashboards)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F46800;fontColor=#FFFFFF;strokeColor=#C05000;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="520" width="180" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Prometheus → Grafana -->
+        <mxCell id="prom-graf" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F46800;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1" source="prometheus" target="grafana">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="Legend" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=14;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="660" y="100" width="100" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend-solid" value="────  Direct connection" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=12;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="660" y="130" width="200" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="legend-dashed" value="- - -  Optional / scrape" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=12;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="660" y="150" width="200" height="20" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
