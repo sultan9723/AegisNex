@@ -156,6 +156,7 @@ def test_dashboard_metrics_route_returns_prometheus_payload(
     monkeypatch,
 ) -> None:
     pytest.importorskip("fastapi")
+    monkeypatch.setenv("AEGISNEX_JWT_SECRET", "test-jwt-secret-for-metrics")
     monkeypatch.setenv("AEGISNEX_METRICS_TOKEN", "test-metrics-token")
     monkeypatch.setattr(
         "src.prometheus_exporter.PrometheusExporter._network_stats",
