@@ -231,7 +231,7 @@ class PlatformRepository:
         if self.backend == "sqlite":
             path = self._sqlite_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-        self.initialize()
+        self._initialized = False
 
     def _sqlite_path(self) -> Path:
         parsed = urlparse(self.settings.url)
@@ -247,6 +247,12 @@ class PlatformRepository:
         return Path(self.settings.url)
 
     def _connect(self) -> Any:
+        if not getattr(self, '_initialized', False) and not getattr(self, '_initializing', False):
+            self._initializing = True
+            try:
+                self.initialize()
+            finally:
+                self._initializing = False
         if self.backend == "postgresql":
             return self._pg_connect()
         return self._sqlite_connect()
@@ -356,6 +362,8 @@ class PlatformRepository:
             self._sqlite_conn = None
 
     def initialize(self) -> None:
+        if getattr(self, '_initialized', False):
+            return
         retries = 3
         for attempt in range(retries):
             try:
@@ -366,6 +374,7 @@ class PlatformRepository:
                         connection.execute(statement)
                     connection.commit()
                 _logger.info("Database initialized successfully")
+                self._initialized = True
                 return
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc) and attempt < retries - 1:
