@@ -1,0 +1,173 @@
+<mxfile host="Electron" agent="Mozilla/5.0" version="24.2.5">
+  <diagram name="Enterprise Architecture" id="enterprise">
+    <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="Enterprise Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=24;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="200" y="10" width="700" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Multi-Tenant Hierarchy -->
+        <mxCell id="mt-header" value="Multi-Tenant Hierarchy" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="70" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <!-- Organization -->
+        <mxCell id="org" value="Organization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#5046E4;fontColor=#FFFFFF;strokeColor=#3B32C4;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="110" width="180" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Teams -->
+        <mxCell id="team1" value="Team (Engineering)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="200" width="150" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="team2" value="Team (Security)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="250" y="200" width="150" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Org → Teams -->
+        <mxCell id="o-t1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#5046E4;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="150" y="150"/>
+            <mxPoint x="135" y="200"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="o-t2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#5046E4;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="230" y="150"/>
+            <mxPoint x="325" y="200"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Projects -->
+        <mxCell id="proj1" value="Project (API)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;fontColor=#FFFFFF;strokeColor=#1B5E20;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="290" width="120" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="proj2" value="Project (Web)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#2E7D32;fontColor=#FFFFFF;strokeColor=#1B5E20;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="180" y="290" width="120" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Team → Project -->
+        <mxCell id="t-p1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="240"/>
+            <mxPoint x="100" y="290"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="t-p2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=1;endArrow=block;endSize=12;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="325" y="240"/>
+            <mxPoint x="240" y="290"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Isolation boundary box -->
+        <mxCell id="isolation" value="Data isolation at application layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;fontColor=#666;strokeColor=#999;strokeWidth=2;strokeDash=1;fontSize=11;fontStyle=2;" vertex="1" parent="1">
+          <mxGeometry x="30" y="95" width="380" height="250" as="geometry"/>
+        </mxCell>
+
+        <!-- RBAC Section -->
+        <mxCell id="rbac-header" value="Role-Based Access Control" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="70" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="admin-role" value="admin" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#D32F2F;fontColor=#FFFFFF;strokeColor=#B71C1C;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="110" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="admin-desc" value="Full access: users, settings, agents, tools" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="680" y="115" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="op-role" value="operator" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#F57F17;fontColor=#FFFFFF;strokeColor=#E65100;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="165" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="op-desc" value="Monitor, incidents, approvals, reports" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="680" y="170" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="viewer-role" value="viewer" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#2E7D32;fontColor=#FFFFFF;strokeColor=#1B5E20;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="550" y="220" width="120" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="viewer-desc" value="Read-only: dashboards, metrics, reports" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="680" y="225" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Audit Section -->
+        <mxCell id="audit-header" value="Audit &amp; Compliance" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="310" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="audit-log" value="Audit Logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="520" y="350" width="160" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="audit-desc" value="All mutations recorded: actor, action, resource, IP, timestamp" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="690" y="355" width="300" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="telemetry" value="OpenTelemetry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="520" y="410" width="160" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="telemetry-desc" value="API calls, workflows, agent actions, tool failures" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="690" y="415" width="300" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Compliance Frameworks -->
+        <mxCell id="comp-header" value="Compliance Frameworks" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="390" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="iso" value="ISO 27001 (114)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="430" width="140" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="soc2" value="SOC 2 (65)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="220" y="430" width="140" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="nist" value="NIST CSF (98)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="480" width="140" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="cis" value="CIS Controls (153)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="220" y="480" width="140" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="owasp" value="OWASP Top 10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="140" y="530" width="140" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Integration Marketplace -->
+        <mxCell id="int-header" value="Integration Marketplace (11 Providers)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="490" width="350" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="int-devops" value="GitHub · GitLab · Docker · K8s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="530" width="200" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-notify" value="Slack · Teams · Discord · PagerDuty" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="575" width="200" height="35" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-obs" value="Prometheus · Grafana · ServiceNow · Jira" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="750" y="530" width="200" height="35" as="geometry"/>
+        </mxCell>
+
+        <!-- Plugin System -->
+        <mxCell id="plugin-header" value="Plugin System (6 Types)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="640" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="plugins" value="Tool · Integration · Skill · Workflow · Notification · Compliance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#009688;fontColor=#FFFFFF;strokeColor=#00796B;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="520" y="680" width="380" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Enterprise Search -->
+        <mxCell id="search-header" value="Enterprise Search (12 Domains)" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontSize=16;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="600" width="300" height="30" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="search-domains" value="Incidents · Targets · Notifications · Audit · Reports · Compliance · Runbooks · Knowledge" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#009688;fontColor=#FFFFFF;strokeColor=#00796B;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="640" width="380" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

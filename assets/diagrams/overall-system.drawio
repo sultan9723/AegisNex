@@ -1,0 +1,178 @@
+<mxfile host="Electron" agent="Mozilla/5.0" version="24.2.5">
+  <diagram name="System Architecture" id="system-arch">
+    <mxGraphModel dx="1420" dy="980" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <!-- Title -->
+        <mxCell id="title" value="AegisNex System Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=24;fontStyle=1;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="200" y="10" width="700" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Frontend Layer -->
+        <mxCell id="fe-box" value="FRONTEND LAYER" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#5046E4;fontColor=#FFFFFF;strokeColor=#3B32C4;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="60" width="460" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="fe-nextjs" value="Next.js 14 Dashboard (13 routes)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="fe-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="fe-websocket" value="WebSocket Streams (dashboard, incidents, containers, targets, logs)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="fe-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="fe-jinja" value="Jinja2 Templates (backend-only fallback)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="fe-box">
+          <mxGeometry y="70" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="fe-radix" value="Radix UI + Recharts + Tailwind CSS Dark Theme" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="fe-box">
+          <mxGeometry y="90" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow Frontend → Backend -->
+        <mxCell id="fe-be-arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#5046E4;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="fe-box" target="be-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Backend Layer -->
+        <mxCell id="be-box" value="BACKEND (FastAPI)" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#E65100;fontColor=#FFFFFF;strokeColor=#C04400;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="200" width="460" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="be-middleware" value="Middleware: Auth (JWT) · TLS · Rate Limit · OpenTelemetry · CORS" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="be-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="be-routes" value="200+ REST API Routes · 5 WebSocket Endpoints" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="be-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="be-modules" value="Monitors (HTTP/SSL/TCP/DNS) · Guardian · Incidents · Notifications" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="be-box">
+          <mxGeometry y="70" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="be-exporter" value="Prometheus Exporter · OpenTelemetry Collector" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="be-box">
+          <mxGeometry y="90" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Intelligence Layer -->
+        <mxCell id="ai-box" value="INTELLIGENCE LAYER (LangGraph)" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#2E7D32;fontColor=#FFFFFF;strokeColor=#1B5E20;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="350" width="460" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="ai-workflow" value="StateGraph: Planner → Tool Router → Executor → Verifier → Self-Corrector → Goal Evaluator" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="ai-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="ai-governance" value="Governance: RiskEngine (0-1 scoring) · PolicyEngine (6 policies) · Approval Gates" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="ai-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="ai-providers" value="LLM Providers: OpenAI · Anthropic · Ollama · Azure · Gemini" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="ai-box">
+          <mxGeometry y="70" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="ai-runbook" value="RAG Pipeline · Memory Store (6 tables) · Runbook Engine · Skill System (5 skills)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="ai-box">
+          <mxGeometry y="90" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="ai-multiagent" value="Multi-Agent: Agent Orchestrator → 4 Domain Supervisors (Ops/Security/Compliance/Infra)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="ai-box">
+          <mxGeometry y="110" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow Intelligence → Integrations -->
+        <mxCell id="ai-int-arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2E7D32;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="ai-box" target="int-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Integrations Layer -->
+        <mxCell id="int-box" value="INTEGRATION LAYER (11 Providers)" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#1565C0;fontColor=#FFFFFF;strokeColor=#0D47A1;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="510" width="460" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-devops" value="DevOps: GitHub · GitLab · Kubernetes · Docker" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="int-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-notify" value="Notifications: Slack · Teams · Discord · PagerDuty · Email" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="int-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="int-observability" value="Observability: Prometheus · Grafana · ServiceNow · Jira" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="int-box">
+          <mxGeometry y="70" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow Integrations → Compliance -->
+        <mxCell id="int-comp-arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#1565C0;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="int-box" target="comp-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Compliance Layer -->
+        <mxCell id="comp-box" value="COMPLIANCE LAYER (5 Frameworks)" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#6A1B9A;fontColor=#FFFFFF;strokeColor=#4A148C;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="620" width="460" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="comp-frameworks" value="ISO 27001 (114) · SOC 2 (65) · NIST CSF (98) · CIS Controls (153) · OWASP Top 10" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="comp-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="comp-engine" value="Assessment Engine · Evidence Collection · Report Generation" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="comp-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow Compliance → Data -->
+        <mxCell id="comp-data-arrow" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6A1B9A;strokeWidth=2;endArrow=block;endSize=12;" edge="1" parent="1" source="comp-box" target="data-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Data Layer -->
+        <mxCell id="data-box" value="DATA LAYER" style="swimlane;html=1;fontStyle=1;align=center;verticalAlign=middle;childLayout=stackLayout;horizontal=1;startSize=30;fillColor=#37474F;fontColor=#FFFFFF;strokeColor=#263238;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="710" width="460" height="90" as="geometry"/>
+        </mxCell>
+        <mxCell id="data-db" value="SQLite (dev) / PostgreSQL 16+ (prod) · Alembic Migrations · 10+ Tables" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="data-box">
+          <mxGeometry y="30" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="data-ai" value="AI Memory (6 tables) · RAG Engine (5 collectors) · Knowledge Base · Search Index (12 domains)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="data-box">
+          <mxGeometry y="50" width="460" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="data-misc" value="Telemetry DB · Scheduler DB · Incident History · Audit Logs" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=12;" vertex="1" parent="data-box">
+          <mxGeometry y="70" width="460" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- External: Grafana + Prometheus -->
+        <mxCell id="grafana-box" value="GRAFANA / PROMETHEUS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F46800;fontColor=#FFFFFF;strokeColor=#C05000;" vertex="1" parent="1">
+          <mxGeometry x="60" y="200" width="220" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="grafana-metrics" value="Scrapes /metrics endpoint every 15s" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;fontStyle=1;" vertex="1" parent="grafana-box">
+          <mxGeometry y="30" width="220" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="grafana-dashboards" value="4 Dashboards: Infrastructure · Containers · Incidents · Remediation" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;" vertex="1" parent="grafana-box">
+          <mxGeometry y="50" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- External: Security Scanners -->
+        <mxCell id="scanner-box" value="SECURITY SCANNERS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D32F2F;fontColor=#FFFFFF;strokeColor=#B71C1C;" vertex="1" parent="1">
+          <mxGeometry x="60" y="350" width="220" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="scanner-nmap" value="Network Recon: Dockerized Nmap" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;" vertex="1" parent="scanner-box">
+          <mxGeometry y="30" width="220" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="scanner-nuclei" value="App Audit: Dockerized Nuclei" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;" vertex="1" parent="scanner-box">
+          <mxGeometry y="50" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- External: CLI -->
+        <mxCell id="cli-box" value="CLI ENTRYPOINT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#455A64;fontColor=#FFFFFF;strokeColor=#37474F;" vertex="1" parent="1">
+          <mxGeometry x="60" y="510" width="220" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="cli-actions" value="--monitor · --docker · --guardian · --scan · --report · --health" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontSize=11;" vertex="1" parent="cli-box">
+          <mxGeometry y="30" width="220" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Connectors -->
+        <mxCell id="grafana-be" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#F46800;strokeWidth=2;endArrow=block;endSize=12;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="240"/>
+            <mxPoint x="320" y="240"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="scanner-be" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D32F2F;strokeWidth=2;endArrow=block;endSize=12;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="390"/>
+            <mxPoint x="320" y="390"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cli-be" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#455A64;strokeWidth=2;endArrow=block;endSize=12;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="280" y="540"/>
+            <mxPoint x="320" y="540"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
