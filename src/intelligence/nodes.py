@@ -33,6 +33,7 @@ from src.intelligence.execution_logger import (
     add_execution_log_to_state,
 )
 from src.intelligence.workflows.common import WorkflowLibrary, get_workflow_library
+from src.intelligence.providers.base import Message
 from src.platform_db import PlatformRepository
 
 
@@ -303,74 +304,91 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
             logger.add_warning(f"RAG retrieval failed: {str(e)}")
             retrieved_context = ""
 
-        if "incident" in request or "alert" in request:
-            objective = "Investigate incidents"
-            if "analyze" in request or "why" in request or "what happened" in request:
-                steps = ["audit", "incident", "health"]
-                parallel_batches = [["audit", "health"], ["incident"]]
-                logger.add_decision("planning", "incident_analysis", "Pattern: analyze incident")
-            elif "active" in request:
-                steps = ["incident"]
-                objective = "List active incidents"
-                logger.add_decision("planning", "list_incidents", "Pattern: active incidents")
+        provider = state.get("provider")
+        if provider is not None:
+            try:
+                available_tools = list_tools()
+                tool_names = [t["name"] for t in available_tools]
+                planning_prompt = (
+                    f"Given the user request: \"{state['user_request']}\"\n\n"
+                    f"Relevant context:\n{retrieved_context[:2000] if retrieved_context else 'None'}\n\n"
+                    f"Available tools: {', '.join(tool_names)}\n\n"
+                    "Select the most relevant tools for this request. "
+                    f"Return ONLY a JSON array of tool names, nothing else. "
+                    "Example: [\"metrics\", \"docker\"]"
+                )
+                msg = provider.chat([Message(role="user", content=planning_prompt)])
+                import json as _json
+                llm_steps = _json.loads(msg.content.strip())
+                if isinstance(llm_steps, list) and all(s in tool_names for s in llm_steps):
+                    steps = llm_steps
+                    objective = f"LLM analysis for: {state['user_request'][:80]}"
+                    parallel_batches = [[s] for s in steps]
+                    logger.add_decision("planning", "llm_based", f"LLM selected tools: {steps}")
+            except Exception:
+                logger.add_warning("LLM planning failed, falling back to keyword matching")
+
+        if not steps:
+            if "incident" in request or "alert" in request:
+                objective = "Investigate incidents"
+                if "analyze" in request or "why" in request or "what happened" in request:
+                    steps = ["audit", "incident", "health"]
+                    parallel_batches = [["audit", "health"], ["incident"]]
+                    logger.add_decision("planning", "incident_analysis", "Pattern: analyze incident")
+                elif "active" in request:
+                    steps = ["incident"]
+                    objective = "List active incidents"
+                    logger.add_decision("planning", "list_incidents", "Pattern: active incidents")
+                else:
+                    steps = ["incident"]
+                    parallel_batches = [["incident"]]
+                    logger.add_decision("planning", "list_incidents", "Pattern: generic incident query")
+            elif "cpu" in request or "memory" in request or "disk" in request or "metric" in request or "performance" in request:
+                objective = "Investigate system metrics"
+                steps = ["metrics", "docker", "health"]
+                parallel_batches = [["metrics", "health"], ["docker"]]
+                logger.add_decision("planning", "metrics_analysis", "Pattern: system performance")
+            elif "docker" in request or "container" in request:
+                objective = "Inspect Docker containers"
+                steps = ["docker", "health"]
+                parallel_batches = [["docker", "health"]]
+                logger.add_decision("planning", "docker_inspection", "Pattern: container query")
+            elif "target" in request or "monitor" in request or "http" in request or "ssl" in request or "tcp" in request:
+                objective = "Check monitoring targets"
+                steps = ["target", "incident"]
+                parallel_batches = [["target", "incident"]]
+                logger.add_decision("planning", "targets_check", "Pattern: monitoring targets")
+            elif "audit" in request or "log" in request:
+                objective = "Review audit logs"
+                steps = ["audit"]
+                logger.add_decision("planning", "audit_review", "Pattern: audit/logs")
+            elif "report" in request:
+                objective = "Generate operational report"
+                if "weekly" in request:
+                    steps = ["report"]
+                    logger.add_decision("planning", "weekly_report", "Pattern: weekly report")
+                elif "monthly" in request:
+                    steps = ["report"]
+                    logger.add_decision("planning", "monthly_report", "Pattern: monthly report")
+                else:
+                    steps = ["report", "incident", "metrics"]
+                    parallel_batches = [["incident", "metrics"], ["report"]]
+                    logger.add_decision("planning", "full_report", "Pattern: generic report")
+            elif "notification" in request:
+                objective = "Check notification status"
+                steps = ["notification"]
+                logger.add_decision("planning", "notification_check", "Pattern: notifications")
+            elif "health" in request or "status" in request or "overview" in request:
+                objective = "Assess overall system health"
+                steps = ["health", "metrics", "incident"]
+                parallel_batches = [["health", "metrics"], ["incident"]]
+                logger.add_decision("planning", "health_assessment", "Pattern: health/status")
             else:
-                steps = ["incident"]
-                parallel_batches = [["incident"]]
-                logger.add_decision("planning", "list_incidents", "Pattern: generic incident query")
-
-        elif "cpu" in request or "memory" in request or "disk" in request or "metric" in request or "performance" in request:
-            objective = "Investigate system metrics"
-            steps = ["metrics", "docker", "health"]
-            parallel_batches = [["metrics", "health"], ["docker"]]
-            logger.add_decision("planning", "metrics_analysis", "Pattern: system performance")
-
-        elif "docker" in request or "container" in request:
-            objective = "Inspect Docker containers"
-            steps = ["docker", "health"]
-            parallel_batches = [["docker", "health"]]
-            logger.add_decision("planning", "docker_inspection", "Pattern: container query")
-
-        elif "target" in request or "monitor" in request or "http" in request or "ssl" in request or "tcp" in request:
-            objective = "Check monitoring targets"
-            steps = ["target", "incident"]
-            parallel_batches = [["target", "incident"]]
-            logger.add_decision("planning", "targets_check", "Pattern: monitoring targets")
-
-        elif "audit" in request or "log" in request:
-            objective = "Review audit logs"
-            steps = ["audit"]
-            logger.add_decision("planning", "audit_review", "Pattern: audit/logs")
-
-        elif "report" in request:
-            objective = "Generate operational report"
-            if "weekly" in request:
-                steps = ["report"]
-                logger.add_decision("planning", "weekly_report", "Pattern: weekly report")
-            elif "monthly" in request:
-                steps = ["report"]
-                logger.add_decision("planning", "monthly_report", "Pattern: monthly report")
-            else:
-                steps = ["report", "incident", "metrics"]
-                parallel_batches = [["incident", "metrics"], ["report"]]
-                logger.add_decision("planning", "full_report", "Pattern: generic report")
-
-        elif "notification" in request:
-            objective = "Check notification status"
-            steps = ["notification"]
-            logger.add_decision("planning", "notification_check", "Pattern: notifications")
-
-        elif "health" in request or "status" in request or "overview" in request:
-            objective = "Assess overall system health"
-            steps = ["health", "metrics", "incident"]
-            parallel_batches = [["health", "metrics"], ["incident"]]
-            logger.add_decision("planning", "health_assessment", "Pattern: health/status")
-
-        else:
-            objective = "Comprehensive system analysis"
-            steps = ["metrics", "docker", "incident", "target", "health"]
-            parallel_batches = [["metrics", "health"], ["docker", "target"], ["incident"]]
-            missing_info.append("Specific request type not identified; running full analysis")
-            logger.add_decision("planning", "full_analysis", "Pattern: no specific match, default comprehensive")
+                objective = "Comprehensive system analysis"
+                steps = ["metrics", "docker", "incident", "target", "health"]
+                parallel_batches = [["metrics", "health"], ["docker", "target"], ["incident"]]
+                missing_info.append("Specific request type not identified; running full analysis")
+                logger.add_decision("planning", "full_analysis", "Pattern: no specific match, default comprehensive")
 
         if not parallel_batches:
             parallel_batches = [[s] for s in steps]
@@ -723,6 +741,38 @@ def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = 
     return state
 
 
+def rag_generator_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+    """Generate an LLM-powered final answer using retrieved context and tool results.
+
+    Calls RAGEngine.generate_with_context() if a provider is available
+    and tool results exist. Otherwise falls through to goal_evaluator.
+    """
+    provider = state.get("provider")
+    tool_results = state.get("tool_results", {})
+    if provider is None or not tool_results:
+        return state
+
+    try:
+        rag = _get_rag_engine(repo)
+        retrieved_context = state.get("retrieved_context", "")
+        answer = rag.generate_with_context(
+            query=state.get("user_request", ""),
+            context=retrieved_context or None,
+            tool_results=tool_results,
+        )
+        state["final_answer"] = answer
+        state["reasoning_summary"] = answer[:500]
+        executed_steps = list(state.get("executed_steps", []))
+        executed_steps.append(_make_step("rag_generator", "completed", "LLM-generated answer from context + tool results"))
+        state["executed_steps"] = executed_steps
+    except Exception as exc:
+        executed_steps = list(state.get("executed_steps", []))
+        executed_steps.append(_make_step("rag_generator", "error", f"LLM answer generation failed: {str(exc)}"))
+        state["executed_steps"] = executed_steps
+
+    return state
+
+
 def goal_evaluator_node(state: AgentState) -> AgentState:
     """Determine if the goal is achieved or if more work is needed.
 
@@ -787,13 +837,17 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
 
         summary = "; ".join(summary_parts) if summary_parts else "No data collected"
 
-        final_answer = (
-            f"## Analysis Summary\n\n"
-            f"**Request:** {state.get('user_request', '')}\n"
-            f"**Objective:** {state.get('objective', '')}\n"
-            f"**Confidence:** {confidence:.0%}\n\n"
-            f"### Results\n{summary}\n\n"
-        )
+        existing_answer = state.get("final_answer", "")
+        if existing_answer and existing_answer != "":
+            final_answer = existing_answer + "\n\n---\n"
+        else:
+            final_answer = (
+                f"## Analysis Summary\n\n"
+                f"**Request:** {state.get('user_request', '')}\n"
+                f"**Objective:** {state.get('objective', '')}\n"
+                f"**Confidence:** {confidence:.0%}\n\n"
+                f"### Results\n{summary}\n\n"
+            )
 
         if evidence:
             final_answer += "### Evidence Used\n"
@@ -834,12 +888,13 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
             final_answer += "**Do not take destructive actions based on this analysis alone.**\n\n"
             logger.add_warning(f"Manual investigation recommended (confidence below threshold: {confidence:.0%})")
 
-        if confidence >= 0.8:
-            final_answer += "**Status:** Complete — high confidence in results."
-        elif confidence >= 0.5:
-            final_answer += "**Status:** Partial — some information may be incomplete."
-        else:
-            final_answer += "**Status:** Limited — unable to gather sufficient data."
+        if not existing_answer:
+            if confidence >= 0.8:
+                final_answer += "**Status:** Complete — high confidence in results."
+            elif confidence >= 0.5:
+                final_answer += "**Status:** Partial — some information may be incomplete."
+            else:
+                final_answer += "**Status:** Limited — unable to gather sufficient data."
 
         # Add output
         logger.add_output({
