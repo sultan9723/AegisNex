@@ -21,6 +21,7 @@ from src.intelligence.nodes import (
     tool_executor_node,
     verifier_node,
     self_corrector_node,
+    rag_generator_node,
     goal_evaluator_node,
     risk_assessor_node,
     policy_checker_node,
@@ -84,11 +85,13 @@ def build_graph(repo: Optional[PlatformRepository] = None) -> StateGraph:
     """Build the LangGraph for the Intelligence Engine.
 
     Graph structure:
-        START → planner → tool_router → tool_executor → reflection → verifier → goal_evaluator → finish → END
-                          ↑                               │                    │
-                          └─────────── loop back to planner if incomplete ◀────┘
+        START → planner → tool_router → tool_executor → reflection → verifier → rag_generator → goal_evaluator → finish → END
+                          ↑                                                    │                    │
+                          └──────────────────── loop back to planner if incomplete ◀──────────────────┘
         Pending approvals are preserved in state and the workflow terminates cleanly.
         Tool Router maps abstract tasks to registered tools without executing them.
+        rag_generator calls the LLM provider to generate a natural-language answer
+        from retrieved context and tool results when a provider is available.
     """
     global _BUILT_GRAPH
 
@@ -102,6 +105,7 @@ def build_graph(repo: Optional[PlatformRepository] = None) -> StateGraph:
     graph.add_node("tool_router", tool_router_node)
     graph.add_node("tool_executor", lambda state: tool_executor_node(state, repo=repo))
     graph.add_node("verifier", verifier_node)
+    graph.add_node("rag_generator", lambda state: rag_generator_node(state, repo=repo))
     graph.add_node("reflection", lambda state: _reflection_node(state, repo=repo))
     graph.add_node("self_corrector", lambda state: _reflection_node(state, repo=repo))
     graph.add_node("goal_evaluator", _goal_evaluator_with_completion)
@@ -161,7 +165,8 @@ def build_graph(repo: Optional[PlatformRepository] = None) -> StateGraph:
         {"verify": "verifier", "wait": "goal_evaluator"},
     )
 
-    graph.add_edge("verifier", "goal_evaluator")
+    graph.add_edge("verifier", "rag_generator")
+    graph.add_edge("rag_generator", "goal_evaluator")
 
     graph.add_conditional_edges(
         "goal_evaluator",
@@ -184,18 +189,23 @@ def run_workflow(
 
     Records execution duration, persists to memory, and returns full state.
     """
-    from src.intelligence.retrieval.rag import RAGEngine
     from src.intelligence.providers.factory import create_provider
 
     start_time = time.time()
     provider_name = os.getenv("AEGIS_AI_PROVIDER", "openai")
     model = os.getenv(f"AEGIS_AI_{provider_name.upper()}_MODEL", "")
 
+    try:
+        provider = create_provider(provider_name) if provider_name else None
+    except Exception:
+        provider = None
+
     graph = build_graph(repo=repo)
     state = initial_state(user_request)
     state["execution_started_at"] = _utc_now()
     state["provider_used"] = provider_name
     state["model_used"] = model
+    state["provider"] = provider
 
     result = graph.invoke(state)
 
@@ -302,7 +312,7 @@ def reset_graph() -> None:
 def get_workflows() -> Dict[str, Any]:
     """Return workflow definitions for the AI dashboard."""
     return {
-        "nodes": ["planner", "skill_executor", "tool_router", "tool_executor", "reflection", "verifier", "goal_evaluator", "finish", "risk_assessor", "policy_checker", "runbook_executor", "parallel_supervisor", "scheduler"],
+        "nodes": ["planner", "skill_executor", "tool_router", "tool_executor", "reflection", "verifier", "rag_generator", "goal_evaluator", "finish", "risk_assessor", "policy_checker", "runbook_executor", "parallel_supervisor", "scheduler"],
         "edges": [
             {"from": "planner", "to": "skill_executor", "condition": "skills matched"},
             {"from": "planner", "to": "tool_router", "condition": "plan exists"},
@@ -319,7 +329,8 @@ def get_workflows() -> Dict[str, Any]:
             {"from": "policy_checker", "to": "risk_assessor"},
             {"from": "risk_assessor", "to": "verifier", "condition": "auto-approved"},
             {"from": "risk_assessor", "to": "goal_evaluator", "condition": "approval required"},
-            {"from": "verifier", "to": "goal_evaluator", "condition": "verified"},
+            {"from": "verifier", "to": "rag_generator", "condition": "verified"},
+            {"from": "rag_generator", "to": "goal_evaluator", "condition": "generated"},
             {"from": "goal_evaluator", "to": "planner", "condition": "goal incomplete and retries < 3"},
             {"from": "goal_evaluator", "to": "finish", "condition": "goal completed or retries exhausted"},
             {"from": "finish", "to": "END"},
