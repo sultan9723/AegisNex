@@ -1,5 +1,5 @@
 export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+  process.env.NEXT_PUBLIC_API_URL || ""
 ).replace(/\/$/, "");
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
@@ -459,6 +459,11 @@ export function getDashboardWebSocketUrl() {
   const configured = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "");
   const token = typeof window !== "undefined" ? (window as any).__AEGISNEX_ACCESS_TOKEN__ ?? null : null;
   if (configured) return `${configured}/ws/dashboard${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+
+  if (!API_BASE_URL && typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/ws/dashboard${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  }
 
   const url = new URL(API_BASE_URL);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
