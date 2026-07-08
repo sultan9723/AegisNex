@@ -1489,6 +1489,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         inst = get_installed_integrations()
         return {"integrations": inst, "count": len(inst)}
 
+    @app.get("/api/integrations/status")
+    def api_integrations_status(request: FastAPIRequest) -> Dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        from src.integrations.status_center import build_integration_status_center
+        return build_integration_status_center(app.state.services)
+
     @app.post("/api/integrations/install")
     async def api_install_integration(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
@@ -1552,6 +1558,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return {"status": "ok", "name": name, "health": result}
         except Exception as exc:
             return {"status": "error", "name": name, "error": str(exc)}
+
+    @app.post("/api/integrations/{name}/test")
+    def api_integration_test(name: str, request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        from src.integrations.status_center import test_integration_connection
+        return test_integration_connection(app.state.services, name)
 
     @app.get("/api/system-info")
     def api_system_info(request: FastAPIRequest) -> Dict[str, Any]:

@@ -264,6 +264,44 @@ export type IntegrationsResponse = {
   integrations: IntegrationRow[];
 };
 
+export type IntegrationHealth = "healthy" | "warning" | "offline" | "unknown";
+
+export type IntegrationStatusRow = {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  health: IntegrationHealth;
+  status: string;
+  message: string;
+  details: Record<string, string | number | boolean | null>;
+  last_verification: string;
+  configure_href: string;
+  testable: boolean;
+  configurable: boolean;
+};
+
+export type IntegrationStatusCategory = {
+  name: string;
+  count: number;
+  integrations: IntegrationStatusRow[];
+};
+
+export type IntegrationStatusResponse = {
+  categories: IntegrationStatusCategory[];
+  integrations: IntegrationStatusRow[];
+  configured_count: number;
+  count: number;
+  timestamp: string;
+};
+
+export type IntegrationTestResponse = {
+  status: "ok" | "error";
+  outcome: string;
+  error?: string;
+  integration?: IntegrationStatusRow;
+};
+
 export type MCPToolDescription = {
   name: string;
   description: string;
@@ -477,6 +515,10 @@ export function getIntegrations() {
   return fetchJsonWithRetry<IntegrationsResponse>("/api/integrations");
 }
 
+export function getIntegrationStatus() {
+  return fetchJsonWithRetry<IntegrationStatusResponse>("/api/integrations/status");
+}
+
 export type IntegrationCatalogItem = {
   integration_id: string;
   name: string;
@@ -520,6 +562,10 @@ export function updateIntegration(name: string, config: { credentials?: Record<s
 
 export function testIntegrationHealth(name: string) {
   return writeJson<{ status: string; name: string; health?: unknown; error?: string }>(`/api/integrations/${name}/health`, "POST");
+}
+
+export function testIntegrationConnection(name: string) {
+  return writeJson<IntegrationTestResponse>(`/api/integrations/${name}/test`, "POST");
 }
 
 export type SystemInfoResponse = {
