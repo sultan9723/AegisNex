@@ -34,6 +34,7 @@ import { toast } from "sonner";
 
 import { SkeletonCard } from "@/components/common/Skeleton";
 import { RouteScaffold } from "@/components/pages/RouteScaffold";
+import { StatusBadge } from "@/components/common/StatusBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -50,6 +51,7 @@ import {
   type IntegrationInstalledRow,
   type IntegrationStatusResponse,
   type IntegrationStatusRow,
+  type PlatformHealth,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { publish } from "@/lib/workflow";
@@ -262,10 +264,10 @@ export default function IntegrationsPage() {
                   Status is derived from backend configuration, installed providers, repository checks, and live health probes. Unconfigured services are shown as unavailable instead of connected.
                 </p>
               </div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <SummaryMetric label="Total" value={status.count} />
-                <SummaryMetric label="Configured" value={configuredCount} />
-                <SummaryMetric label="Healthy" value={status.integrations.filter((row) => row.health === "healthy").length} />
+              <div className="flex flex-wrap items-center gap-3">
+                <PlatformStatusBadge health={status.platform_health} />
+                <SummaryMetric label="Core Services" value={`${status.platform_health.required_healthy}/${status.platform_health.required_total}`} />
+                <SummaryMetric label="Optional Configured" value={`${status.platform_health.optional_configured}/${status.platform_health.optional_total}`} />
               </div>
             </div>
           </section>
@@ -405,7 +407,22 @@ export default function IntegrationsPage() {
   );
 }
 
-function SummaryMetric({ label, value }: { label: string; value: number }) {
+function PlatformStatusBadge({ health }: { health: PlatformHealth }) {
+  const config = health.status === "healthy"
+    ? { icon: CheckCircle2, label: "Platform Healthy", color: "text-success", bg: "bg-success/10" }
+    : health.status === "degraded"
+      ? { icon: AlertTriangle, label: "Platform Degraded", color: "text-warning", bg: "bg-warning/10" }
+      : { icon: XCircle, label: "Platform Critical", color: "text-danger", bg: "bg-danger/10" };
+  const Icon = config.icon;
+  return (
+    <div className={`flex min-w-32 items-center gap-2 rounded-xl border border-border/40 ${config.bg} px-4 py-3`}>
+      <Icon className={`size-4 ${config.color}`} />
+      <span className={`text-xs font-semibold ${config.color}`}>{config.label}</span>
+    </div>
+  );
+}
+
+function SummaryMetric({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="min-w-24 rounded-xl border border-border/40 bg-background/25 px-4 py-3">
       <div className="text-lg font-semibold text-text-primary">{value}</div>
@@ -448,7 +465,10 @@ function IntegrationCard({
             <p className="mt-0.5 line-clamp-2 text-xs text-text-secondary">{row.description}</p>
           </div>
         </div>
-        <Badge variant={style.badge} dot pulse={row.health === "offline"}>{row.status}</Badge>
+        <div className="flex items-center gap-1.5">
+          {row.required && <Badge variant="info-subtle" size="sm">Required</Badge>}
+          <Badge variant={style.badge} dot pulse={row.health === "offline"}>{row.status}</Badge>
+        </div>
       </div>
 
       <div className="mt-4 flex items-start gap-2 rounded-xl bg-background/25 p-3">

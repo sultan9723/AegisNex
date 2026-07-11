@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import os
@@ -17,6 +17,21 @@ from src.integrations.marketplace import get_installed_integrations
 
 
 StatusRow = Dict[str, Any]
+
+REQUIRED_INTEGRATION_IDS = frozenset({
+    "sqlite",
+    "postgresql",
+    "docker",
+})
+
+OPTIONAL_INTEGRATION_IDS = frozenset({
+    "openai", "anthropic", "gemini", "ollama",
+    "prometheus", "grafana", "redis",
+    "slack", "discord", "email", "teams", "pagerduty",
+    "github", "gitlab", "jira",
+    "aws", "azure", "gcp",
+    "mcp-filesystem", "mcp-github", "mcp-browser", "mcp-custom",
+})
 
 
 def utc_now() -> str:
@@ -103,6 +118,7 @@ def _base_row(
         "configure_href": configure_href,
         "testable": testable,
         "configurable": configurable,
+        "required": integration_id in REQUIRED_INTEGRATION_IDS,
     }
 
 
@@ -217,6 +233,32 @@ def _installed_provider_status(integration_id: str, name: str, category: str, de
     return _base_row(integration_id, name, category, description, details=details, result=result)
 
 
+def platform_health_summary(rows: List[StatusRow]) -> Dict[str, Any]:
+    required = [r for r in rows if r.get("required", False)]
+    optional = [r for r in rows if not r.get("required", False)]
+    required_healthy = sum(1 for r in required if r.get("health") == "healthy")
+    required_total = len(required)
+    optional_configured = sum(1 for r in optional if r.get("status") not in {"Not Configured", "Unavailable"})
+    optional_total = len(optional)
+
+    if required_total > 0 and required_healthy < required_total:
+        overall = "critical"
+    elif required_total > 0 and required_healthy == required_total and optional_configured == optional_total:
+        overall = "healthy"
+    elif required_total > 0 and required_healthy == required_total:
+        overall = "degraded"
+    else:
+        overall = "healthy"
+
+    return {
+        "status": overall,
+        "required_healthy": required_healthy,
+        "required_total": required_total,
+        "optional_configured": optional_configured,
+        "optional_total": optional_total,
+    }
+
+
 def build_integration_status_center(services: Any) -> Dict[str, Any]:
     installed = _installed_configs()
     rows: List[StatusRow] = [
@@ -247,7 +289,8 @@ def build_integration_status_center(services: Any) -> Dict[str, Any]:
         _base_row("mcp-custom", "Custom Servers", "MCP", "Custom MCP server registry.", details={"available_tools": os.getenv("MCP_SERVERS", "Not Configured"), "connection": "Configured" if _env_first("MCP_SERVERS") else "Not Configured"}, result=_status("warning" if _env_first("MCP_SERVERS") else "unknown", "Needs Verification" if _env_first("MCP_SERVERS") else "Not Configured", "Custom MCP server configuration is present" if _env_first("MCP_SERVERS") else "No custom MCP servers configured")),
     ]
     configured_count = sum(1 for row in rows if row["status"] not in {"Not Configured", "Unavailable"})
-    return {"categories": _group(rows), "integrations": rows, "configured_count": configured_count, "count": len(rows), "timestamp": utc_now()}
+    health = platform_health_summary(rows)
+    return {"categories": _group(rows), "integrations": rows, "configured_count": configured_count, "count": len(rows), "timestamp": utc_now(), "platform_health": health}
 
 
 def _group(rows: Iterable[StatusRow]) -> List[Dict[str, Any]]:
