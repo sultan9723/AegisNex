@@ -352,6 +352,8 @@ class UserStore:
     def seed_default_admin(self) -> None:
         admin = self.get_user_by_email("admin")
         if admin is not None:
+            if verify_password("admin", admin.hashed_password):
+                self.update_password(admin.id, "AegisNex!Demo2026")
             return
         with self._connect() as connection:
             connection.execute(
@@ -359,7 +361,7 @@ class UserStore:
                 INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
                 VALUES (?, ?, 1, 1, 1, 'administrator', ?)
                 """,
-                ("admin", hash_password("admin"), utc_timestamp()),
+                ("admin", hash_password("AegisNex!Demo2026"), utc_timestamp()),
             )
 
 
