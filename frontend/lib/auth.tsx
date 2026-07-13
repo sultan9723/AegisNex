@@ -2,6 +2,8 @@
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
 import { buildApiUrl } from "./api";
+
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 let currentAccessToken: string | null = null;
 
 function setCurrentAccessToken(token: string | null) {

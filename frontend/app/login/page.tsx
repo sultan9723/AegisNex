@@ -97,7 +97,7 @@ export default function LoginPage() {
             </Button>
           </form>
           <p className="mt-5 text-center text-[11px] text-text-tertiary">
-            Default credentials: <span className="font-mono text-text-secondary">admin / admin</span>
+            Use your assigned workspace credentials.
           </p>
         </CardContent>
       </Card>

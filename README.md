@@ -177,7 +177,7 @@ python -m src.scripts.init_db
 uvicorn src.dashboard:app --reload --port 8000
 ```
 
-Open http://localhost:8000 — login with `admin@aegisnex.io` / `admin`.
+Open http://localhost:8000 and use the seeded demo administrator account. The default local username is `admin`; set or rotate the password before public deployment.
 
 ### Frontend
 
