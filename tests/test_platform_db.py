@@ -145,6 +145,7 @@ def test_platform_repository_auto_migrates_legacy_audit_logs_schema(tmp_path: Pa
         connection.commit()
 
     repository = PlatformRepository(f"sqlite:///{db_path}")
+    repository.initialize()
 
     assert {"before_state", "after_state", "execution_id"}.issubset(_sqlite_columns(db_path, "audit_logs"))
     assert repository.list_audit_logs() == []
@@ -153,6 +154,7 @@ def test_platform_repository_auto_migrates_legacy_audit_logs_schema(tmp_path: Pa
 def test_platform_repository_creates_fresh_schema_with_audit_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "fresh.db"
     repository = PlatformRepository(f"sqlite:///{db_path}")
+    repository.initialize()
 
     assert {"before_state", "after_state", "execution_id"}.issubset(_sqlite_columns(db_path, "audit_logs"))
     repository.create_monitoring_target(

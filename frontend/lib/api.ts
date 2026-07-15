@@ -1,6 +1,46 @@
-export const API_BASE_URL = (
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
-).replace(/\/$/, "");
+import { getAccessToken } from "./auth";
+
+function normalizeApiBaseUrl(value: string | undefined): string {
+  const base = (value || "").replace(/\/$/, "");
+  if (!base) return "";
+  return base.endsWith("/api") ? base.slice(0, -4) : base;
+}
+
+export const API_BASE_URL = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_URL);
+
+function normalizeApiPath(path: string): string {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  if (cleanPath === "/api" || cleanPath.startsWith("/api/")) {
+    return cleanPath;
+  }
+  return `/api${cleanPath}`;
+}
+
+export function buildApiUrl(path: string): string {
+  const base = API_BASE_URL;
+  const apiPath = normalizeApiPath(path);
+  return base ? `${base}${apiPath}` : apiPath;
+}
+
+export function buildWebSocketUrl(path: string): string {
+  const token = getAccessToken();
+  const configured = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "");
+  if (configured) return `${configured}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+
+  if (API_BASE_URL.startsWith("http")) {
+    const url = new URL(API_BASE_URL);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.pathname = path;
+    url.search = "";
+    url.hash = "";
+    if (token) url.searchParams.set("token", token);
+    return url.toString();
+  }
+
+  const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = typeof window !== "undefined" ? window.location.host : "localhost:3000";
+  return `${protocol}//${host}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
 export const MAX_RETRIES = 2;
@@ -91,10 +131,22 @@ export type IncidentTransitionRow = {
   details: Record<string, unknown>;
 };
 
+export type IncidentAnalysis = {
+  summary?: string;
+  severity_assessment?: string;
+  suggested_remediation?: string;
+  root_cause?: string;
+  impact_assessment?: string;
+  confidence?: number;
+};
+
 export type IncidentDetailResponse = {
   incident: IncidentRow;
   timeline: IncidentTransitionRow[];
+  transitions?: IncidentTransitionRow[];
   count: number;
+  analysis?: IncidentAnalysis;
+  description?: string;
 };
 
 export type IncidentsResponse = {
@@ -119,6 +171,8 @@ export type MetricsResponse = {
   chart_data: {
     cpu?: MetricTrend;
     memory?: MetricTrend;
+    disk?: MetricTrend;
+    labels?: string[];
   };
 };
 
@@ -264,6 +318,54 @@ export type IntegrationsResponse = {
   integrations: IntegrationRow[];
 };
 
+export type IntegrationHealth = "healthy" | "warning" | "offline" | "unknown";
+
+export type PlatformHealth = {
+  status: "healthy" | "degraded" | "critical";
+  required_healthy: number;
+  required_total: number;
+  optional_configured: number;
+  optional_total: number;
+};
+
+export type IntegrationStatusRow = {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  health: IntegrationHealth;
+  status: string;
+  message: string;
+  details: Record<string, string | number | boolean | null>;
+  last_verification: string;
+  configure_href: string;
+  testable: boolean;
+  configurable: boolean;
+  required: boolean;
+};
+
+export type IntegrationStatusCategory = {
+  name: string;
+  count: number;
+  integrations: IntegrationStatusRow[];
+};
+
+export type IntegrationStatusResponse = {
+  categories: IntegrationStatusCategory[];
+  integrations: IntegrationStatusRow[];
+  configured_count: number;
+  count: number;
+  timestamp: string;
+  platform_health: PlatformHealth;
+};
+
+export type IntegrationTestResponse = {
+  status: "ok" | "error";
+  outcome: string;
+  error?: string;
+  integration?: IntegrationStatusRow;
+};
+
 export type MCPToolDescription = {
   name: string;
   description: string;
@@ -328,7 +430,7 @@ function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number =
 async function fetchJsonWithRetry<T>(path: string, retries: number = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+      const response = await fetchWithTimeout(buildApiUrl(path), {
         cache: "no-store",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -440,7 +542,7 @@ async function writeJson<T>(
   method: "POST" | "PUT" | "DELETE",
   payload?: unknown,
 ): Promise<T> {
-  const response = await fetchWithTimeout(`${API_BASE_URL}${path}`, {
+  const response = await fetchWithTimeout(buildApiUrl(path), {
     method,
     cache: "no-store",
     credentials: "include",
@@ -456,17 +558,7 @@ async function writeJson<T>(
 }
 
 export function getDashboardWebSocketUrl() {
-  const configured = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "");
-  const token = typeof window !== "undefined" ? (window as any).__AEGISNEX_ACCESS_TOKEN__ ?? null : null;
-  if (configured) return `${configured}/ws/dashboard${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-
-  const url = new URL(API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/ws/dashboard";
-  url.search = "";
-  url.hash = "";
-  if (token) url.searchParams.set("token", token);
-  return url.toString();
+  return buildWebSocketUrl("/ws/dashboard");
 }
 
 export function getDashboardSnapshot() {
@@ -475,6 +567,10 @@ export function getDashboardSnapshot() {
 
 export function getIntegrations() {
   return fetchJsonWithRetry<IntegrationsResponse>("/api/integrations");
+}
+
+export function getIntegrationStatus() {
+  return fetchJsonWithRetry<IntegrationStatusResponse>("/api/integrations/status");
 }
 
 export type IntegrationCatalogItem = {
@@ -522,11 +618,27 @@ export function testIntegrationHealth(name: string) {
   return writeJson<{ status: string; name: string; health?: unknown; error?: string }>(`/api/integrations/${name}/health`, "POST");
 }
 
+export function testIntegrationConnection(name: string) {
+  return writeJson<IntegrationTestResponse>(`/api/integrations/${name}/test`, "POST");
+}
+
+export type PlatformHealthResponse = {
+  platform_health: PlatformHealth;
+  integrations: IntegrationStatusRow[];
+  timestamp: string;
+};
+
+export function getPlatformHealth() {
+  return fetchJsonWithRetry<PlatformHealthResponse>("/api/platform/health");
+}
+
 export type SystemInfoResponse = {
   os: string;
   hostname: string;
   uptime_seconds: number | null;
   docker_version: string | null;
+  platform?: string;
+  python_version?: string;
 };
 
 export type AppSettings = {
@@ -544,6 +656,26 @@ export type AppSettingsResponse = {
   status?: string;
 };
 
+export type ApiKeyRow = {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  is_active: boolean;
+};
+
+export type ApiKeysResponse = {
+  keys: ApiKeyRow[];
+};
+
+export type KnowledgeUploadResponse = {
+  status: string;
+  document: string;
+  chunks_indexed: number;
+  path: string;
+};
+
 export function getSystemInfo() {
   return fetchJsonWithRetry<SystemInfoResponse>("/api/system-info");
 }
@@ -554,6 +686,49 @@ export function getAppSettings() {
 
 export async function saveAppSettings(payload: Partial<AppSettings>) {
   return writeJson<AppSettingsResponse>("/api/settings", "PUT", payload);
+}
+
+export function getApiKeys() {
+  return fetchJsonWithRetry<ApiKeysResponse>("/api/api-keys");
+}
+
+export async function createApiKey(name: string) {
+  return writeJson<{ key: string; status?: string }>("/api/api-keys", "POST", { name });
+}
+
+export async function revokeApiKey(keyId: string) {
+  return writeJson<{ status?: string }>(`/api/api-keys/${keyId}`, "DELETE");
+}
+
+export function uploadKnowledgeDocument(file: File, onProgress?: (progress: number) => void) {
+  return new Promise<KnowledgeUploadResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", buildApiUrl("/knowledge/upload"));
+    xhr.withCredentials = true;
+    xhr.responseType = "json";
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      const response = xhr.response as KnowledgeUploadResponse | null;
+      if (xhr.status >= 200 && xhr.status < 300 && response) {
+        resolve(response);
+        return;
+      }
+      reject(new Error(`AegisNex API /api/knowledge/upload returned ${xhr.status}`));
+    };
+
+    xhr.onerror = () => reject(new Error("Failed to upload knowledge document"));
+    xhr.onabort = () => reject(new Error("Upload aborted"));
+
+    const formData = new FormData();
+    formData.append("file", file, file.name);
+    xhr.send(formData);
+  });
 }
 
 export async function startContainer(name: string) {
@@ -596,6 +771,7 @@ export type AiChatStep = {
 
 export type AiChatResponse = {
   answer: string;
+  technical_details: string;
   goal_achieved: boolean;
   confidence: number;
   steps: AiChatStep[];

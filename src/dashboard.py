@@ -21,36 +21,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse as StarletteRedirect
 
 from src.auth import AuthManager, User, Role, AuthError, parse_form_body
-from src.config import Config
-from src.docker_scanner import DockerScanner
-from src.guardian import Guardian
-from src.http_monitor import HttpEndpointMonitor
-from src.incidents import Incident, IncidentManager
-from src.monitoring_engine import MonitoringEngine
-from src.monitor import SystemResourceMonitor
-from src.notifier import Notifier
-from src.orchestrator import SystemHealthChecker
-from src.prometheus_exporter import PrometheusExporter
-from src.reporting import OperationalReporter
-from src.ssl_monitor import SslCertificateMonitor
-from src.tcp_monitor import TcpTargetMonitor
 from src.platform_db import PlatformRepository, load_database_settings
-from src.websocket_manager import WebSocketManager
-from src.cache import DashboardCache
 from src.logging_config import configure_logging, get_logger
-from src.compliance.engine import ComplianceEngine
-from src.compliance.evidence import EvidenceCollector
-from src.opentelemetry import instrument_app
-from src.intelligence.graph import run_chat, run_analyze, run_plan
-from src.intelligence.history import save_workflow, list_history, get_history_count
-from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
-from src.knowledge.indexer import KnowledgeIndexer
-from src.knowledge.retriever import KnowledgeRetriever
-from src.knowledge.loader import load_document as _kd_load_document
-from src.telemetry.collector import TelemetryCollector
-from src.telemetry.middleware import TelemetryMiddleware
-from src.multitenant.manager import TenantManager
-from src.agents.orchestrator import AgentOrchestrator
 
 try:
     from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
@@ -259,6 +231,25 @@ def _set_auth_cookie(response: Any, token: str, max_age: int) -> None:
     )
 
 
+def _set_refresh_cookie(response: Any, token: str, max_age: int) -> None:
+    environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+    is_production = environment not in {"development", "dev", "local", "test"}
+    response.set_cookie(
+        "aegisnex_refresh",
+        token,
+        httponly=True,
+        samesite="strict",
+        secure=is_production,
+        path="/",
+        max_age=max_age,
+    )
+
+
+def _clear_auth_cookies(response: Any) -> None:
+    response.delete_cookie("aegisnex_session", path="/")
+    response.delete_cookie("aegisnex_refresh", path="/")
+
+
 @dataclass
 class DashboardServices:
     monitor: SystemResourceMonitor
@@ -278,6 +269,17 @@ class DashboardServices:
 
 
 def create_services(config_path: str | Path = "config.yaml") -> DashboardServices:
+    from src.config import Config
+    from src.docker_scanner import DockerScanner
+    from src.guardian import Guardian
+    from src.http_monitor import HttpEndpointMonitor
+    from src.incidents import IncidentManager
+    from src.monitoring_engine import MonitoringEngine
+    from src.monitor import SystemResourceMonitor
+    from src.notifier import Notifier
+    from src.orchestrator import SystemHealthChecker
+    from src.ssl_monitor import SslCertificateMonitor
+    from src.tcp_monitor import TcpTargetMonitor
     config = Config.load(config_path)
     monitor = SystemResourceMonitor(
         cpu_interval_seconds=config.monitoring.cpu_interval_seconds,
@@ -954,6 +956,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         fastapi_app.state.monitoring_engine_task = None
         if getattr(fastapi_app.state.services, "monitoring_engine", None) is not None:
             fastapi_app.state.monitoring_engine_task = asyncio.create_task(fastapi_app.state.services.monitoring_engine.run_forever())
+        from src.agents.orchestrator import AgentOrchestrator
         orchestrator = AgentOrchestrator(repo=fastapi_app.state.services.platform_repository)
         fastapi_app.state.agent_orchestrator = orchestrator
 
@@ -979,11 +982,13 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     app.add_middleware(CORSMiddleware, allow_origins=get_cors_origins(), allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"], allow_headers=["Authorization", "Content-Type", "Accept"])
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TLSRedirectMiddleware)
+    from src.telemetry.middleware import TelemetryMiddleware
     app.add_middleware(TelemetryMiddleware)
     app.state.limiter = limiter
     app.add_exception_handler(429, _rate_limit_exceeded_handler)
 
     configure_logging()
+    from src.opentelemetry import instrument_app
     instrument_app(app)
 
     logger = get_logger(__name__)
@@ -992,10 +997,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     app.state.services = services or create_services()
     app.state.auth_manager = auth_manager or AuthManager()
     app.state.auth_manager.user_store.seed_default_admin()
+    from src.cache import DashboardCache
     app.state.dashboard_cache = DashboardCache()
+    from src.telemetry.collector import TelemetryCollector
     app.state.telemetry_collector = TelemetryCollector()
     repo = app.state.services.platform_repository
+    if repo is not None:
+        repo.initialize()
+    from src.multitenant.manager import TenantManager
     app.state.tenant_manager = TenantManager(repo) if repo is not None else None
+    from src.websocket_manager import WebSocketManager
     app.state.websocket_manager = WebSocketManager()
     app.state.websocket_poll_interval_seconds = float(os.getenv("AEGISNEX_WS_POLL_INTERVAL_SECONDS", str(DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS)))
     app.state.websocket_broadcast_task = None
@@ -1199,6 +1210,34 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             media_type="application/json",
         )
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
+        _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
+        return response
+
+    @app.post("/api/auth/demo-login")
+    async def api_demo_login(request: FastAPIRequest) -> Any:
+        from src.demo_credentials import get_demo_credentials
+
+        username, password = get_demo_credentials()
+        result = app.state.auth_manager.login(username, password)
+        if result is None:
+            app.state.auth_manager.user_store.seed_default_admin()
+            result = app.state.auth_manager.login(username, password)
+        if result is None:
+            raise HTTPException(status_code=500, detail="Demo login is unavailable")
+        user, access_token, refresh_token = result
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is not None and hasattr(repo, "record_audit_log"):
+            repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
+        response = Response(
+            content=json.dumps({
+                "access_token": access_token,
+                "token_type": "bearer",
+                "refresh_token": refresh_token,
+            }),
+            media_type="application/json",
+        )
+        _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
+        _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
         return response
 
     @app.get("/api/auth/verify")
@@ -1221,10 +1260,30 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         user = app.state.auth_manager.get_user_from_token(token)
         app.state.auth_manager.logout(token)
         repo = getattr(app.state.services, "platform_repository", None)
-        if repo is not None and user is not None:
+        if repo is not None and user is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(user.email, "logout", "session", user.email, {})
         response = RedirectResponse(url="http://localhost:3000/login", status_code=302)
-        response.delete_cookie("aegisnex_session", path="/")
+        _clear_auth_cookies(response)
+        return response
+
+    @app.post("/api/auth/refresh")
+    async def auth_refresh(request: FastAPIRequest) -> Any:
+        refresh_token = request.cookies.get("aegisnex_refresh") or request.headers.get("x-refresh-token", "")
+        if not refresh_token:
+            raise HTTPException(status_code=401, detail="Refresh token required")
+        refreshed = app.state.auth_manager.refresh_session(refresh_token)
+        if refreshed is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        access_token, next_refresh_token = refreshed
+        response = Response(
+            content=json.dumps({
+                "access_token": access_token,
+                "token_type": "bearer",
+            }),
+            media_type="application/json",
+        )
+        _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
+        _set_refresh_cookie(response, next_refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
         return response
 
     # ---- Protected template pages ----
@@ -1508,6 +1567,19 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         inst = get_installed_integrations()
         return {"integrations": inst, "count": len(inst)}
 
+    @app.get("/api/integrations/status")
+    def api_integrations_status(request: FastAPIRequest) -> Dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        from src.integrations.status_center import build_integration_status_center
+        return build_integration_status_center(app.state.services)
+
+    @app.get("/api/platform/health")
+    def api_platform_health(request: FastAPIRequest) -> Dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        from src.integrations.status_center import build_integration_status_center, platform_health_summary
+        status = build_integration_status_center(app.state.services)
+        return {"platform_health": status["platform_health"], "integrations": status["integrations"], "timestamp": utc_now()}
+
     @app.post("/api/integrations/install")
     async def api_install_integration(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
@@ -1571,6 +1643,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return {"status": "ok", "name": name, "health": result}
         except Exception as exc:
             return {"status": "error", "name": name, "error": str(exc)}
+
+    @app.post("/api/integrations/{name}/test")
+    def api_integration_test(name: str, request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        from src.integrations.status_center import test_integration_connection
+        return test_integration_connection(app.state.services, name)
 
     @app.get("/api/system-info")
     def api_system_info(request: FastAPIRequest) -> Dict[str, Any]:
@@ -2500,6 +2578,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"status": "ok"}
 
     # ---- Compliance API ----
+    from src.compliance.engine import ComplianceEngine
     compliance_engine = ComplianceEngine(repo=getattr(app.state.services, "platform_repository", None))
     app.state.compliance_engine = compliance_engine
 
@@ -2556,6 +2635,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     def api_compliance_report(framework_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         engine: ComplianceEngine = request.app.state.compliance_engine
+        from src.compliance.evidence import EvidenceCollector
         collector = EvidenceCollector(repo=getattr(request.app.state.services, "platform_repository", None))
         report_format = request.query_params.get("format", "json")
         try:
@@ -2584,6 +2664,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         else:
             if not _extract_token(request):
                 raise HTTPException(status_code=401, detail="Authentication required for /metrics")
+        from src.prometheus_exporter import PrometheusExporter
         payload, content_type = PrometheusExporter(app.state.services).render()
         return Response(content=payload, media_type=content_type)
 
@@ -2601,6 +2682,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not user_request:
             return Response(content="request is required", status_code=400)
         repo = getattr(app.state.services, "platform_repository", None)
+        from src.intelligence.graph import run_chat
+        from src.intelligence.history import save_workflow
         try:
             result = run_chat(user_request, repo=repo)
         except Exception as exc:
@@ -2643,6 +2726,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not user_request:
             return Response(content="request is required", status_code=400)
         repo = getattr(app.state.services, "platform_repository", None)
+        from src.intelligence.graph import run_analyze
+        from src.intelligence.history import save_workflow
         try:
             result = run_analyze(user_request, repo=repo)
         except Exception as exc:
@@ -2685,6 +2770,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not user_request:
             return Response(content="request is required", status_code=400)
         repo = getattr(app.state.services, "platform_repository", None)
+        from src.intelligence.graph import run_plan
         try:
             result = run_plan(user_request, repo=repo)
         except Exception as exc:
@@ -2701,6 +2787,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         limit = int(request.query_params.get("limit", 20))
         offset = int(request.query_params.get("offset", 0))
         limit = max(1, min(limit, 100))
+        from src.intelligence.history import list_history, get_history_count
         try:
             rows = list_history(repo, limit=limit, offset=offset)
             total = get_history_count(repo)
@@ -3009,9 +3096,26 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     # ---- Knowledge Management ----
 
     def _get_knowledge_services() -> tuple:
-        store = SQLiteMemoryStore(db_path=os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db"))
+        from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+        from src.intelligence.retrieval.rag import RAGEngine
+        from src.intelligence.retrieval.embeddings import EmbeddingService
+        from src.intelligence.retrieval.vector_store import SQLiteVectorStore
+        from src.intelligence.retrieval.chunker import SemanticChunker
+        from src.intelligence.providers.factory import create_provider
+        from src.knowledge.indexer import KnowledgeIndexer
+        from src.knowledge.retriever import KnowledgeRetriever
+        mem_db = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+        store = SQLiteMemoryStore(db_path=mem_db)
         rag = RAGEngine()
-        indexer = KnowledgeIndexer(store=store, rag=rag)
+        try:
+            provider = create_provider()
+            emb = EmbeddingService(provider)
+        except Exception:
+            emb = EmbeddingService()
+        vec_db_path = mem_db.replace(".db", "_vectors.db") if mem_db.endswith(".db") else mem_db + "_vectors"
+        vec_store = SQLiteVectorStore(vec_db_path)
+        chunker = SemanticChunker(emb)
+        indexer = KnowledgeIndexer(store=store, rag=rag, embedding_service=emb, vector_store=vec_store, chunker=chunker)
         retriever = KnowledgeRetriever(rag=rag, indexer=indexer)
         return store, rag, indexer, retriever
 

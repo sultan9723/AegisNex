@@ -106,6 +106,9 @@ class FakeRepository:
             "tcp_checks": [],
         }
 
+    def initialize(self) -> None:
+        pass
+
     def _connect(self):
         import sqlite3
         return sqlite3.connect(str(self.database_path))

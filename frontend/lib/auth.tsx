@@ -1,15 +1,13 @@
 "use client";
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { buildApiUrl } from "./api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 let currentAccessToken: string | null = null;
 
 function setCurrentAccessToken(token: string | null) {
   currentAccessToken = token;
-  if (typeof window !== "undefined") {
-    (window as any).__AEGISNEX_ACCESS_TOKEN__ = token;
-  }
 }
 
 export type User = {
@@ -24,6 +22,7 @@ type AuthContextValue = {
   loading: boolean;
   error: string | null;
   login: (username: string, password: string) => Promise<void>;
+  demoLogin: () => Promise<void>;
   logout: () => Promise<void>;
   isAuthenticated: boolean;
   checkAuth: () => Promise<void>;
@@ -36,10 +35,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const applyAuthResponse = useCallback(async (response: Response) => {
+    if (!response.ok) throw new Error("Invalid credentials");
+    const data = await response.json();
+    if (!data.access_token) throw new Error("Authentication failed: no access token received");
+    setCurrentAccessToken(data.access_token);
+    const parts = data.access_token.split(".");
+    try {
+      const payload = JSON.parse(atob(parts[1]));
+      const userInfo: User = {
+        id: parseInt(payload.sub),
+        email: payload.email,
+        role: payload.role,
+        is_superuser: payload.is_superuser,
+      };
+      setUser(userInfo);
+      return;
+    } catch {
+      setCurrentAccessToken(null);
+      setUser(null);
+      setError("Authentication failed: malformed token");
+      throw new Error("Authentication failed: malformed token");
+    }
+  }, []);
+
   const checkAuth = useCallback(async () => {
     try {
       setLoading(true);
-      const response = await fetch(`${API_BASE}/api/auth/verify`, {
+      const response = await fetch(buildApiUrl("/auth/verify"), {
         credentials: "include",
         cache: "no-store",
       });
@@ -49,8 +72,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setCurrentAccessToken(data.access_token ?? currentAccessToken);
         setError(null);
       } else {
-        setUser(null);
-        setCurrentAccessToken(null);
+        const refresh = await fetch(buildApiUrl("/auth/refresh"), {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (refresh.ok) {
+          await applyAuthResponse(refresh);
+          setError(null);
+        } else {
+          setUser(null);
+          setCurrentAccessToken(null);
+        }
       }
     } catch {
       setUser(null);
@@ -68,29 +101,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/api/login`, {
+      const response = await fetch(buildApiUrl("/login"), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ username, password }),
         credentials: "include",
       });
-      if (!response.ok) throw new Error("Invalid credentials");
-      const data = await response.json();
-      setCurrentAccessToken(data.access_token ?? null);
-      const parts = data.access_token.split(".");
-      let userInfo: User;
-      try {
-        const payload = JSON.parse(atob(parts[1]));
-        userInfo = {
-          id: parseInt(payload.sub),
-          email: payload.email,
-          role: payload.role,
-          is_superuser: payload.is_superuser,
-        };
-      } catch {
-        userInfo = { id: 0, email: username, role: "read_only", is_superuser: false };
-      }
-      setUser(userInfo);
+      await applyAuthResponse(response);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Login failed";
       setError(msg);
@@ -100,9 +117,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const demoLogin = useCallback(async () => {
+    setError(null);
+    setLoading(true);
+    try {
+      const response = await fetch(buildApiUrl("/auth/demo-login"), {
+        method: "POST",
+        credentials: "include",
+      });
+      await applyAuthResponse(response);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Demo login failed";
+      setError(msg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [applyAuthResponse]);
+
   const logout = useCallback(async () => {
     try {
-      await fetch(`${API_BASE}/logout`, { credentials: "include" });
+      await fetch("/logout", { credentials: "include" });
     } catch {
       // Best-effort
     }
@@ -117,6 +152,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loading,
         error,
         login,
+        demoLogin,
         logout,
         isAuthenticated: user !== null,
         checkAuth,
