@@ -12,6 +12,7 @@ import asyncio
 from pathlib import Path
 import json
 import os
+import re
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -95,6 +96,23 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
                 url = request.url.replace(scheme="https")
                 return StarletteRedirect(url=url, status_code=301)
         return await call_next(request)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+        if environment not in {"development", "dev", "local", "test"}:
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:"
+        return response
 
 
 # --- Rate Limiter ---
@@ -958,7 +976,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                     except asyncio.CancelledError: pass
 
     app = FastAPI(title="AegisNex Dashboard", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=get_cors_origins(), allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(CORSMiddleware, allow_origins=get_cors_origins(), allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"], allow_headers=["Authorization", "Content-Type", "Accept"])
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TLSRedirectMiddleware)
     app.add_middleware(TelemetryMiddleware)
     app.state.limiter = limiter
@@ -1681,7 +1700,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         except docker.errors.NotFound:
             return Response(content=json.dumps({"status": "error", "message": "Container not found"}), status_code=404, media_type="application/json")
         except docker.errors.DockerException as exc:
-            return Response(content=json.dumps({"status": "error", "message": str(exc)}), status_code=503, media_type="application/json")
+            get_logger(__name__).warning("Docker inspect error: %s", exc)
+            return Response(content=json.dumps({"status": "error", "message": "Container inspection failed"}), status_code=503, media_type="application/json")
 
     @app.get("/api/observability")
     def api_observability(request: FastAPIRequest) -> Any:
@@ -1933,7 +1953,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             with store._connect() as conn:
                 conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user_id))
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+            raise HTTPException(status_code=500, detail="Failed to update user role")
         app.state.services.platform_repository.record_audit_log(user.email, "update_role", "user", str(user_id), {"role": normalized_role})
         return {"status": "ok", "user_id": user_id, "role": normalized_role}
 
@@ -2152,7 +2172,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         token = secrets.token_urlsafe(32)
         repo.create_password_reset(user.id, token)
         repo.record_audit_log("system", "request_password_reset", "user", email, {})
-        return {"status": "ok", "message": "If the email exists, a reset link has been sent", "reset_token": token}
+        return {"status": "ok", "message": "If the email exists, a reset link has been sent"}
 
     @app.post("/api/password-reset/confirm")
     async def api_confirm_password_reset(request: FastAPIRequest) -> Any:
@@ -2584,7 +2604,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             result = run_chat(user_request, repo=repo)
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            get_logger(__name__).warning("AI chat error: %s", exc)
+            return Response(content=json.dumps({"error": "AI chat processing failed"}), status_code=500, media_type="application/json")
         if repo is not None:
             try:
                 save_workflow(
@@ -2625,7 +2646,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             result = run_analyze(user_request, repo=repo)
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            get_logger(__name__).warning("AI analyze error: %s", exc)
+            return Response(content=json.dumps({"error": "AI analysis failed"}), status_code=500, media_type="application/json")
         if repo is not None:
             try:
                 save_workflow(
@@ -2666,7 +2688,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             result = run_plan(user_request, repo=repo)
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            get_logger(__name__).warning("AI plan error: %s", exc)
+            return Response(content=json.dumps({"error": "AI planning failed"}), status_code=500, media_type="application/json")
         return result
 
     @app.get("/api/ai/history")
@@ -3002,6 +3025,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 return Response(content="No file provided", status_code=400)
             content_bytes = await file.read()
             filename = str(file.filename) if file.filename else "uploaded.md"
+            filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', filename)
+            filename = filename.lstrip('.')
             temp_dir = BASE_DIR / "data" / "knowledge_uploads"
             temp_dir.mkdir(parents=True, exist_ok=True)
             dest = temp_dir / filename

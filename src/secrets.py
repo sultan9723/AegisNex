@@ -26,25 +26,15 @@ class SecretManager:
     def _get_key(self) -> bytes:
         secret_key = os.getenv("AEGISNEX_SECRET_KEY")
         if not secret_key:
-            salt = os.getenv("AEGISNEX_SECRET_SALT", "aegisnex-default-salt").encode()
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=600_000,
+            raise RuntimeError(
+                "AEGISNEX_SECRET_KEY environment variable is required for secret management. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
             )
-            derived = base64.urlsafe_b64encode(kdf.derive(b"aegisnex-fallback-key"))
-            return derived
         if len(secret_key) < 16:
-            salt = b"aegisnex-fallback-salt"
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=600_000,
+            raise RuntimeError(
+                "AEGISNEX_SECRET_KEY must be at least 16 characters. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
             )
-            derived = base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
-            return derived
         try:
             return base64.urlsafe_b64decode(secret_key)
         except Exception:

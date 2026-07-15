@@ -38,3 +38,6 @@ notification_history.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Temporary workspace and browser profiles
+_tmp_ws/

@@ -88,7 +88,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           is_superuser: payload.is_superuser,
         };
       } catch {
-        userInfo = { id: 0, email: username, role: "admin", is_superuser: true };
+        userInfo = { id: 0, email: username, role: "read_only", is_superuser: false };
       }
       setUser(userInfo);
     } catch (err) {
