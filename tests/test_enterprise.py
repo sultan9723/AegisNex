@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from src.auth import Role, User, UserStore, AuthManager
 from src.platform_db import PlatformRepository
 from src.secrets import SecretManager
 from src.backup import BackupManager
+
+
+@pytest.fixture(autouse=True)
+def _set_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure AEGISNEX_SECRET_KEY is set for every test in this module."""
+    monkeypatch.setenv("AEGISNEX_SECRET_KEY", "BjEwcBgtq1O9dWPmKX6HRlEdfdiTgx4O15jOqoDRCSk=")
 
 
 # =========================================================================

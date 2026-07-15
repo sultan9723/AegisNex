@@ -36,7 +36,8 @@ class SecretManager:
                 "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
             )
         try:
-            return base64.urlsafe_b64decode(secret_key)
+            base64.urlsafe_b64decode(secret_key)
+            return secret_key.encode() if isinstance(secret_key, str) else secret_key
         except Exception:
             salt = b"aegisnex-key-salt"
             kdf = PBKDF2HMAC(
