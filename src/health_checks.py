@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from http.client import HTTPException
 import logging
 import socket
-from typing import Any, Mapping, Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass
+from http.client import HTTPException
+from typing import Any, Protocol
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 

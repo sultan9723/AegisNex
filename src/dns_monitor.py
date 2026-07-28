@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Dict, Mapping
+from typing import Any
 
 from src.incidents import IncidentManager, utc_timestamp
 
@@ -20,7 +21,7 @@ class DnsResolutionCheck:
     latency_ms: float | None
     error: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "hostname": self.hostname,
@@ -50,7 +51,7 @@ class DnsMonitor:
         self.incident_manager = incident_manager
         self.storage_repository = storage_repository
 
-    def run(self, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         targets = self._selected_targets(params)
         checks = [self._check_target(name, hostname) for name, hostname in targets.items()]
@@ -70,7 +71,7 @@ class DnsMonitor:
             "checks": [check.to_dict() for check in checks],
         }
 
-    def _selected_targets(self, params: Dict[str, Any]) -> Dict[str, str]:
+    def _selected_targets(self, params: dict[str, Any]) -> dict[str, str]:
         target_name = str(params.get("target_name", "")).strip()
         if target_name:
             t = self.targets.get(target_name)
@@ -108,9 +109,15 @@ class DnsMonitor:
 
     def _resolve(self, hostname: str) -> list[str]:
         import socket
+
         if self.resolver is not None:
             return self.resolver(hostname, self.timeout_seconds)
-        return [str(r[4][0]) for r in socket.getaddrinfo(hostname, 80, family=socket.AF_INET, type=socket.SOCK_STREAM)]
+        return [
+            str(r[4][0])
+            for r in socket.getaddrinfo(
+                hostname, 80, family=socket.AF_INET, type=socket.SOCK_STREAM
+            )
+        ]
 
     def _persist_check(self, check: DnsResolutionCheck) -> None:
         if self.storage_repository is None:

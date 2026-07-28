@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from http.client import HTTPResponse
 from time import perf_counter
-from typing import Any, Dict, Mapping
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -25,7 +27,7 @@ class HttpEndpointCheck:
     error: str
     availability_percent: float
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "url": self.url,
@@ -61,7 +63,7 @@ class HttpEndpointMonitor:
         self.client = client
         self.availability_window = max(1, availability_window)
 
-    def run(self, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         endpoints = self._selected_endpoints(params)
         checks = [self._check_endpoint(name, url) for name, url in endpoints.items()]
@@ -82,7 +84,7 @@ class HttpEndpointMonitor:
             "checks": [check.to_dict() for check in checks],
         }
 
-    def _selected_endpoints(self, params: Dict[str, Any]) -> Dict[str, str]:
+    def _selected_endpoints(self, params: dict[str, Any]) -> dict[str, str]:
         endpoint_name = str(params.get("endpoint_name", "")).strip()
         if endpoint_name:
             endpoint = self.endpoints.get(endpoint_name)
@@ -106,7 +108,9 @@ class HttpEndpointMonitor:
                 expected_status=self.expected_status,
                 status_code=status_code,
                 latency_ms=latency_ms,
-                error="" if available else f"HTTP status {status_code} outside healthy range 200-399",
+                error=""
+                if available
+                else f"HTTP status {status_code} outside healthy range 200-399",
                 availability_percent=100.0 if available else 0.0,
             )
         except Exception as exc:
@@ -160,10 +164,7 @@ class HttpEndpointMonitor:
         if check.available:
             self.incident_manager.resolve_service_incidents(check.name)
             return
-        description = (
-            f"HTTP endpoint {check.name} failed: "
-            f"{check.error or 'unavailable'}"
-        )
+        description = f"HTTP endpoint {check.name} failed: {check.error or 'unavailable'}"
         self.incident_manager.create_incident(
             severity="high",
             service_name=check.name,
@@ -191,19 +192,28 @@ class HttpEndpointMonitor:
         if self.storage_repository is None:
             return 100.0
         try:
-            rows = self.storage_repository.fetch_all("http_checks")
+            rows = self.storage_repository.fetch_all("check_results")
         except Exception:
             return 100.0
         endpoint_rows = [
             row
             for row in rows
-            if str(row.get("endpoint_name", row.get("name", ""))) == endpoint_name
+            if row.get("target_type") == "http" and str(row.get("target_name", "")) == endpoint_name
         ]
         endpoint_rows.sort(key=lambda row: str(row.get("timestamp", "")), reverse=True)
         recent_rows = endpoint_rows[: self.availability_window]
         if not recent_rows:
             return 100.0
-        available = len([row for row in recent_rows if bool(row.get("available"))])
+        available = 0
+        for row in recent_rows:
+            details = row.get("details")
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except (json.JSONDecodeError, TypeError):
+                    details = {}
+            if isinstance(details, dict) and details.get("available"):
+                available += 1
         return round((available / len(recent_rows)) * 100, 2)
 
 
