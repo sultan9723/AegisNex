@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from src.plugins.base import PluginManifest, SkillPlugin
 
@@ -25,7 +25,7 @@ class SystemAnalyzerSkill(SkillPlugin):
         self._required_tools = ["health", "metrics"]
         self._expected_outputs = ["analysis_report"]
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
             from src.intelligence.tools import execute_tool
 
@@ -39,15 +39,21 @@ class SystemAnalyzerSkill(SkillPlugin):
             containers_running = health.get("containers_running", 0)
             containers_total = health.get("containers_total", 0)
 
-            recommendations: List[str] = []
+            recommendations: list[str] = []
             if cpu > 80:
-                recommendations.append("High CPU usage detected - consider scaling or investigating processes")
+                recommendations.append(
+                    "High CPU usage detected - consider scaling or investigating processes"
+                )
             if memory > 80:
-                recommendations.append("High memory usage detected - check for memory leaks or scale up")
+                recommendations.append(
+                    "High memory usage detected - check for memory leaks or scale up"
+                )
             if disk > 85:
                 recommendations.append("Disk usage critical - clean up old logs or expand storage")
             if containers_total > 0 and containers_running < containers_total:
-                recommendations.append(f"Only {containers_running}/{containers_total} containers running - investigate stopped containers")
+                recommendations.append(
+                    f"Only {containers_running}/{containers_total} containers running - investigate stopped containers"
+                )
             if health.get("docker_available") is False:
                 recommendations.append("Docker daemon not reachable - check Docker service status")
             if health.get("database", {}).get("status") != "connected":
@@ -65,7 +71,12 @@ class SystemAnalyzerSkill(SkillPlugin):
                 },
             }
         except Exception as exc:
-            return {"status": "error", "skill": self.plugin_name, "skill_id": self.manifest.id, "error": str(exc)}
+            return {
+                "status": "error",
+                "skill": self.plugin_name,
+                "skill_id": self.manifest.id,
+                "error": str(exc),
+            }
 
 
 class IncidentInvestigatorSkill(SkillPlugin):
@@ -86,7 +97,7 @@ class IncidentInvestigatorSkill(SkillPlugin):
         self._required_tools = ["incident", "audit"]
         self._expected_outputs = ["investigation_report"]
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
             from src.intelligence.tools import execute_tool
 
@@ -97,18 +108,24 @@ class IncidentInvestigatorSkill(SkillPlugin):
             incidents = incident_result.get("incidents", [])
             audit_logs = audit_result.get("logs", [])
 
-            active_incidents = [i for i in incidents if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}]
-            root_causes: List[Dict[str, Any]] = []
+            active_incidents = [
+                i
+                for i in incidents
+                if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}
+            ]
+            root_causes: list[dict[str, Any]] = []
             for inc in active_incidents[:10]:
                 service = inc.get("service_name", "unknown")
                 related_logs = [log for log in audit_logs if service.lower() in str(log).lower()]
-                root_causes.append({
-                    "incident_id": inc.get("incident_id"),
-                    "service": service,
-                    "status": inc.get("incident_status", inc.get("status")),
-                    "related_audit_entries": len(related_logs),
-                    "timestamp": inc.get("timestamp"),
-                })
+                root_causes.append(
+                    {
+                        "incident_id": inc.get("incident_id"),
+                        "service": service,
+                        "status": inc.get("incident_status", inc.get("status")),
+                        "related_audit_entries": len(related_logs),
+                        "timestamp": inc.get("timestamp"),
+                    }
+                )
 
             return {
                 "status": "ok",
@@ -123,7 +140,12 @@ class IncidentInvestigatorSkill(SkillPlugin):
                 },
             }
         except Exception as exc:
-            return {"status": "error", "skill": self.plugin_name, "skill_id": self.manifest.id, "error": str(exc)}
+            return {
+                "status": "error",
+                "skill": self.plugin_name,
+                "skill_id": self.manifest.id,
+                "error": str(exc),
+            }
 
 
 class ContainerManagerSkill(SkillPlugin):
@@ -144,7 +166,7 @@ class ContainerManagerSkill(SkillPlugin):
         self._required_tools = ["docker"]
         self._expected_outputs = ["container_status", "actions_taken"]
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
             from src.intelligence.tools import execute_tool
 
@@ -154,15 +176,19 @@ class ContainerManagerSkill(SkillPlugin):
             containers = docker_result.get("containers", [])
             running = [c for c in containers if c.get("status") == "running"]
             stopped = [c for c in containers if c.get("status") == "stopped"]
-            unhealthy = [c for c in containers if c.get("health_status") not in {"healthy", "none", None, ""}]
+            unhealthy = [
+                c for c in containers if c.get("health_status") not in {"healthy", "none", None, ""}
+            ]
 
-            actions_taken: List[Dict[str, str]] = []
+            actions_taken: list[dict[str, str]] = []
             for c in unhealthy[:5]:
-                actions_taken.append({
-                    "container": c.get("name", "unknown"),
-                    "issue": f"Unhealthy status: {c.get('health_status')}",
-                    "recommended_action": "Restart container or investigate logs",
-                })
+                actions_taken.append(
+                    {
+                        "container": c.get("name", "unknown"),
+                        "issue": f"Unhealthy status: {c.get('health_status')}",
+                        "recommended_action": "Restart container or investigate logs",
+                    }
+                )
 
             return {
                 "status": "ok",
@@ -178,7 +204,12 @@ class ContainerManagerSkill(SkillPlugin):
                 "containers": containers,
             }
         except Exception as exc:
-            return {"status": "error", "skill": self.plugin_name, "skill_id": self.manifest.id, "error": str(exc)}
+            return {
+                "status": "error",
+                "skill": self.plugin_name,
+                "skill_id": self.manifest.id,
+                "error": str(exc),
+            }
 
 
 class ReportGeneratorSkill(SkillPlugin):
@@ -199,7 +230,7 @@ class ReportGeneratorSkill(SkillPlugin):
         self._required_tools = ["report", "metrics", "incident"]
         self._expected_outputs = ["formatted_report"]
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
             from src.intelligence.tools import execute_tool
 
@@ -211,7 +242,13 @@ class ReportGeneratorSkill(SkillPlugin):
 
             report_data = report_result.get("report", {})
             incidents = incident_result.get("incidents", [])
-            active_count = len([i for i in incidents if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}])
+            active_count = len(
+                [
+                    i
+                    for i in incidents
+                    if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}
+                ]
+            )
 
             return {
                 "status": "ok",
@@ -225,11 +262,18 @@ class ReportGeneratorSkill(SkillPlugin):
                         "total": len(incidents),
                         "active": active_count,
                     },
-                    "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    "generated_at": __import__("datetime")
+                    .datetime.now(__import__("datetime").timezone.utc)
+                    .isoformat(),
                 },
             }
         except Exception as exc:
-            return {"status": "error", "skill": self.plugin_name, "skill_id": self.manifest.id, "error": str(exc)}
+            return {
+                "status": "error",
+                "skill": self.plugin_name,
+                "skill_id": self.manifest.id,
+                "error": str(exc),
+            }
 
 
 class SecurityAuditorSkill(SkillPlugin):
@@ -250,7 +294,7 @@ class SecurityAuditorSkill(SkillPlugin):
         self._required_tools = ["audit", "target"]
         self._expected_outputs = ["security_audit_report"]
 
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         try:
             from src.intelligence.tools import execute_tool
 
@@ -261,29 +305,43 @@ class SecurityAuditorSkill(SkillPlugin):
             audit_logs = audit_result.get("logs", [])
             targets = target_result.get("targets", [])
 
-            failed_actions = [log for log in audit_logs if str(log.get("status", "")).lower() in {"error", "failed", "denied"}]
+            failed_actions = [
+                log
+                for log in audit_logs
+                if str(log.get("status", "")).lower() in {"error", "failed", "denied"}
+            ]
             ssl_targets = [t for t in targets if str(t.get("target_type", "")).lower() == "ssl"]
-            expired_ssl = [t for t in ssl_targets if t.get("latest_result", {}).get("status") != "ok"]
+            expired_ssl = [
+                t for t in ssl_targets if t.get("latest_result", {}).get("status") != "ok"
+            ]
 
-            findings: List[Dict[str, Any]] = []
+            findings: list[dict[str, Any]] = []
             if failed_actions:
-                findings.append({
-                    "severity": "high",
-                    "finding": f"Found {len(failed_actions)} failed/denied audit actions",
-                    "details": [log.get("action", str(log)[:80]) for log in failed_actions[:10]],
-                })
+                findings.append(
+                    {
+                        "severity": "high",
+                        "finding": f"Found {len(failed_actions)} failed/denied audit actions",
+                        "details": [
+                            log.get("action", str(log)[:80]) for log in failed_actions[:10]
+                        ],
+                    }
+                )
             if expired_ssl:
-                findings.append({
-                    "severity": "medium",
-                    "finding": f"{len(expired_ssl)} SSL certificate(s) with issues",
-                    "details": [t.get("name", str(t)[:80]) for t in expired_ssl[:10]],
-                })
+                findings.append(
+                    {
+                        "severity": "medium",
+                        "finding": f"{len(expired_ssl)} SSL certificate(s) with issues",
+                        "details": [t.get("name", str(t)[:80]) for t in expired_ssl[:10]],
+                    }
+                )
             if not findings:
-                findings.append({
-                    "severity": "info",
-                    "finding": "No critical security issues detected",
-                    "details": [],
-                })
+                findings.append(
+                    {
+                        "severity": "info",
+                        "finding": "No critical security issues detected",
+                        "details": [],
+                    }
+                )
 
             return {
                 "status": "ok",
@@ -297,10 +355,15 @@ class SecurityAuditorSkill(SkillPlugin):
                 },
             }
         except Exception as exc:
-            return {"status": "error", "skill": self.plugin_name, "skill_id": self.manifest.id, "error": str(exc)}
+            return {
+                "status": "error",
+                "skill": self.plugin_name,
+                "skill_id": self.manifest.id,
+                "error": str(exc),
+            }
 
 
-def create_default_skills() -> List[SkillPlugin]:
+def create_default_skills() -> list[SkillPlugin]:
     return [
         SystemAnalyzerSkill(),
         IncidentInvestigatorSkill(),
