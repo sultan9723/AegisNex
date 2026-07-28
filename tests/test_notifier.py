@@ -1,101 +1,71 @@
-from src.notifier import Notifier
+"""Tests for NotifierCompat adapter that bridges old Notifier interface to new NotificationProvider system."""
+
+from __future__ import annotations
+
+from src.notifications.base import NotificationProvider, NotificationResult
+from src.notifications_compat import NotifierCompat
 
 
-class FakeSMTP:
-    instances = []
+class FakeProvider(NotificationProvider):
+    name = "fake"
 
-    def __init__(self, host, port, timeout=None):
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-        self.starttls_calls = 0
-        self.login_calls = []
-        self.sendmail_calls = []
-        FakeSMTP.instances.append(self)
+    def __init__(self, enabled: bool = True, should_fail: bool = False) -> None:
+        super().__init__(enabled=enabled)
+        self._should_fail = should_fail
+        self.sent_messages: list[str] = []
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def starttls(self):
-        self.starttls_calls += 1
-
-    def login(self, username, password):
-        self.login_calls.append((username, password))
-
-    def sendmail(self, sender, recipients, message):
-        self.sendmail_calls.append((sender, recipients, message))
+    def _send(self, message: str) -> None:
+        self.sent_messages.append(message)
+        if self._should_fail:
+            raise RuntimeError("send failed")
 
 
-class FailingSMTP(FakeSMTP):
-    def login(self, username, password):
-        raise RuntimeError("smtp login failed")
+def test_notifier_compat_disabled_providers() -> None:
+    notifier = NotifierCompat([])
+    result = notifier.send_email_alert("hello")
+    assert result["status"] == "disabled"
 
 
-def test_send_email_alert_disabled() -> None:
-    notifier = Notifier(enabled=False)
-
-    assert notifier.send_email_alert("message") == {
-        "status": "disabled",
-        "message": "Email alerts disabled",
-    }
-
-
-def test_send_email_alert_success(monkeypatch) -> None:
-    FakeSMTP.instances = []
-    monkeypatch.setattr("src.notifier.smtplib.SMTP", FakeSMTP)
-    notifier = Notifier(
-        enabled=True,
-        smtp_host="smtp.example.com",
-        smtp_port=2525,
-        smtp_timeout_seconds=3,
-        starttls=True,
-        email_user="sender@example.com",
-        email_pass="secret",
-        email_to="ops@example.com",
-        subject="Default Subject",
-    )
-
-    result = notifier.send_email_alert("hello", subject="Override Subject")
-
-    smtp = FakeSMTP.instances[0]
-    assert result == {"status": "ok", "recipient": "ops@example.com"}
-    assert (smtp.host, smtp.port, smtp.timeout) == ("smtp.example.com", 2525, 3)
-    assert smtp.starttls_calls == 1
-    assert smtp.login_calls == [("sender@example.com", "secret")]
-    assert smtp.sendmail_calls[0][0] == "sender@example.com"
-    assert smtp.sendmail_calls[0][1] == ["ops@example.com"]
-    assert "Override Subject" in smtp.sendmail_calls[0][2]
+def test_notifier_compat_sends_via_provider() -> None:
+    provider = FakeProvider(enabled=True)
+    notifier = NotifierCompat([provider])
+    result = notifier.send_email_alert("test message")
+    assert result["status"] == "ok"
+    assert provider.sent_messages == ["test message"]
 
 
-def test_send_email_alert_can_skip_starttls(monkeypatch) -> None:
-    FakeSMTP.instances = []
-    monkeypatch.setattr("src.notifier.smtplib.SMTP", FakeSMTP)
-    notifier = Notifier(
-        enabled=True,
-        starttls=False,
-        email_user="sender@example.com",
-        email_pass="secret",
-        email_to="ops@example.com",
-    )
-
-    notifier.send_email_alert("hello")
-
-    assert FakeSMTP.instances[0].starttls_calls == 0
+def test_notifier_compat_handles_provider_failure() -> None:
+    provider = FakeProvider(enabled=True, should_fail=True)
+    notifier = NotifierCompat([provider])
+    result = notifier.send_email_alert("test message")
+    assert result["status"] == "error"
 
 
-def test_send_email_alert_returns_error_on_smtp_failure(monkeypatch) -> None:
-    monkeypatch.setattr("src.notifier.smtplib.SMTP", FailingSMTP)
-    notifier = Notifier(
-        enabled=True,
-        email_user="sender@example.com",
-        email_pass="secret",
-        email_to="ops@example.com",
-    )
+def test_notifier_compat_multiple_providers() -> None:
+    p1 = FakeProvider(enabled=True)
+    p2 = FakeProvider(enabled=True)
+    notifier = NotifierCompat([p1, p2])
+    result = notifier.send_email_alert("broadcast")
+    assert p1.sent_messages == ["broadcast"]
+    assert p2.sent_messages == ["broadcast"]
+    assert isinstance(result, dict)
 
-    assert notifier.send_email_alert("hello") == {
-        "status": "error",
-        "message": "Failed to send email alert",
-    }
+
+def test_notifier_compat_send_method() -> None:
+    p1 = FakeProvider(enabled=True)
+    notifier = NotifierCompat([p1])
+    results = notifier.send("hello", providers=["fake"])
+    assert len(results) == 1
+    assert results[0]["provider"] == "fake"
+
+
+def test_notifier_compat_send_filters_providers() -> None:
+    p1 = FakeProvider(enabled=True)
+    p1.name = "email"
+    p2 = FakeProvider(enabled=True)
+    p2.name = "slack"
+    notifier = NotifierCompat([p1, p2])
+    results = notifier.send("hello", providers=["email"])
+    assert len(results) == 1
+    assert p1.sent_messages == ["hello"]
+    assert p2.sent_messages == []
