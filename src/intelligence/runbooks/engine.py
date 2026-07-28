@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from src.intelligence.runbooks.parser import RunbookDef, RunbookStep
-from src.intelligence.tools import execute_tool, get_tool
+from src.intelligence.tools import get_tool
 
 
 @dataclass
@@ -16,10 +16,10 @@ class StepResult:
     step_name: str
     status: str
     duration_ms: float = 0.0
-    result: Dict[str, Any] = field(default_factory=dict)
+    result: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "step_name": self.step_name,
             "status": self.status,
@@ -33,13 +33,13 @@ class StepResult:
 class RunbookResult:
     runbook_name: str
     status: str
-    step_results: List[StepResult] = field(default_factory=list)
+    step_results: list[StepResult] = field(default_factory=list)
     total_duration_ms: float = 0.0
     error: str = ""
     started_at: str = ""
     completed_at: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "runbook_name": self.runbook_name,
             "status": self.status,
@@ -56,20 +56,20 @@ class RunbookEngine:
         self._repo = repo
 
     def _utc_now(self) -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def execute(
         self,
         runbook: RunbookDef,
-        incident_id: Optional[str] = None,
+        incident_id: str | None = None,
         **kwargs: Any,
     ) -> RunbookResult:
         started_at = self._utc_now()
         start_time = time.time()
-        step_results: List[StepResult] = []
+        step_results: list[StepResult] = []
         overall_status = "completed"
 
-        steps_to_run: List[RunbookStep] = list(runbook.steps)
+        steps_to_run: list[RunbookStep] = list(runbook.steps)
 
         # Handle parallel step groups
         if runbook.parallel_steps:
@@ -84,7 +84,9 @@ class RunbookEngine:
                     result = self._execute_step(step, incident_id=incident_id, **kwargs)
                     step_result = StepResult(
                         step_name=step.name,
-                        status=result.get("status", "error") if isinstance(result, dict) else "error",
+                        status=result.get("status", "error")
+                        if isinstance(result, dict)
+                        else "error",
                         duration_ms=(time.time() - step_start) * 1000,
                         result=result if isinstance(result, dict) else {},
                         error=result.get("error", "") if isinstance(result, dict) else str(result),
@@ -102,11 +104,19 @@ class RunbookEngine:
 
             if step.condition:
                 if not self._evaluate_condition(step.condition, step_results):
-                    step_results.append(StepResult(step_name=step.name, status="skipped", error="Condition not met"))
+                    step_results.append(
+                        StepResult(step_name=step.name, status="skipped", error="Condition not met")
+                    )
                     continue
 
             if step.requires_approval:
-                step_results.append(StepResult(step_name=step.name, status="pending_approval", error="Awaiting human approval"))
+                step_results.append(
+                    StepResult(
+                        step_name=step.name,
+                        status="pending_approval",
+                        error="Awaiting human approval",
+                    )
+                )
                 overall_status = "pending_approval"
                 continue
 
@@ -115,16 +125,24 @@ class RunbookEngine:
                 result = self._execute_step(step, incident_id=incident_id, **kwargs)
                 elapsed = (time.time() - step_start) * 1000
                 status = "ok" if result.get("status") == "ok" else "error"
-                step_results.append(StepResult(step_name=step.name, status=status, duration_ms=elapsed, result=result))
+                step_results.append(
+                    StepResult(
+                        step_name=step.name, status=status, duration_ms=elapsed, result=result
+                    )
+                )
 
                 if status == "error" and step.on_failure == "stop":
                     overall_status = "failed"
                     break
-                elif status == "error" and step.on_failure == "continue":
+                if status == "error" and step.on_failure == "continue":
                     continue
             except Exception as exc:
                 elapsed = (time.time() - step_start) * 1000
-                step_results.append(StepResult(step_name=step.name, status="error", duration_ms=elapsed, error=str(exc)))
+                step_results.append(
+                    StepResult(
+                        step_name=step.name, status="error", duration_ms=elapsed, error=str(exc)
+                    )
+                )
                 if step.on_failure == "stop":
                     overall_status = "failed"
                     break
@@ -144,7 +162,7 @@ class RunbookEngine:
             completed_at=self._utc_now(),
         )
 
-    def _execute_step(self, step: RunbookStep, **kwargs: Any) -> Dict[str, Any]:
+    def _execute_step(self, step: RunbookStep, **kwargs: Any) -> dict[str, Any]:
         if step.action == "tool" and step.tool:
             tool = get_tool(step.tool)
             if tool is None:
@@ -160,20 +178,32 @@ class RunbookEngine:
             return {"status": "ok", "waited_seconds": duration}
 
         if step.action == "notify":
-            return {"status": "ok", "message": f"Notification: {step.params.get('message', step.description)}"}
+            return {
+                "status": "ok",
+                "message": f"Notification: {step.params.get('message', step.description)}",
+            }
 
         if step.action == "resolve_incident":
             inc_id = kwargs.get("incident_id") or step.params.get("incident_id", "")
             if inc_id and self._repo is not None:
                 from src.incidents import IncidentManager
+
                 im = IncidentManager("", storage_repository=self._repo)
-                im.resolve_incident(inc_id, "runbook", step.params.get("resolution_notes", "Resolved by runbook"))
+                im.resolve_incident(
+                    inc_id, "runbook", step.params.get("resolution_notes", "Resolved by runbook")
+                )
                 return {"status": "ok", "incident_id": inc_id, "resolved": True}
-            return {"status": "ok", "incident_id": inc_id or "unknown", "resolved": False, "note": "No repo available"}
+            return {
+                "status": "ok",
+                "incident_id": inc_id or "unknown",
+                "resolved": False,
+                "note": "No repo available",
+            }
 
         if step.action == "create_incident":
             if self._repo is not None:
                 from src.incidents import IncidentManager
+
                 im = IncidentManager("", storage_repository=self._repo)
                 inc = im.create_incident(
                     severity=step.params.get("severity", "medium"),
@@ -186,7 +216,7 @@ class RunbookEngine:
 
         return {"status": "error", "error": f"Unknown action: {step.action}"}
 
-    def _evaluate_condition(self, condition: str, results: List[StepResult]) -> bool:
+    def _evaluate_condition(self, condition: str, results: list[StepResult]) -> bool:
         cond = condition.strip().lower()
         if cond.startswith("step:"):
             parts = cond.split(":")

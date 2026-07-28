@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class RiskLevel(str, Enum):
@@ -23,10 +23,10 @@ class RiskAssessment:
     confidence: float = 0.0
     requires_approval: bool = False
     impact_estimate: str = ""
-    factors: List[str] = field(default_factory=list)
+    factors: list[str] = field(default_factory=list)
     auto_execute_allowed: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "score": self.score,
             "level": self.level.value,
@@ -40,16 +40,24 @@ class RiskAssessment:
 
 class RiskEngine:
     def __init__(self, auto_execute_threshold: float = 0.3) -> None:
-        self._auto_execute_threshold = float(os.getenv("AEGIS_AI_AUTO_EXECUTE_THRESHOLD", str(auto_execute_threshold)))
+        self._auto_execute_threshold = float(
+            os.getenv("AEGIS_AI_AUTO_EXECUTE_THRESHOLD", str(auto_execute_threshold))
+        )
 
-    def assess_tool(self, tool_name: str, params: Optional[Dict[str, Any]] = None) -> RiskAssessment:
+    def assess_tool(self, tool_name: str, params: dict[str, Any] | None = None) -> RiskAssessment:
         from src.intelligence.tools import get_tool
 
         tool = get_tool(tool_name)
         if tool is None:
-            return RiskAssessment(score=0.5, level=RiskLevel.MEDIUM, requires_approval=True, impact_estimate=f"Unknown tool: {tool_name}", factors=["Tool not in registry"])
+            return RiskAssessment(
+                score=0.5,
+                level=RiskLevel.MEDIUM,
+                requires_approval=True,
+                impact_estimate=f"Unknown tool: {tool_name}",
+                factors=["Tool not in registry"],
+            )
 
-        factors: List[str] = []
+        factors: list[str] = []
         score = 0.0
 
         if tool.risk_level.value == "none":
@@ -91,8 +99,8 @@ class RiskEngine:
             auto_execute_allowed=auto_execute,
         )
 
-    def assess_runbook(self, runbook_name: str, steps: List[Dict[str, Any]]) -> RiskAssessment:
-        factors: List[str] = []
+    def assess_runbook(self, runbook_name: str, steps: list[dict[str, Any]]) -> RiskAssessment:
+        factors: list[str] = []
         scores = []
         for step in steps:
             if step.get("requires_approval"):
@@ -118,30 +126,29 @@ class RiskEngine:
             requires_approval=requires_approval,
             impact_estimate=impact,
             factors=list(set(factors)),
-            auto_execute_allowed=not requires_approval and final_score <= self._auto_execute_threshold,
+            auto_execute_allowed=not requires_approval
+            and final_score <= self._auto_execute_threshold,
         )
 
-    def assess_workflow(self, workflow_name: str, steps: List[Dict[str, Any]]) -> RiskAssessment:
+    def assess_workflow(self, workflow_name: str, steps: list[dict[str, Any]]) -> RiskAssessment:
         return self.assess_runbook(workflow_name, steps)
 
     def _score_to_level(self, score: float) -> RiskLevel:
         if score <= 0.1:
             return RiskLevel.NONE
-        elif score <= 0.3:
+        if score <= 0.3:
             return RiskLevel.LOW
-        elif score <= 0.5:
+        if score <= 0.5:
             return RiskLevel.MEDIUM
-        elif score <= 0.75:
+        if score <= 0.75:
             return RiskLevel.HIGH
-        else:
-            return RiskLevel.CRITICAL
+        return RiskLevel.CRITICAL
 
-    def _estimate_impact(self, name: str, score: float, factors: List[str]) -> str:
+    def _estimate_impact(self, name: str, score: float, factors: list[str]) -> str:
         if score >= 0.8:
             return f"Critical impact — {name} may cause significant service disruption"
-        elif score >= 0.5:
+        if score >= 0.5:
             return f"Moderate impact — {name} affects running services"
-        elif score >= 0.2:
+        if score >= 0.2:
             return f"Minor impact — {name} has limited effect on operations"
-        else:
-            return f"Negligible impact — {name} is read-only or informational"
+        return f"Negligible impact — {name} is read-only or informational"

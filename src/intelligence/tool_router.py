@@ -7,15 +7,15 @@ Performs validation, enrichment, and logging without executing tools.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
-from src.intelligence.tools import TOOL_REGISTRY, get_tool
+from src.intelligence.tools import get_tool
 
 
 def utc_now() -> str:
     """Return current UTC timestamp in ISO 8601 format."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class ToolRouterConfig:
@@ -23,7 +23,7 @@ class ToolRouterConfig:
 
     def __init__(
         self,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
         strict_mode: bool = False,
     ):
         """Initialize router configuration.
@@ -59,7 +59,7 @@ class ToolRouterDecision:
         self.reason = reason
         self.timestamp = timestamp or utc_now()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert decision to dictionary."""
         return {
             "tool_name": self.tool_name,
@@ -76,7 +76,7 @@ class ToolRouterDecision:
 class ToolRouter:
     """Routes abstract tasks to concrete tools from the registry."""
 
-    def __init__(self, config: Optional[ToolRouterConfig] = None):
+    def __init__(self, config: ToolRouterConfig | None = None):
         """Initialize the Tool Router.
 
         Args:
@@ -84,9 +84,9 @@ class ToolRouter:
         """
         self.config = config or ToolRouterConfig()
         self.logger = self.config.logger
-        self.decisions: List[ToolRouterDecision] = []
+        self.decisions: list[ToolRouterDecision] = []
 
-    def route_task(self, task_name: str) -> Optional[ToolRouterDecision]:
+    def route_task(self, task_name: str) -> ToolRouterDecision | None:
         """Route a single task to a tool.
 
         Args:
@@ -132,7 +132,7 @@ class ToolRouter:
 
         return decision
 
-    def route_plan(self, plan: List[str]) -> Dict[str, Any]:
+    def route_plan(self, plan: list[str]) -> dict[str, Any]:
         """Route all tasks in a plan.
 
         Args:
@@ -154,8 +154,8 @@ class ToolRouter:
                 "timestamp": utc_now(),
             }
 
-        routed_tools: List[str] = []
-        invalid_tasks: List[str] = []
+        routed_tools: list[str] = []
+        invalid_tasks: list[str] = []
 
         for task in plan:
             if not task or not isinstance(task, str):
@@ -189,7 +189,7 @@ class ToolRouter:
             "timestamp": utc_now(),
         }
 
-    def get_tool_metadata(self, tool_name: str) -> Optional[Dict[str, Any]]:
+    def get_tool_metadata(self, tool_name: str) -> dict[str, Any] | None:
         """Get metadata for a tool without routing.
 
         Args:
@@ -214,7 +214,7 @@ class ToolRouter:
             "requires_approval": tool.requires_approval,
         }
 
-    def get_routing_log(self) -> List[Dict[str, Any]]:
+    def get_routing_log(self) -> list[dict[str, Any]]:
         """Get the complete routing decision log.
 
         Returns:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
 
 class AgentStep(TypedDict):
@@ -25,25 +25,25 @@ class PendingApproval(TypedDict):
 class AgentState(TypedDict):
     user_request: str
     objective: str
-    current_plan: List[str]
-    completed_steps: List[str]
-    tool_results: Dict[str, Any]
-    observations: List[str]
+    current_plan: list[str]
+    completed_steps: list[str]
+    tool_results: dict[str, Any]
+    observations: list[str]
     confidence: float
     retries: int
     max_retries: int
     final_answer: str
     goal_achieved: bool
     goal_completed: bool
-    plan: Dict[str, Any]
-    executed_steps: List[AgentStep]
-    pending_approvals: List[PendingApproval]
-    errors: List[str]
-    corrections: List[str]
-    missing_info: List[str]
-    parallel_batches: List[List[str]]
+    plan: dict[str, Any]
+    executed_steps: list[AgentStep]
+    pending_approvals: list[PendingApproval]
+    errors: list[str]
+    corrections: list[str]
+    missing_info: list[str]
+    parallel_batches: list[list[str]]
     retrieved_context: str
-    evidence: List[str]
+    evidence: list[str]
     reasoning_summary: str
     remaining_uncertainty: str
     provider_used: str
@@ -51,24 +51,24 @@ class AgentState(TypedDict):
     execution_started_at: str
     execution_duration_ms: float
     token_usage: int
-    tool_permission_levels: Dict[str, str]
+    tool_permission_levels: dict[str, str]
     approval_required: bool
     approval_id: str
     current_runbook: str
-    runbook_steps: List[Dict[str, Any]]
-    risk_assessment: Dict[str, Any]
-    policy_results: List[Dict[str, Any]]
+    runbook_steps: list[dict[str, Any]]
+    risk_assessment: dict[str, Any]
+    policy_results: list[dict[str, Any]]
     workflow_triggered: str
-    scheduler_tasks: List[Dict[str, Any]]
-    learnings: List[Dict[str, Any]]
-    parallel_executions: Dict[str, Any]
-    approval_log: List[Dict[str, Any]]
+    scheduler_tasks: list[dict[str, Any]]
+    learnings: list[dict[str, Any]]
+    parallel_executions: dict[str, Any]
+    approval_log: list[dict[str, Any]]
     agent_type: str
-    agent_collaboration: List[Dict[str, Any]]
-    shared_state: Dict[str, Any]
-    active_skills: List[str]
-    skill_results: List[Dict[str, Any]]
-    tool_router_results: Dict[str, Any]
+    agent_collaboration: list[dict[str, Any]]
+    shared_state: dict[str, Any]
+    active_skills: list[str]
+    skill_results: list[dict[str, Any]]
+    tool_router_results: dict[str, Any]
 
 
 def initial_state(user_request: str) -> AgentState:

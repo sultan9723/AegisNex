@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -20,13 +20,13 @@ class ScheduledTask:
     name: str
     cron_expression: str
     task_type: str
-    params: Dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
     enabled: bool = True
-    last_run: Optional[str] = None
-    next_run: Optional[str] = None
+    last_run: str | None = None
+    next_run: str | None = None
     id: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -40,15 +40,15 @@ class ScheduledTask:
 
 
 class Scheduler:
-    def __init__(self, db_path: str = "ai_scheduler.db") -> None:
+    def __init__(self, db_path: str = "aegisnex.db") -> None:
         self._db_path = db_path
         self._lock = threading.Lock()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._executor: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        self._thread: threading.Thread | None = None
+        self._executor: Callable[[str, dict[str, Any]], None] | None = None
         self._ensure_tables()
 
-    def set_executor(self, fn: Callable[[str, Dict[str, Any]], None]) -> None:
+    def set_executor(self, fn: Callable[[str, dict[str, Any]], None]) -> None:
         self._executor = fn
 
     def _ensure_tables(self) -> None:
@@ -104,7 +104,9 @@ class Scheduler:
             pass
         return conn
 
-    def add_task(self, name: str, cron_expression: str, task_type: str, params: Optional[Dict[str, Any]] = None) -> int:
+    def add_task(
+        self, name: str, cron_expression: str, task_type: str, params: dict[str, Any] | None = None
+    ) -> int:
         with self._lock:
             conn = self._conn()
             cur = conn.execute(
@@ -123,7 +125,7 @@ class Scheduler:
             conn.close()
             return True
 
-    def list_tasks(self) -> List[Dict[str, Any]]:
+    def list_tasks(self) -> list[dict[str, Any]]:
         with self._lock:
             conn = self._conn()
             rows = conn.execute("SELECT * FROM scheduled_tasks ORDER BY id").fetchall()
@@ -136,7 +138,7 @@ class Scheduler:
                 result.append(task)
             return result
 
-    def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+    def get_task(self, task_id: int) -> dict[str, Any] | None:
         with self._lock:
             conn = self._conn()
             row = conn.execute("SELECT * FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -148,7 +150,15 @@ class Scheduler:
             return None
 
     def update_task(self, task_id: int, **updates: Any) -> bool:
-        allowed = {"name", "cron_expression", "task_type", "params", "enabled", "last_run", "next_run"}
+        allowed = {
+            "name",
+            "cron_expression",
+            "task_type",
+            "params",
+            "enabled",
+            "last_run",
+            "next_run",
+        }
         with self._lock:
             conn = self._conn()
             for key, value in updates.items():
@@ -157,15 +167,19 @@ class Scheduler:
                         value = json.dumps(value)
                     elif key == "enabled":
                         value = 1 if value else 0
-                    conn.execute(f"UPDATE scheduled_tasks SET {key} = ? WHERE id = ?", (value, task_id))
+                    conn.execute(
+                        f"UPDATE scheduled_tasks SET {key} = ? WHERE id = ?", (value, task_id)
+                    )
             conn.commit()
             conn.close()
             return True
 
-    def log_execution(self, task_name: str, status: str, result: str = "", duration_ms: float = 0.0) -> None:
+    def log_execution(
+        self, task_name: str, status: str, result: str = "", duration_ms: float = 0.0
+    ) -> None:
         with self._lock:
             conn = self._conn()
-            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
             conn.execute(
                 "INSERT INTO scheduled_task_log (task_name, status, result, started_at, completed_at, duration_ms) VALUES (?, ?, ?, ?, ?, ?)",
                 (task_name, status, result, now, now, duration_ms),
@@ -173,18 +187,20 @@ class Scheduler:
             conn.commit()
             conn.close()
 
-    def get_log(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def get_log(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
             conn = self._conn()
-            rows = conn.execute("SELECT * FROM scheduled_task_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = conn.execute(
+                "SELECT * FROM scheduled_task_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
             conn.close()
             return [dict(r) for r in rows]
 
-    def _parse_cron(self, cron: str) -> List[int]:
+    def _parse_cron(self, cron: str) -> list[int]:
         parts = cron.strip().split()
         if len(parts) < 5:
             return []
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         current = [now.minute, now.hour, now.day, now.month, now.weekday()]
         matches = 0
         for i, part in enumerate(parts[:5]):
@@ -210,14 +226,14 @@ class Scheduler:
                     pass
         return [matches, len(parts[:5])]
 
-    def _should_run(self, cron: str, last_run: Optional[str]) -> bool:
+    def _should_run(self, cron: str, last_run: str | None) -> bool:
         match_count, total = self._parse_cron(cron)
         if match_count < total:
             return False
         if last_run:
             try:
                 last = datetime.fromisoformat(last_run)
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 if (now - last).total_seconds() < 30:
                     return False
             except Exception:
@@ -233,7 +249,10 @@ class Scheduler:
                 if self._executor:
                     try:
                         self._executor(task["name"], task.get("params", {}))
-                        self.update_task(task["id"], last_run=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+                        self.update_task(
+                            task["id"],
+                            last_run=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                        )
                         self.log_execution(task["name"], "completed")
                     except Exception as e:
                         self.log_execution(task["name"], "error", str(e))
@@ -242,7 +261,9 @@ class Scheduler:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(target=self._run_loop, args=(interval_seconds,), daemon=True)
+        self._thread = threading.Thread(
+            target=self._run_loop, args=(interval_seconds,), daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -259,11 +280,13 @@ class Scheduler:
                 pass
             time.sleep(interval)
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         with self._lock:
             conn = self._conn()
             total = conn.execute("SELECT COUNT(*) as cnt FROM scheduled_tasks").fetchone()["cnt"]
-            enabled = conn.execute("SELECT COUNT(*) as cnt FROM scheduled_tasks WHERE enabled = 1").fetchone()["cnt"]
+            enabled = conn.execute(
+                "SELECT COUNT(*) as cnt FROM scheduled_tasks WHERE enabled = 1"
+            ).fetchone()["cnt"]
             logs = conn.execute("SELECT COUNT(*) as cnt FROM scheduled_task_log").fetchone()["cnt"]
             conn.close()
             return {"total_tasks": total, "enabled_tasks": enabled, "total_executions": logs}

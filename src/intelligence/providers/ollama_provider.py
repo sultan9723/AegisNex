@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -14,7 +14,7 @@ from src.intelligence.providers.base import (
 
 
 class OllamaProvider(ModelProvider):
-    def __init__(self, config: Optional[ProviderConfig] = None) -> None:
+    def __init__(self, config: ProviderConfig | None = None) -> None:
         super().__init__(config)
         self._base_url = (self.config.base_url or "http://localhost:11434").rstrip("/")
 
@@ -22,7 +22,7 @@ class OllamaProvider(ModelProvider):
     def provider_name(self) -> str:
         return "ollama"
 
-    def chat(self, messages: List[Message], **kwargs: Any) -> Message:
+    def chat(self, messages: list[Message], **kwargs: Any) -> Message:
         model = kwargs.get("model", self.config.model)
         payload = {
             "model": model,
@@ -36,19 +36,31 @@ class OllamaProvider(ModelProvider):
         resp = httpx.post(f"{self._base_url}/api/chat", json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-        return Message(role=data.get("message", {}).get("role", "assistant"), content=data.get("message", {}).get("content", ""))
+        return Message(
+            role=data.get("message", {}).get("role", "assistant"),
+            content=data.get("message", {}).get("content", ""),
+        )
 
     def chat_with_tools(
         self,
-        messages: List[Message],
-        tools: List[Dict[str, Any]],
+        messages: list[Message],
+        tools: list[dict[str, Any]],
         **kwargs: Any,
     ) -> Message:
         model = kwargs.get("model", self.config.model)
         ollama_tools = []
         for t in tools:
             params = t.get("function", t).get("parameters", {})
-            ollama_tools.append({"type": "function", "function": {"name": t.get("function", t).get("name", ""), "description": t.get("function", t).get("description", ""), "parameters": params}})
+            ollama_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.get("function", t).get("name", ""),
+                        "description": t.get("function", t).get("description", ""),
+                        "parameters": params,
+                    },
+                }
+            )
         payload = {
             "model": model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
@@ -73,10 +85,14 @@ class OllamaProvider(ModelProvider):
                 except json.JSONDecodeError:
                     args_raw = {}
             tool_calls.append(ToolCall(name=fn.get("name", ""), args=args_raw, id=""))
-        return Message(role=msg.get("role", "assistant"), content=msg.get("content", ""), tool_calls=tool_calls)
+        return Message(
+            role=msg.get("role", "assistant"), content=msg.get("content", ""), tool_calls=tool_calls
+        )
 
-    def embed(self, text: str, **kwargs: Any) -> List[float]:
+    def embed(self, text: str, **kwargs: Any) -> list[float]:
         model = kwargs.get("model", "nomic-embed-text")
-        resp = httpx.post(f"{self._base_url}/api/embeddings", json={"model": model, "prompt": text}, timeout=30)
+        resp = httpx.post(
+            f"{self._base_url}/api/embeddings", json={"model": model, "prompt": text}, timeout=30
+        )
         resp.raise_for_status()
         return resp.json().get("embedding", [])

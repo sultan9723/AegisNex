@@ -5,19 +5,20 @@ All tools return structured JSON. No tool calls another tool directly.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from src.platform_db import PlatformRepository
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-ToolFn = Callable[..., Dict[str, Any]]
+ToolFn = Callable[..., dict[str, Any]]
 
 
 class RiskLevel(str, Enum):
@@ -44,15 +45,15 @@ class ToolDef:
     name: str
     description: str
     category: str
-    parameters: List[Dict[str, Any]] = field(default_factory=list)
+    parameters: list[dict[str, Any]] = field(default_factory=list)
     permission_level: PermissionLevel = PermissionLevel.VIEWER
     access_mode: AccessMode = AccessMode.READ
     risk_level: RiskLevel = RiskLevel.NONE
     requires_approval: bool = False
     destructive: bool = False
-    fn: Optional[ToolFn] = None
+    fn: ToolFn | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
@@ -78,7 +79,7 @@ class Tool:
         permission_level: PermissionLevel = PermissionLevel.VIEWER,
         access_mode: AccessMode = AccessMode.READ,
         risk_level: RiskLevel = RiskLevel.NONE,
-        parameters: Optional[List[Dict[str, Any]]] = None,
+        parameters: list[dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self.description = description
@@ -91,14 +92,14 @@ class Tool:
         self.risk_level = risk_level
         self.parameters = parameters or []
 
-    def execute(self, **kwargs: Any) -> Dict[str, Any]:
+    def execute(self, **kwargs: Any) -> dict[str, Any]:
         result = self.fn(**kwargs)
         result.setdefault("tool", self.name)
         result.setdefault("timestamp", utc_now())
         result.setdefault("status", "ok")
         return result
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
@@ -114,7 +115,8 @@ class Tool:
 
 # ---- Tool implementations ----
 
-def _metrics_tool(repo: Optional[PlatformRepository] = None, **kwargs: Any) -> Dict[str, Any]:
+
+def _metrics_tool(repo: PlatformRepository | None = None, **kwargs: Any) -> dict[str, Any]:
     try:
         from src.prometheus_exporter import PrometheusExporter
 
@@ -128,7 +130,7 @@ def _metrics_tool(repo: Optional[PlatformRepository] = None, **kwargs: Any) -> D
         return {"status": "error", "error": str(exc), "metrics": {}}
 
 
-def _docker_tool(repo: Optional[PlatformRepository] = None, **kwargs: Any) -> Dict[str, Any]:
+def _docker_tool(repo: PlatformRepository | None = None, **kwargs: Any) -> dict[str, Any]:
     try:
         from src.docker_scanner import DockerScanner
 
@@ -144,11 +146,11 @@ def _docker_tool(repo: Optional[PlatformRepository] = None, **kwargs: Any) -> Di
 
 
 def _incident_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     action: str = "list",
-    incident_id: Optional[str] = None,
+    incident_id: str | None = None,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         from src.incidents import IncidentManager
 
@@ -179,11 +181,11 @@ def _incident_tool(
 
 
 def _target_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     action: str = "list",
-    target_id: Optional[int] = None,
+    target_id: int | None = None,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         if repo is None:
             return {"status": "error", "error": "Repository not available"}
@@ -214,10 +216,10 @@ def _target_tool(
 
 
 def _audit_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     action: str = "list",
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         if repo is None:
             return {"status": "error", "error": "Repository not available"}
@@ -229,14 +231,16 @@ def _audit_tool(
 
 
 def _report_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     report_type: str = "weekly",
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         from src.reporting import OperationalReporter
 
-        database_path = str(getattr(repo, "_sqlite_path", lambda: "aegisnex.db")()) if repo else "aegisnex.db"
+        database_path = (
+            str(getattr(repo, "_sqlite_path", lambda: "aegisnex.db")()) if repo else "aegisnex.db"
+        )
         reporter = OperationalReporter(database_path)
         if report_type == "weekly":
             report = reporter.weekly_report()
@@ -250,10 +254,10 @@ def _report_tool(
 
 
 def _notification_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     action: str = "list",
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         if repo is None:
             return {"status": "error", "error": "Repository not available"}
@@ -276,11 +280,11 @@ def _notification_tool(
 
 
 def _health_tool(
-    repo: Optional[PlatformRepository] = None,
+    repo: PlatformRepository | None = None,
     **kwargs: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
-        result: Dict[str, Any] = {"timestamp": utc_now()}
+        result: dict[str, Any] = {"timestamp": utc_now()}
         if repo is not None:
             result["database"] = repo.health_check()
         try:
@@ -316,12 +320,19 @@ def _health_tool(
 
 # ---- Tool Definitions for Registration & Governance ----
 
-TOOL_DEFINITIONS: List[ToolDef] = [
+TOOL_DEFINITIONS: list[ToolDef] = [
     ToolDef(
         name="metrics",
         description="Retrieve current system metrics (CPU, memory, disk, network, containers, incidents)",
         category="monitoring",
-        parameters=[{"name": "repo", "type": "object", "description": "Platform repository", "required": False}],
+        parameters=[
+            {
+                "name": "repo",
+                "type": "object",
+                "description": "Platform repository",
+                "required": False,
+            }
+        ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
         risk_level=RiskLevel.NONE,
@@ -330,7 +341,14 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         name="docker",
         description="List all Docker containers with status, health, CPU, memory",
         category="containers",
-        parameters=[{"name": "repo", "type": "object", "description": "Platform repository", "required": False}],
+        parameters=[
+            {
+                "name": "repo",
+                "type": "object",
+                "description": "Platform repository",
+                "required": False,
+            }
+        ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
         risk_level=RiskLevel.NONE,
@@ -340,8 +358,18 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         description="Query incidents: list all, filter by status, get by ID",
         category="incidents",
         parameters=[
-            {"name": "action", "type": "string", "description": "list, get, active", "required": False},
-            {"name": "incident_id", "type": "string", "description": "Incident ID for get action", "required": False},
+            {
+                "name": "action",
+                "type": "string",
+                "description": "list, get, active",
+                "required": False,
+            },
+            {
+                "name": "incident_id",
+                "type": "string",
+                "description": "Incident ID for get action",
+                "required": False,
+            },
         ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
@@ -353,7 +381,12 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         category="monitoring",
         parameters=[
             {"name": "action", "type": "string", "description": "list, get", "required": False},
-            {"name": "target_id", "type": "integer", "description": "Target ID for get action", "required": False},
+            {
+                "name": "target_id",
+                "type": "integer",
+                "description": "Target ID for get action",
+                "required": False,
+            },
         ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
@@ -363,7 +396,14 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         name="audit",
         description="Retrieve recent audit log entries",
         category="system",
-        parameters=[{"name": "limit", "type": "integer", "description": "Number of log entries", "required": False}],
+        parameters=[
+            {
+                "name": "limit",
+                "type": "integer",
+                "description": "Number of log entries",
+                "required": False,
+            }
+        ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
         risk_level=RiskLevel.NONE,
@@ -372,7 +412,14 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         name="report",
         description="Generate weekly or monthly operational reports",
         category="reports",
-        parameters=[{"name": "report_type", "type": "string", "description": "weekly or monthly", "required": False}],
+        parameters=[
+            {
+                "name": "report_type",
+                "type": "string",
+                "description": "weekly or monthly",
+                "required": False,
+            }
+        ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
         risk_level=RiskLevel.NONE,
@@ -390,7 +437,14 @@ TOOL_DEFINITIONS: List[ToolDef] = [
         name="health",
         description="Comprehensive system health: database, Docker, CPU, memory, disk",
         category="system",
-        parameters=[{"name": "repo", "type": "object", "description": "Platform repository", "required": False}],
+        parameters=[
+            {
+                "name": "repo",
+                "type": "object",
+                "description": "Platform repository",
+                "required": False,
+            }
+        ],
         permission_level=PermissionLevel.VIEWER,
         access_mode=AccessMode.READ,
         risk_level=RiskLevel.NONE,
@@ -400,7 +454,7 @@ TOOL_DEFINITIONS: List[ToolDef] = [
 
 # ---- Registry ----
 
-TOOL_REGISTRY: Dict[str, Tool] = {
+TOOL_REGISTRY: dict[str, Tool] = {
     "metrics": Tool(
         "metrics",
         "Retrieve current system metrics (CPU, memory, disk, network, containers, incidents)",
@@ -475,14 +529,14 @@ TOOL_REGISTRY: Dict[str, Tool] = {
     ),
 }
 
-DESTRUCTIVE_TOOLS: Dict[str, Tool] = {}
+DESTRUCTIVE_TOOLS: dict[str, Tool] = {}
 
 
-def get_tool(name: str) -> Optional[Tool]:
+def get_tool(name: str) -> Tool | None:
     return TOOL_REGISTRY.get(name)
 
 
-def list_tools(category: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_tools(category: str | None = None) -> list[dict[str, Any]]:
     tools = []
     for name, tool in TOOL_REGISTRY.items():
         if category and tool.category != category:
@@ -491,11 +545,13 @@ def list_tools(category: Optional[str] = None) -> List[Dict[str, Any]]:
     return tools
 
 
-def list_tool_definitions() -> List[Dict[str, Any]]:
+def list_tool_definitions() -> list[dict[str, Any]]:
     return [td.to_dict() for td in TOOL_DEFINITIONS]
 
 
-def execute_tool(name: str, repo: Optional[PlatformRepository] = None, **kwargs: Any) -> Dict[str, Any]:
+def execute_tool(
+    name: str, repo: PlatformRepository | None = None, **kwargs: Any
+) -> dict[str, Any]:
     tool = get_tool(name)
     if tool is None:
         return {"status": "error", "error": f"Unknown tool: {name}", "tool": name}

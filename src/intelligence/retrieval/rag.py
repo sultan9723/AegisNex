@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.intelligence.providers.base import Message, ModelProvider
-from src.intelligence.retrieval.base import RetrievalResult, SourceDocument
+from src.intelligence.retrieval.base import RetrievalResult
 from src.intelligence.retrieval.collector import KnowledgeCollector
 
 SYSTEM_PROMPT_TEMPLATE = """You are an AI operations assistant for AegisNex infrastructure monitoring.
@@ -24,9 +24,9 @@ Your role is to analyze operational data and provide accurate, evidence-based an
 class RAGEngine:
     def __init__(
         self,
-        provider: Optional[ModelProvider] = None,
+        provider: ModelProvider | None = None,
         repo: Any = None,
-        runbooks_dir: Optional[str] = None,
+        runbooks_dir: str | None = None,
     ) -> None:
         self._provider = provider
         self._collector = KnowledgeCollector(repo=repo, runbooks_dir=runbooks_dir)
@@ -48,7 +48,7 @@ class RAGEngine:
 
     def retrieve_by_type(self, query: str, source_type: str, limit: int = 5) -> RetrievalResult:
         start = time.time()
-        type_map: Dict[str, Any] = {
+        type_map: dict[str, Any] = {
             "incident": self._collector.collect_incidents,
             "audit": self._collector.collect_audit_logs,
             "report": self._collector.collect_reports,
@@ -69,8 +69,8 @@ class RAGEngine:
     def generate_with_context(
         self,
         query: str,
-        context: Optional[str] = None,
-        tool_results: Optional[Dict[str, Any]] = None,
+        context: str | None = None,
+        tool_results: dict[str, Any] | None = None,
     ) -> str:
         if self._provider is None:
             return self._fallback_answer(query, context, tool_results)
@@ -88,7 +88,11 @@ class RAGEngine:
                 parts.append(f"Tool '{name}' (status: {status}): {summary}")
             tool_text = "\n".join(parts)
 
-        full_context = f"## Retrieved Knowledge\n{context}\n\n## Tool Results\n{tool_text}" if tool_text else f"## Retrieved Knowledge\n{context}"
+        full_context = (
+            f"## Retrieved Knowledge\n{context}\n\n## Tool Results\n{tool_text}"
+            if tool_text
+            else f"## Retrieved Knowledge\n{context}"
+        )
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(context=full_context)
 
         messages = [
@@ -102,7 +106,9 @@ class RAGEngine:
         except Exception:
             return self._fallback_answer(query, context, tool_results)
 
-    def _fallback_answer(self, query: str, context: Optional[str] = None, tool_results: Optional[Dict[str, Any]] = None) -> str:
+    def _fallback_answer(
+        self, query: str, context: str | None = None, tool_results: dict[str, Any] | None = None
+    ) -> str:
         parts = ["Based on available operational data:"]
         if tool_results:
             for name, result in tool_results.items():
@@ -111,5 +117,7 @@ class RAGEngine:
                 parts.append(f"\n**{name}** ({status}): {str(data)[:400]}")
         if context:
             parts.append(f"\n**Context:** {context[:500]}")
-        parts.append("\n*Note: This is a rule-based response. Configure an AI provider (AEGIS_AI_PROVIDER) for LLM-generated answers.*")
+        parts.append(
+            "\n*Note: This is a rule-based response. Configure an AI provider (AEGIS_AI_PROVIDER) for LLM-generated answers.*"
+        )
         return "\n".join(parts)

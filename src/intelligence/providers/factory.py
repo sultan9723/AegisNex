@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
 
 from src.intelligence.providers.base import ModelProvider, ProviderConfig
 
@@ -22,30 +21,34 @@ def _load_config_from_env(provider: str) -> ProviderConfig:
     )
 
 
-def create_provider(name: Optional[str] = None, config: Optional[ProviderConfig] = None) -> ModelProvider:
+def create_provider(name: str | None = None, config: ProviderConfig | None = None) -> ModelProvider:
     resolved = (name or os.getenv("AEGIS_AI_PROVIDER", _DEFAULT_PROVIDER)).strip().lower()
     cfg = config or _load_config_from_env(resolved)
 
     if resolved == "openai":
         from src.intelligence.providers.openai_provider import OpenAIProvider
+
         return OpenAIProvider(cfg)
-    elif resolved == "ollama":
+    if resolved == "ollama":
         from src.intelligence.providers.ollama_provider import OllamaProvider
+
         return OllamaProvider(cfg)
-    elif resolved == "anthropic":
+    if resolved == "anthropic":
         from src.intelligence.providers.anthropic_provider import AnthropicProvider
+
         return AnthropicProvider(cfg)
-    elif resolved == "gemini":
+    if resolved == "gemini":
         from src.intelligence.providers.gemini_provider import GeminiProvider
+
         return GeminiProvider(cfg)
-    elif resolved == "azure":
+    if resolved == "azure":
         from src.intelligence.providers.azure_provider import AzureProvider
+
         return AzureProvider(cfg)
-    else:
-        raise ValueError(f"Unknown AI provider: {resolved}. Supported: {', '.join(_PROVIDER_NAMES)}")
+    raise ValueError(f"Unknown AI provider: {resolved}. Supported: {', '.join(_PROVIDER_NAMES)}")
 
 
-def get_provider_names() -> List[str]:
+def get_provider_names() -> list[str]:
     return list(_PROVIDER_NAMES)
 
 

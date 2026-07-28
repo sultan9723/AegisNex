@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -12,12 +12,12 @@ class SourceDocument:
     source_type: str
     relevance_score: float = 0.0
     timestamp: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class RetrievalResult:
-    documents: List[SourceDocument]
+    documents: list[SourceDocument]
     query: str
     total_found: int = 0
     execution_ms: float = 0.0
@@ -31,10 +31,15 @@ class RetrievalResult:
             parts.append(f"{header}\n{doc.content}")
         return "\n\n".join(parts)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "documents": [
-                {"content": d.content[:500], "source": d.source, "source_type": d.source_type, "relevance_score": d.relevance_score}
+                {
+                    "content": d.content[:500],
+                    "source": d.source,
+                    "source_type": d.source_type,
+                    "relevance_score": d.relevance_score,
+                }
                 for d in self.documents
             ],
             "query": self.query,
@@ -46,9 +51,7 @@ class RetrievalResult:
 
 class Retriever(ABC):
     @abstractmethod
-    def retrieve(self, query: str, limit: int = 5) -> RetrievalResult:
-        ...
+    def retrieve(self, query: str, limit: int = 5) -> RetrievalResult: ...
 
     @abstractmethod
-    def retrieve_by_type(self, query: str, source_type: str, limit: int = 5) -> RetrievalResult:
-        ...
+    def retrieve_by_type(self, query: str, source_type: str, limit: int = 5) -> RetrievalResult: ...

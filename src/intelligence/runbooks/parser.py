@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -14,15 +13,15 @@ class RunbookStep:
     name: str
     action: str
     tool: str = ""
-    params: Dict[str, Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: int = 60
     on_failure: str = "stop"
     requires_approval: bool = False
-    condition: Optional[str] = None
+    condition: str | None = None
     retry_count: int = 0
     description: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "action": self.action,
@@ -43,13 +42,13 @@ class RunbookDef:
     description: str
     version: str = "1.0"
     category: str = "general"
-    steps: List[RunbookStep] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
+    steps: list[RunbookStep] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     timeout_seconds: int = 300
-    parallel_steps: List[List[str]] = field(default_factory=list)
+    parallel_steps: list[list[str]] = field(default_factory=list)
     requires_incident: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "description": self.description,
@@ -65,21 +64,23 @@ class RunbookDef:
 
 class RunbookParser:
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> RunbookDef:
+    def from_dict(data: dict[str, Any]) -> RunbookDef:
         steps = []
         for s in data.get("steps", []):
-            steps.append(RunbookStep(
-                name=s.get("name", ""),
-                action=s.get("action", ""),
-                tool=s.get("tool", ""),
-                params=s.get("params", {}),
-                timeout_seconds=s.get("timeout_seconds", 60),
-                on_failure=s.get("on_failure", "stop"),
-                requires_approval=s.get("requires_approval", False),
-                condition=s.get("condition"),
-                retry_count=s.get("retry_count", 0),
-                description=s.get("description", ""),
-            ))
+            steps.append(
+                RunbookStep(
+                    name=s.get("name", ""),
+                    action=s.get("action", ""),
+                    tool=s.get("tool", ""),
+                    params=s.get("params", {}),
+                    timeout_seconds=s.get("timeout_seconds", 60),
+                    on_failure=s.get("on_failure", "stop"),
+                    requires_approval=s.get("requires_approval", False),
+                    condition=s.get("condition"),
+                    retry_count=s.get("retry_count", 0),
+                    description=s.get("description", ""),
+                )
+            )
         return RunbookDef(
             name=data.get("name", ""),
             description=data.get("description", ""),
@@ -94,14 +95,15 @@ class RunbookParser:
 
     @staticmethod
     def from_json(path: str) -> RunbookDef:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return RunbookParser.from_dict(data)
 
     @staticmethod
     def from_yaml(path: str) -> RunbookDef:
         import yaml
-        with open(path, "r", encoding="utf-8") as f:
+
+        with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         return RunbookParser.from_dict(data)
 
@@ -110,7 +112,6 @@ class RunbookParser:
         ext = Path(path).suffix.lower()
         if ext in (".yaml", ".yml"):
             return RunbookParser.from_yaml(path)
-        elif ext == ".json":
+        if ext == ".json":
             return RunbookParser.from_json(path)
-        else:
-            raise ValueError(f"Unsupported runbook format: {ext}")
+        raise ValueError(f"Unsupported runbook format: {ext}")

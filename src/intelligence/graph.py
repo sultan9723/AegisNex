@@ -9,35 +9,34 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, Optional
+from datetime import UTC
+from typing import Any
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
-from src.intelligence.state import AgentState, initial_state
 from src.intelligence.nodes import (
-    plan_node,
-    skill_executor_node,
-    tool_router_node,
-    tool_executor_node,
-    verifier_node,
-    self_corrector_node,
-    rag_generator_node,
     goal_evaluator_node,
-    risk_assessor_node,
-    policy_checker_node,
-    runbook_executor_node,
-    parallel_supervisor_node,
-    scheduler_node,
     learning_node,
-    human_approval_check,
+    parallel_supervisor_node,
+    plan_node,
+    policy_checker_node,
+    rag_generator_node,
+    risk_assessor_node,
+    runbook_executor_node,
+    scheduler_node,
+    self_corrector_node,
+    skill_executor_node,
+    tool_executor_node,
+    tool_router_node,
+    verifier_node,
 )
+from src.intelligence.state import AgentState, initial_state
 from src.platform_db import PlatformRepository
-
 
 _BUILT_GRAPH: Any = None
 
 
-def _reflection_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def _reflection_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     return self_corrector_node(state, repo=repo)
 
 
@@ -48,7 +47,9 @@ def _goal_evaluator_with_completion(state: AgentState) -> AgentState:
 
 
 def _goal_attempts(state: AgentState) -> int:
-    return sum(1 for step in state.get("executed_steps", []) if step.get("node") == "goal_evaluator")
+    return sum(
+        1 for step in state.get("executed_steps", []) if step.get("node") == "goal_evaluator"
+    )
 
 
 def _goal_router(state: AgentState) -> str:
@@ -81,7 +82,7 @@ def _finish_node(state: AgentState) -> AgentState:
     return updated_state
 
 
-def build_graph(repo: Optional[PlatformRepository] = None) -> StateGraph:
+def build_graph(repo: PlatformRepository | None = None) -> StateGraph:
     """Build the LangGraph for the Intelligence Engine.
 
     Graph structure:
@@ -183,8 +184,8 @@ def build_graph(repo: Optional[PlatformRepository] = None) -> StateGraph:
 
 def run_workflow(
     user_request: str,
-    repo: Optional[PlatformRepository] = None,
-) -> Dict[str, Any]:
+    repo: PlatformRepository | None = None,
+) -> dict[str, Any]:
     """Execute the full Intelligence Engine workflow for a user request.
 
     Records execution duration, persists to memory, and returns full state.
@@ -215,7 +216,8 @@ def run_workflow(
     # Persist to memory
     try:
         from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
-        db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+        db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
         memory = SQLiteMemoryStore(db_path=db_path)
         memory.store_conversation(
             request=user_request,
@@ -245,14 +247,15 @@ def run_workflow(
 
 
 def _utc_now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    from datetime import datetime
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def run_plan(
     user_request: str,
-    repo: Optional[PlatformRepository] = None,
-) -> Dict[str, Any]:
+    repo: PlatformRepository | None = None,
+) -> dict[str, Any]:
     """Execute only the planning phase and return the generated plan."""
     state = initial_state(user_request)
     planned = plan_node(state, repo=repo)
@@ -267,16 +270,16 @@ def run_plan(
 
 def run_analyze(
     user_request: str,
-    repo: Optional[PlatformRepository] = None,
-) -> Dict[str, Any]:
+    repo: PlatformRepository | None = None,
+) -> dict[str, Any]:
     """Run full analysis workflow and return structured results."""
     return run_workflow(user_request, repo=repo)
 
 
 def run_chat(
     user_request: str,
-    repo: Optional[PlatformRepository] = None,
-) -> Dict[str, Any]:
+    repo: PlatformRepository | None = None,
+) -> dict[str, Any]:
     """Run the full workflow and return a simplified chat response."""
     result = run_workflow(user_request, repo=repo)
     return {
@@ -297,7 +300,11 @@ def run_chat(
         "runbook": result.get("current_runbook", ""),
         "risk_score": result.get("risk_assessment", {}).get("score", 0.0),
         "risk_level": result.get("risk_assessment", {}).get("level", "none"),
-        "policy_violations": [p.get("policy_name", "") for p in result.get("policy_results", []) if not p.get("allowed", True)],
+        "policy_violations": [
+            p.get("policy_name", "")
+            for p in result.get("policy_results", [])
+            if not p.get("allowed", True)
+        ],
         "scheduler_tasks": len(result.get("scheduler_tasks", [])),
         "learnings": len(result.get("learnings", [])),
     }
@@ -309,10 +316,25 @@ def reset_graph() -> None:
     _BUILT_GRAPH = None
 
 
-def get_workflows() -> Dict[str, Any]:
+def get_workflows() -> dict[str, Any]:
     """Return workflow definitions for the AI dashboard."""
     return {
-        "nodes": ["planner", "skill_executor", "tool_router", "tool_executor", "reflection", "verifier", "rag_generator", "goal_evaluator", "finish", "risk_assessor", "policy_checker", "runbook_executor", "parallel_supervisor", "scheduler"],
+        "nodes": [
+            "planner",
+            "skill_executor",
+            "tool_router",
+            "tool_executor",
+            "reflection",
+            "verifier",
+            "rag_generator",
+            "goal_evaluator",
+            "finish",
+            "risk_assessor",
+            "policy_checker",
+            "runbook_executor",
+            "parallel_supervisor",
+            "scheduler",
+        ],
         "edges": [
             {"from": "planner", "to": "skill_executor", "condition": "skills matched"},
             {"from": "planner", "to": "tool_router", "condition": "plan exists"},
@@ -331,8 +353,16 @@ def get_workflows() -> Dict[str, Any]:
             {"from": "risk_assessor", "to": "goal_evaluator", "condition": "approval required"},
             {"from": "verifier", "to": "rag_generator", "condition": "verified"},
             {"from": "rag_generator", "to": "goal_evaluator", "condition": "generated"},
-            {"from": "goal_evaluator", "to": "planner", "condition": "goal incomplete and retries < 3"},
-            {"from": "goal_evaluator", "to": "finish", "condition": "goal completed or retries exhausted"},
+            {
+                "from": "goal_evaluator",
+                "to": "planner",
+                "condition": "goal incomplete and retries < 3",
+            },
+            {
+                "from": "goal_evaluator",
+                "to": "finish",
+                "condition": "goal completed or retries exhausted",
+            },
             {"from": "finish", "to": "END"},
         ],
         "max_retries": 3,
