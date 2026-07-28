@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
 import base64
+import os
 from typing import Any
 
 from cryptography.fernet import Fernet
@@ -28,18 +27,19 @@ class SecretManager:
         if not secret_key:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY environment variable is required for secret management. "
-                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+                'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
             )
         if len(secret_key) < 16:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY must be at least 16 characters. "
-                "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+                'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
             )
         try:
             base64.urlsafe_b64decode(secret_key)
             return secret_key.encode() if isinstance(secret_key, str) else secret_key
         except Exception:
-            salt = b"aegisnex-key-salt"
+            instance_id = os.getenv("AEGISNEX_INSTANCE_ID", "default")
+            salt = f"aegisnex-key-salt-{instance_id}".encode()
             kdf = PBKDF2HMAC(
                 algorithm=hashes.SHA256(),
                 length=32,
@@ -65,7 +65,9 @@ class SecretManager:
         f = self._get_fernet()
         return f.decrypt(ciphertext.encode("ascii")).decode("utf-8")
 
-    def store_secret(self, name: str, value: str, category: str = "generic", actor: str = "system") -> dict[str, Any]:
+    def store_secret(
+        self, name: str, value: str, category: str = "generic", actor: str = "system"
+    ) -> dict[str, Any]:
         """Encrypt and store a secret in the database."""
         encrypted = self.encrypt(value)
         if self._repo is not None and hasattr(self._repo, "upsert_secret"):

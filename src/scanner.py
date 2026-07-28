@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,9 +35,7 @@ class SecurityScanner:
             target = str(audit_data["target"])
 
         open_ports = (
-            recon_data.get("telemetry_data", {}).get("detected_open_ports", 0)
-            if recon_data
-            else 0
+            recon_data.get("telemetry_data", {}).get("detected_open_ports", 0) if recon_data else 0
         )
         vulnerabilities = audit_data.get("matched_findings", []) if audit_data else []
         vuln_count = len(vulnerabilities) if isinstance(vulnerabilities, list) else 0
@@ -52,7 +50,7 @@ class SecurityScanner:
 
         threat_matrix = {
             "asset_target": target,
-            "last_evaluation": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "last_evaluation": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "aggregated_risk_index": risk_score,
             "infrastructure_metrics": {
                 "total_open_ports": open_ports,
@@ -66,9 +64,7 @@ class SecurityScanner:
             },
         }
 
-        self.logger.info(
-            "Computed threat matrix for target=%s risk=%s", target, risk_score
-        )
+        self.logger.info("Computed threat matrix for target=%s risk=%s", target, risk_score)
         return threat_matrix
 
     def _load_json_safely(self, path: Path) -> dict[str, Any] | None:
@@ -83,7 +79,5 @@ class SecurityScanner:
 
     def _write_output(self, threat_matrix: dict[str, Any]) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.output_matrix.write_text(
-            json.dumps(threat_matrix, indent=2), encoding="utf-8"
-        )
+        self.output_matrix.write_text(json.dumps(threat_matrix, indent=2), encoding="utf-8")
         self.logger.info("Wrote unified threat matrix to %s", self.output_matrix)

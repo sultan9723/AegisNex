@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
 
 
 @dataclass
@@ -12,7 +11,7 @@ class Organization:
     name: str
     slug: str
     domain: str
-    settings: Dict = field(default_factory=dict)
+    settings: dict = field(default_factory=dict)
     is_active: bool = True
     created_at: str = ""
 
@@ -24,7 +23,7 @@ class Team:
     name: str
     slug: str
     description: str = ""
-    settings: Dict = field(default_factory=dict)
+    settings: dict = field(default_factory=dict)
     created_at: str = ""
 
 
@@ -44,6 +43,6 @@ class TenantUser:
     id: int
     user_id: int
     org_id: int
-    team_ids: List[int] = field(default_factory=list)
+    team_ids: list[int] = field(default_factory=list)
     role: str = "viewer"
-    permissions: Dict = field(default_factory=dict)
+    permissions: dict = field(default_factory=dict)

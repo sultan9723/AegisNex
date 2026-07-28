@@ -2,34 +2,48 @@
 
 from __future__ import annotations
 
-import platform
-import socket
-
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import asyncio
-from pathlib import Path
 import json
 import os
+import platform
 import re
-from typing import Any, AsyncGenerator, Dict, List, Optional
+import secrets
+import sys
+import time
+import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import RedirectResponse as StarletteRedirect
 
-from src.auth import AuthManager, User, Role, AuthError, parse_form_body
-from src.platform_db import PlatformRepository, load_database_settings
+from src.auth import AuthError, AuthManager, Role, User, UserStore, parse_form_body
+from src.config import Config
+from src.docker_scanner import DockerScanner
+from src.guardian import Guardian
+from src.incidents import Incident, IncidentManager
 from src.logging_config import configure_logging, get_logger
+from src.monitor import SystemResourceMonitor
+from src.platform_db import PlatformRepository, load_database_settings
 
 try:
-    from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
+    from fastapi import Request as FastAPIRequest
+    from fastapi import WebSocket, WebSocketDisconnect
 except ModuleNotFoundError:
     FastAPIRequest = Any
     WebSocket = Any
     WebSocketDisconnect = Exception
+
+try:
+    from src.agents.orchestrator import AgentOrchestrator
+except ImportError:
+    AgentOrchestrator = Any  # type: ignore[misc,assignment]
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -50,13 +64,16 @@ REALTIME_EVENT_TYPES = {
     "metric_update",
     "incident_created",
     "incident_resolved",
+    "incident_explained",
     "remediation_executed",
     "container_status_changed",
+    "agent_activity",
 }
 DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS = 5.0
 
 
 # --- TLS Redirect Middleware ---
+
 
 class TLSRedirectMiddleware(BaseHTTPMiddleware):
     """Redirect HTTP to HTTPS when running in production mode."""
@@ -64,7 +81,10 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
         if environment not in {"development", "dev", "local", "test"}:
-            if request.url.scheme != "https" and request.headers.get("x-forwarded-proto") != "https":
+            if (
+                request.url.scheme != "https"
+                and request.headers.get("x-forwarded-proto") != "https"
+            ):
                 url = request.url.replace(scheme="https")
                 return StarletteRedirect(url=url, status_code=301)
         return await call_next(request)
@@ -83,7 +103,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
         if environment not in {"development", "dev", "local", "test"}:
             response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-            response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:"
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:"
+            )
         return response
 
 
@@ -110,37 +132,45 @@ def require_auth(request: FastAPIRequest, auth_manager: AuthManager) -> User:
     user, _ = authenticate_request(request, auth_manager)
     if user is None:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
 
 
 def _websocket_token(websocket: Any) -> str | None:
-    """Extract a websocket bearer token from cookie, header, or query string."""
+    """Extract a websocket bearer token from cookie or Authorization header only.
+
+    Query string tokens are not accepted as they are logged in server access logs
+    and browser history, defeating secure token handling.
+    """
     token = websocket.cookies.get("aegisnex_session")
     if token:
         return token
     auth_header = websocket.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]
-    query_token = websocket.query_params.get("token") or websocket.query_params.get("access_token")
-    return query_token or None
+    return None
 
 
 def require_role(*roles: str):
     """Dependency factory: require the authenticated user to have one of the specified roles."""
+
     def role_checker(request: FastAPIRequest) -> User:
         auth_manager: AuthManager = request.app.state.auth_manager
         user, _ = authenticate_request(request, auth_manager)
         if user is None:
             from fastapi import HTTPException
+
             raise HTTPException(status_code=401, detail="Authentication required")
         if not user.has_role(*roles):
             from fastapi import HTTPException
+
             raise HTTPException(
                 status_code=403,
                 detail=f"Role '{user.role}' not permitted. Required: {', '.join(roles)}",
             )
         return user
+
     return role_checker
 
 
@@ -152,7 +182,9 @@ def _extract_token(request: FastAPIRequest) -> str | None:
     return request.cookies.get("aegisnex_session")
 
 
-def authenticate_request(request: FastAPIRequest, auth_manager: AuthManager) -> tuple[User | None, bool]:
+def authenticate_request(
+    request: FastAPIRequest, auth_manager: AuthManager
+) -> tuple[User | None, bool]:
     """Authenticate via JWT or API key.
 
     Returns:
@@ -180,12 +212,18 @@ def _authenticate_api_key(request: FastAPIRequest, auth_manager: AuthManager) ->
     """
     api_key = request.headers.get("X-API-Key", "")
     if not api_key:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer = auth_header[7:].strip()
+            if bearer.startswith("anx_"):
+                api_key = bearer
+    if not api_key:
         return None
     from src.auth import hash_api_key
+
     key_hash = hash_api_key(api_key)
-    repo = getattr(request.app.state, "services", None)
-    if repo is None:
-        repo = getattr(request.app.state.services, "platform_repository", None)
+    services = getattr(request.app.state, "services", None)
+    repo = getattr(services, "platform_repository", None)
     if not repo:
         return None
     try:
@@ -203,6 +241,7 @@ def _authenticate_api_key(request: FastAPIRequest, auth_manager: AuthManager) ->
         pass
     role = str(key_record.get("role", "read_only"))
     from src.auth import Role as AuthRole
+
     normalized = AuthRole.from_str(role).value
     return User(
         id=-key_id,
@@ -274,12 +313,14 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
     from src.guardian import Guardian
     from src.http_monitor import HttpEndpointMonitor
     from src.incidents import IncidentManager
-    from src.monitoring_engine import MonitoringEngine
     from src.monitor import SystemResourceMonitor
-    from src.notifier import Notifier
+    from src.monitoring_engine import MonitoringEngine
+    from src.notifications.factory import build_notification_providers
+    from src.notifications_compat import NotifierCompat
     from src.orchestrator import SystemHealthChecker
     from src.ssl_monitor import SslCertificateMonitor
     from src.tcp_monitor import TcpTargetMonitor
+
     config = Config.load(config_path)
     monitor = SystemResourceMonitor(
         cpu_interval_seconds=config.monitoring.cpu_interval_seconds,
@@ -291,18 +332,18 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         restart_timeout_seconds=config.docker.restart_timeout_seconds,
     )
     platform_repository = PlatformRepository(
-        config.storage.database_url
-        or load_database_settings(config.storage.database_path)
+        config.storage.database_url or load_database_settings(config.storage.database_path)
     )
     incident_manager = IncidentManager(
         config.incidents.history_path,
         storage_repository=platform_repository,
     )
     health_checker = SystemHealthChecker(monitor=monitor, docker_scanner=docker_scanner)
+    notification_providers = build_notification_providers(config)
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
-        notifier=Notifier(),
+        notifier=NotifierCompat(notification_providers),
         restart_cooldown_seconds=config.guardian.restart_cooldown_seconds,
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
@@ -346,10 +387,11 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         incident_manager=incident_manager,
         interval_seconds=int(os.getenv("AEGISNEX_MONITOR_INTERVAL_SECONDS", "30")),
     )
-    from src.policy_engine import AppPolicyEngine
+    from src.autonomous import AutonomousPipeline
     from src.execution_history import ExecutionHistory
     from src.healing import SelfHealingEngine
-    from src.autonomous import AutonomousPipeline
+    from src.policy_engine import AppPolicyEngine
+
     policy_engine = AppPolicyEngine(repository=platform_repository)
     execution_history = ExecutionHistory(
         history_path=Path(config.storage.database_path).parent / "execution_history.json",
@@ -358,7 +400,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
     self_healing_engine = SelfHealingEngine(
         policy_engine=policy_engine,
         docker_scanner=docker_scanner,
-        notifier=Notifier(),
+        notifier=NotifierCompat(notification_providers),
         repository=platform_repository,
     )
     autonomous_pipeline = AutonomousPipeline(
@@ -388,26 +430,47 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def get_cors_origins() -> List[str]:
+def _is_diagnostics_only_plan(plan: dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("mode") != "diagnostics_only" or plan.get("read_only") is not True:
+        return False
+    actions = plan.get("actions", [])
+    if not isinstance(actions, list) or not actions:
+        return False
+    allowed_actions = {
+        "collect_incident_context",
+        "review_health_check_results",
+        "review_incident_timeline",
+        "prepare_evidence_packet",
+    }
+    for action in actions:
+        if not isinstance(action, dict):
+            return False
+        if action.get("action") not in allowed_actions:
+            return False
+        if action.get("destructive") is True or action.get("read_only") is not True:
+            return False
+    return True
+
+
+def get_cors_origins() -> list[str]:
     configured_origins = os.getenv("AEGISNEX_CORS_ORIGINS", "")
     if configured_origins.strip():
-        return [
-            origin.strip()
-            for origin in configured_origins.split(",")
-            if origin.strip()
-        ]
+        return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
     environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
     if environment in {"development", "dev", "local", "test"}:
         return DEVELOPMENT_CORS_ORIGINS
     return []
 
 
-def get_network_stats() -> Dict[str, Any]:
+def get_network_stats() -> dict[str, Any]:
     try:
         import psutil
+
         counters = psutil.net_io_counters()
         return {
             "bytes_sent": counters.bytes_sent,
@@ -420,7 +483,7 @@ def get_network_stats() -> Dict[str, Any]:
         return {"status": "failed", "error": str(exc)}
 
 
-def load_restart_history(path: str | Path) -> Dict[str, Dict[str, Any]]:
+def load_restart_history(path: str | Path) -> dict[str, dict[str, Any]]:
     history_path = Path(path)
     if not history_path.exists():
         return {}
@@ -430,68 +493,70 @@ def load_restart_history(path: str | Path) -> Dict[str, Dict[str, Any]]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    return {
-        str(name): value
-        for name, value in payload.items()
-        if isinstance(value, dict)
-    }
+    return {str(name): value for name, value in payload.items() if isinstance(value, dict)}
 
 
-def incident_to_dict(incident: Incident) -> Dict[str, Any]:
+def incident_to_dict(incident: Incident) -> dict[str, Any]:
     return incident.to_dict()
 
 
 def build_container_rows(
-    containers: List[Dict[str, Any]],
-    restart_history: Dict[str, Dict[str, Any]],
+    containers: list[dict[str, Any]],
+    restart_history: dict[str, dict[str, Any]],
     last_check_timestamp: str,
-) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     for container in containers:
         name = str(container.get("name", "unknown"))
         history = restart_history.get(name, {})
-        rows.append({
-            "name": name,
-            "status": container.get("status", "unknown"),
-            "health_status": container.get("health_status", "unknown"),
-            "restart_count": int(history.get("attempts", 0)),
-            "last_check_timestamp": last_check_timestamp,
-            "image": container.get("image", "unknown"),
-            "started_at": container.get("started_at"),
-            "uptime_seconds": container.get("uptime_seconds"),
-            "cpu_percent": container.get("cpu_percent"),
-            "memory_usage_bytes": container.get("memory_usage_bytes"),
-            "memory_limit_bytes": container.get("memory_limit_bytes"),
-            "memory_percent": container.get("memory_percent"),
-        })
+        rows.append(
+            {
+                "name": name,
+                "status": container.get("status", "unknown"),
+                "health_status": container.get("health_status", "unknown"),
+                "restart_count": int(history.get("attempts", 0)),
+                "last_check_timestamp": last_check_timestamp,
+                "image": container.get("image", "unknown"),
+                "started_at": container.get("started_at"),
+                "uptime_seconds": container.get("uptime_seconds"),
+                "cpu_percent": container.get("cpu_percent"),
+                "memory_usage_bytes": container.get("memory_usage_bytes"),
+                "memory_limit_bytes": container.get("memory_limit_bytes"),
+                "memory_percent": container.get("memory_percent"),
+            }
+        )
     return rows
 
 
 def build_remediation_actions(
-    incidents: List[Incident],
-    restart_history: Dict[str, Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    actions: List[Dict[str, Any]] = []
+    incidents: list[Incident],
+    restart_history: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
     for incident in incidents:
         if incident.remediation_attempted:
-            actions.append({
-                "timestamp": incident.timestamp,
-                "service_name": incident.service_name,
-                "action": "restart",
-                "successful": incident.remediation_successful,
-                "incident_id": incident.incident_id,
-                "source": "incident",
-            })
+            actions.append(
+                {
+                    "timestamp": incident.timestamp,
+                    "service_name": incident.service_name,
+                    "action": "restart",
+                    "successful": incident.remediation_successful,
+                    "incident_id": incident.incident_id,
+                    "source": "incident",
+                }
+            )
     for service_name, history in restart_history.items():
         if history.get("attempts"):
-            actions.append({
-                "timestamp": history.get("last_restart", ""),
-                "service_name": service_name,
-                "action": "restart",
-                "successful": None,
-                "incident_id": "",
-                "source": "restart_history",
-            })
+            actions.append(
+                {
+                    "timestamp": history.get("last_restart", ""),
+                    "service_name": service_name,
+                    "action": "restart",
+                    "successful": None,
+                    "incident_id": "",
+                    "source": "restart_history",
+                }
+            )
     return sorted(actions, key=lambda item: str(item.get("timestamp", "")), reverse=True)
 
 
@@ -499,12 +564,12 @@ def parse_timestamp(value: Any) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(UTC)
     except ValueError:
         return None
 
 
-def storage_rows(services: DashboardServices, table_name: str) -> List[Dict[str, Any]]:
+def storage_rows(services: DashboardServices, table_name: str) -> list[dict[str, Any]]:
     repository = services.platform_repository
     if repository is None:
         return []
@@ -514,55 +579,153 @@ def storage_rows(services: DashboardServices, table_name: str) -> List[Dict[str,
         return []
 
 
-def collect_http_monitoring(services: DashboardServices) -> Dict[str, Any]:
-    return {"status": "disabled", "timestamp": utc_now(), "availability_percent": 100.0, "available_count": 0, "total_count": 0, "checks": []}
+def collect_http_monitoring(services: DashboardServices) -> dict[str, Any]:
+    repository = getattr(services, "platform_repository", None)
+    if repository is not None:
+        try:
+            return build_monitoring_summary(repository, "http")
+        except Exception:
+            pass
+    return {
+        "status": "disabled",
+        "timestamp": utc_now(),
+        "availability_percent": 100.0,
+        "available_count": 0,
+        "total_count": 0,
+        "checks": [],
+    }
 
-def collect_ssl_monitoring(services: DashboardServices) -> Dict[str, Any]:
-    return {"status": "disabled", "timestamp": utc_now(), "warning_count": 0, "total_count": 0, "checks": []}
 
-def collect_tcp_monitoring(services: DashboardServices) -> Dict[str, Any]:
-    return {"status": "disabled", "timestamp": utc_now(), "availability_percent": 100.0, "reachable_count": 0, "total_count": 0, "checks": []}
+def collect_ssl_monitoring(services: DashboardServices) -> dict[str, Any]:
+    repository = getattr(services, "platform_repository", None)
+    if repository is not None:
+        try:
+            return build_monitoring_summary(repository, "ssl")
+        except Exception:
+            pass
+    return {
+        "status": "disabled",
+        "timestamp": utc_now(),
+        "warning_count": 0,
+        "total_count": 0,
+        "checks": [],
+    }
 
 
-def build_monitoring_summary(repository: Any, target_type: str) -> Dict[str, Any]:
-    targets = [t for t in repository.list_monitoring_targets() if str(t.get("target_type", "")).lower() == target_type]
-    latest = [r for r in repository.latest_check_results() if str(r.get("target_type", "")).lower() == target_type]
+def collect_tcp_monitoring(services: DashboardServices) -> dict[str, Any]:
+    repository = getattr(services, "platform_repository", None)
+    if repository is not None:
+        try:
+            return build_monitoring_summary(repository, "tcp")
+        except Exception:
+            pass
+    return {
+        "status": "disabled",
+        "timestamp": utc_now(),
+        "availability_percent": 100.0,
+        "reachable_count": 0,
+        "total_count": 0,
+        "checks": [],
+    }
+
+
+def build_monitoring_summary(repository: Any, target_type: str) -> dict[str, Any]:
+    targets = [
+        t
+        for t in repository.list_monitoring_targets()
+        if str(t.get("target_type", "")).lower() == target_type
+    ]
+    latest = [
+        r
+        for r in repository.latest_check_results()
+        if str(r.get("target_type", "")).lower() == target_type
+    ]
     details = [dict(r.get("details", {})) for r in latest]
     if not targets:
-        base: Dict[str, Any] = {"status": "disabled", "timestamp": utc_now(), "total_count": 0, "checks": []}
-        if target_type == "ssl": base["warning_count"] = 0
-        elif target_type == "tcp": base.update({"availability_percent": 100.0, "reachable_count": 0})
-        else: base.update({"availability_percent": 100.0, "available_count": 0})
+        base: dict[str, Any] = {
+            "status": "disabled",
+            "timestamp": utc_now(),
+            "total_count": 0,
+            "checks": [],
+        }
+        if target_type == "ssl":
+            base["warning_count"] = 0
+        elif target_type == "tcp":
+            base.update({"availability_percent": 100.0, "reachable_count": 0})
+        else:
+            base.update({"availability_percent": 100.0, "available_count": 0})
         return base
     if target_type == "ssl":
         wc = len([c for c in details if c.get("status") != "ok"])
         s = "ok" if wc == 0 else "warning"
-        return {"status": s, "timestamp": latest[0]["timestamp"] if latest else utc_now(), "warning_count": wc, "total_count": len(targets), "checks": details}
+        return {
+            "status": s,
+            "timestamp": latest[0]["timestamp"] if latest else utc_now(),
+            "warning_count": wc,
+            "total_count": len(targets),
+            "checks": details,
+        }
     if target_type == "tcp":
         rc = len([c for c in details if c.get("reachable")])
         ap = round((rc / len(targets)) * 100, 2) if targets else 100.0
         s = "ok" if rc == len(targets) else "warning"
-        return {"status": s, "timestamp": latest[0]["timestamp"] if latest else utc_now(), "availability_percent": ap, "reachable_count": rc, "total_count": len(targets), "checks": details}
+        return {
+            "status": s,
+            "timestamp": latest[0]["timestamp"] if latest else utc_now(),
+            "availability_percent": ap,
+            "reachable_count": rc,
+            "total_count": len(targets),
+            "checks": details,
+        }
     ac = len([c for c in details if c.get("available")])
     ap = round((ac / len(targets)) * 100, 2) if targets else 100.0
     s = "ok" if ac == len(targets) else "warning"
-    return {"status": s, "timestamp": latest[0]["timestamp"] if latest else utc_now(), "availability_percent": ap, "available_count": ac, "total_count": len(targets), "checks": details}
+    return {
+        "status": s,
+        "timestamp": latest[0]["timestamp"] if latest else utc_now(),
+        "availability_percent": ap,
+        "available_count": ac,
+        "total_count": len(targets),
+        "checks": details,
+    }
 
 
-def build_metric_trends(metric_rows: List[Dict[str, Any]], metrics: Dict[str, Any], now: datetime | None = None) -> Dict[str, Dict[str, Any]]:
-    current_time = now or datetime.now(timezone.utc)
+def build_metric_trends(
+    metric_rows: list[dict[str, Any]], metrics: dict[str, Any], now: datetime | None = None
+) -> dict[str, dict[str, Any]]:
+    current_time = now or datetime.now(UTC)
     window_start = current_time - timedelta(hours=24)
-    recent_rows = [r for r in metric_rows if (parse_timestamp(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= window_start]
+    recent_rows = [
+        r
+        for r in metric_rows
+        if (parse_timestamp(r.get("timestamp")) or datetime.min.replace(tzinfo=UTC)) >= window_start
+    ]
     recent_rows.sort(key=lambda r: str(r.get("timestamp", "")))
     if not recent_rows:
         label = current_time.strftime("%H:%M")
-        return {"cpu": {"labels": [label], "values": [_safe_float(metrics.get("cpu_percent"))]}, "memory": {"labels": [label], "values": [_safe_float(metrics.get("ram_percent"))]}}
-    labels = [(parse_timestamp(r.get("timestamp")) or current_time).strftime("%H:%M") for r in recent_rows]
-    return {"cpu": {"labels": labels, "values": [_safe_float(r.get("cpu_percent")) for r in recent_rows]}, "memory": {"labels": labels, "values": [_safe_float(r.get("memory_percent")) for r in recent_rows]}}
+        return {
+            "cpu": {"labels": [label], "values": [_safe_float(metrics.get("cpu_percent"))]},
+            "memory": {"labels": [label], "values": [_safe_float(metrics.get("ram_percent"))]},
+        }
+    labels = [
+        (parse_timestamp(r.get("timestamp")) or current_time).strftime("%H:%M") for r in recent_rows
+    ]
+    return {
+        "cpu": {
+            "labels": labels,
+            "values": [_safe_float(r.get("cpu_percent")) for r in recent_rows],
+        },
+        "memory": {
+            "labels": labels,
+            "values": [_safe_float(r.get("memory_percent")) for r in recent_rows],
+        },
+    }
 
 
-def build_hourly_event_trend(rows: List[Dict[str, Any]], now: datetime | None = None) -> Dict[str, Any]:
-    current_time = now or datetime.now(timezone.utc)
+def build_hourly_event_trend(
+    rows: list[dict[str, Any]], now: datetime | None = None
+) -> dict[str, Any]:
+    current_time = now or datetime.now(UTC)
     start_hour = (current_time - timedelta(hours=23)).replace(minute=0, second=0, microsecond=0)
     buckets = {start_hour + timedelta(hours=i): 0 for i in range(24)}
     for row in rows:
@@ -572,60 +735,113 @@ def build_hourly_event_trend(rows: List[Dict[str, Any]], now: datetime | None = 
     return {"labels": [b.strftime("%H:%M") for b in buckets], "values": list(buckets.values())}
 
 
-def build_notification_statistics(rows: List[Dict[str, Any]]) -> Dict[str, int]:
-    stats: Dict[str, int] = {"email_count": 0, "slack_count": 0, "discord_count": 0, "failed_notifications": 0}
+def build_notification_statistics(rows: list[dict[str, Any]]) -> dict[str, int]:
+    stats: dict[str, int] = {
+        "email_count": 0,
+        "slack_count": 0,
+        "discord_count": 0,
+        "failed_notifications": 0,
+    }
     ok = {"ok", "sent", "success"}
     for row in rows:
         p = str(row.get("provider", "")).lower()
-        if p == "email": stats["email_count"] += 1
-        elif p == "slack": stats["slack_count"] += 1
-        elif p == "discord": stats["discord_count"] += 1
+        if p == "email":
+            stats["email_count"] += 1
+        elif p == "slack":
+            stats["slack_count"] += 1
+        elif p == "discord":
+            stats["discord_count"] += 1
         if str(row.get("status", "")).lower() not in ok:
             stats["failed_notifications"] += 1
     return stats
 
 
-def build_recent_incidents(incidents: List[Incident], limit: int = 6) -> List[Dict[str, Any]]:
+def build_recent_incidents(incidents: list[Incident], limit: int = 6) -> list[dict[str, Any]]:
     rows = [incident_to_dict(i) for i in incidents]
     rows.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
     return rows[:limit]
 
 
-def build_recent_remediations(storage_remediations: List[Dict[str, Any]], fallback_actions: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
+def build_recent_remediations(
+    storage_remediations: list[dict[str, Any]],
+    fallback_actions: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
     rows = storage_remediations or fallback_actions
-    normalized = [{"timestamp": row.get("timestamp", ""), "service_name": row.get("service_name", ""), "action": row.get("action", ""), "successful": _boolish(row.get("successful"))} for row in rows]
+    normalized = [
+        {
+            "timestamp": row.get("timestamp", ""),
+            "service_name": row.get("service_name", ""),
+            "action": row.get("action", ""),
+            "successful": _boolish(row.get("successful")),
+        }
+        for row in rows
+    ]
     normalized.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
     return normalized[:limit]
 
 
-def calculate_health_score(metrics: Dict[str, Any], containers: List[Dict[str, Any]], active_incident_count: int) -> Dict[str, Any]:
+def calculate_health_score(
+    metrics: dict[str, Any], containers: list[dict[str, Any]], active_incident_count: int
+) -> dict[str, Any]:
     cpu = _safe_float(metrics.get("cpu_percent"))
     memory = _safe_float(metrics.get("ram_percent"))
-    unhealthy = len([c for c in containers if c.get("status") != "running" or c.get("health_status") not in {"healthy", "none", None, ""}])
+    unhealthy = len(
+        [
+            c
+            for c in containers
+            if c.get("status") != "running"
+            or c.get("health_status") not in {"healthy", "none", None, ""}
+        ]
+    )
     penalty = (unhealthy / len(containers)) * 25 if containers else 0.0
-    score = max(0, min(100, round(100.0 - min(cpu, 100.0) * 0.25 - min(memory, 100.0) * 0.25 - penalty - min(active_incident_count * 5, 25))))
-    if score >= 80: status, indicator = "healthy", "green"
-    elif score >= 60: status, indicator = "degraded", "yellow"
-    else: status, indicator = "critical", "red"
+    score = max(
+        0,
+        min(
+            100,
+            round(
+                100.0
+                - min(cpu, 100.0) * 0.25
+                - min(memory, 100.0) * 0.25
+                - penalty
+                - min(active_incident_count * 5, 25)
+            ),
+        ),
+    )
+    if score >= 80:
+        status, indicator = "healthy", "green"
+    elif score >= 60:
+        status, indicator = "degraded", "yellow"
+    else:
+        status, indicator = "critical", "red"
     return {"score": score, "status": status, "indicator": indicator}
 
 
 def _safe_float(value: Any) -> float:
-    try: return round(float(value), 2)
-    except (TypeError, ValueError): return 0.0
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _boolish(value: Any) -> bool | None:
-    if value is None: return None
-    if isinstance(value, bool): return value
-    if isinstance(value, int): return bool(value)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
     n = str(value).lower()
-    if n in {"1", "true", "yes", "ok", "success"}: return True
-    if n in {"0", "false", "no", "failed", "failure"}: return False
+    if n in {"1", "true", "yes", "ok", "success"}:
+        return True
+    if n in {"0", "false", "no", "failed", "failure"}:
+        return False
     return None
 
 
-def collect_dashboard_context(services: DashboardServices, use_cache: bool = True) -> Dict[str, Any]:
+def collect_dashboard_context(
+    services: DashboardServices, use_cache: bool = True
+) -> dict[str, Any]:
     cache = getattr(services, "dashboard_cache", None)
     if use_cache and cache is not None:
         cached = cache.get_system_metrics()
@@ -654,47 +870,138 @@ def collect_dashboard_context(services: DashboardServices, use_cache: bool = Tru
         "resolved_incidents": [incident_to_dict(i) for i in resolved],
         "actions": actions,
         "health_score": calculate_health_score(metrics, container_rows, len(active)),
-        "chart_data": {"metrics": build_metric_trends(metric_rows, metrics), "incidents": build_hourly_event_trend([incident_to_dict(i) for i in incidents]), "remediations": build_hourly_event_trend(remediation_rows or actions)},
+        "chart_data": {
+            "metrics": build_metric_trends(metric_rows, metrics),
+            "incidents": build_hourly_event_trend([incident_to_dict(i) for i in incidents]),
+            "remediations": build_hourly_event_trend(remediation_rows or actions),
+        },
         "recent_incidents": build_recent_incidents(incidents),
         "recent_remediations": build_recent_remediations(remediation_rows, actions),
         "notification_stats": build_notification_statistics(notification_rows),
-        "notification_rows": sorted(notification_rows, key=lambda r: str(r.get("timestamp", "")), reverse=True),
+        "notification_rows": sorted(
+            notification_rows, key=lambda r: str(r.get("timestamp", "")), reverse=True
+        ),
         "http_monitoring": collect_http_monitoring(services),
         "ssl_monitoring": collect_ssl_monitoring(services),
         "tcp_monitoring": collect_tcp_monitoring(services),
+        "agent_activity": collect_agent_activity(services),
     }
     if cache is not None:
         cache.set_system_metrics(result)
     return result
 
 
-def build_dashboard_api_snapshot(context: Dict[str, Any]) -> Dict[str, Any]:
-    incidents = context["active_incidents"] + context["resolved_incidents"]
-    incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+def collect_agent_activity(services: DashboardServices) -> dict[str, Any]:
+    """Collect recent agent activity for the dashboard."""
+    repo = getattr(services, "platform_repository", None)
+    recent_actions = []
+    active_agents = []
+    agent_stats = {"total_actions": 0, "success_rate": 0.0, "pending_approvals": 0}
+    try:
+        if repo is not None and hasattr(repo, "fetch_all"):
+            action_rows = repo.fetch_all("agent_actions", limit=10)
+            if isinstance(action_rows, list):
+                recent_actions = action_rows[:10]
+                agent_stats["total_actions"] = len(repo.fetch_all("agent_actions", limit=0))
+            agent_rows = repo.fetch_all("ai_agents", limit=0)
+            if isinstance(agent_rows, list):
+                active_agents = [a for a in agent_rows if a.get("status") == "active"][:5]
+                if agent_rows:
+                    successes = sum(1 for a in agent_rows if a.get("success_rate", 0) > 0.5)
+                    agent_stats["success_rate"] = successes / len(agent_rows) if agent_rows else 0.0
+    except Exception:
+        pass
+    try:
+        orchestrator = getattr(getattr(services, "_app", None), "state", None)
+        if orchestrator is not None:
+            orchestrator = getattr(orchestrator, "agent_orchestrator", None)
+            if orchestrator is not None and hasattr(orchestrator, "get_shared_state"):
+                shared = orchestrator.get_shared_state()
+                pending = shared.get("pending_approvals", [])
+                agent_stats["pending_approvals"] = len(pending) if isinstance(pending, list) else 0
+    except Exception:
+        pass
     return {
-        "system": {"timestamp": context["timestamp"], "health_score": context["health_score"], "metrics": context["metrics"], "active_incident_count": len(context["active_incidents"]), "running_container_count": len(context["running_containers"])},
-        "containers": {"timestamp": context["timestamp"], "containers": context["containers"], "running_containers": context["running_containers"], "count": len(context["containers"])},
-        "incidents": {"active_incidents": context["active_incidents"], "resolved_incidents": context["resolved_incidents"], "recent_incidents": context["recent_incidents"], "incidents": incidents, "active_count": len(context["active_incidents"]), "resolved_count": len(context["resolved_incidents"]), "count": len(incidents)},
-        "metrics": {"timestamp": context["timestamp"], "metrics": context["metrics"], "network": context["network"], "chart_data": context["chart_data"]["metrics"]},
-        "notifications": {"notification_stats": context["notification_stats"], "notifications": context.get("notification_rows", [])[:25], "count": len(context.get("notification_rows", []))},
-        "remediations": {"actions": context["actions"], "recent_remediations": context["recent_remediations"], "count": len(context["actions"])},
-        "http_monitoring": context.get("http_monitoring", {"status": "disabled"}),
-        "ssl_monitoring": context.get("ssl_monitoring", {"status": "disabled"}),
-        "tcp_monitoring": context.get("tcp_monitoring", {"status": "disabled"}),
+        "recent_actions": recent_actions,
+        "active_agents": active_agents,
+        "stats": agent_stats,
+        "timestamp": utc_now(),
     }
 
 
-def build_realtime_event(event_type: str, payload: Dict[str, Any], timestamp: str | None = None) -> Dict[str, Any]:
+def build_dashboard_api_snapshot(context: dict[str, Any]) -> dict[str, Any]:
+    incidents = context["active_incidents"] + context["resolved_incidents"]
+    incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+    return {
+        "system": {
+            "timestamp": context["timestamp"],
+            "health_score": context["health_score"],
+            "metrics": context["metrics"],
+            "active_incident_count": len(context["active_incidents"]),
+            "running_container_count": len(context["running_containers"]),
+        },
+        "containers": {
+            "timestamp": context["timestamp"],
+            "containers": context["containers"],
+            "running_containers": context["running_containers"],
+            "count": len(context["containers"]),
+        },
+        "incidents": {
+            "active_incidents": context["active_incidents"],
+            "resolved_incidents": context["resolved_incidents"],
+            "recent_incidents": context["recent_incidents"],
+            "incidents": incidents,
+            "active_count": len(context["active_incidents"]),
+            "resolved_count": len(context["resolved_incidents"]),
+            "count": len(incidents),
+        },
+        "metrics": {
+            "timestamp": context["timestamp"],
+            "metrics": context["metrics"],
+            "network": context["network"],
+            "chart_data": context["chart_data"]["metrics"],
+        },
+        "notifications": {
+            "notification_stats": context["notification_stats"],
+            "notifications": context.get("notification_rows", [])[:25],
+            "count": len(context.get("notification_rows", [])),
+        },
+        "remediations": {
+            "actions": context["actions"],
+            "recent_remediations": context["recent_remediations"],
+            "count": len(context["actions"]),
+        },
+        "http_monitoring": context.get("http_monitoring", {"status": "disabled"}),
+        "ssl_monitoring": context.get("ssl_monitoring", {"status": "disabled"}),
+        "tcp_monitoring": context.get("tcp_monitoring", {"status": "disabled"}),
+        "agent_activity": context.get(
+            "agent_activity",
+            {"recent_actions": [], "active_agents": [], "stats": {}, "timestamp": ""},
+        ),
+    }
+
+
+def build_realtime_event(
+    event_type: str, payload: dict[str, Any], timestamp: str | None = None
+) -> dict[str, Any]:
     if event_type not in REALTIME_EVENT_TYPES:
         raise ValueError(f"Unsupported realtime event type: {event_type}")
     return {"type": event_type, "timestamp": timestamp or utc_now(), "payload": payload}
 
 
-def build_realtime_events(current: Dict[str, Any], previous: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
-    events = [build_realtime_event("metric_update", build_dashboard_api_snapshot(current), current["timestamp"])]
+def build_realtime_events(
+    current: dict[str, Any], previous: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    events = [
+        build_realtime_event(
+            "metric_update", build_dashboard_api_snapshot(current), current["timestamp"]
+        )
+    ]
     if previous is None:
         return events
-    prev_incidents = {i["incident_id"]: i for i in previous["active_incidents"] + previous["resolved_incidents"]}
+    prev_incidents = {
+        i["incident_id"]: i for i in previous["active_incidents"] + previous["resolved_incidents"]
+    }
     for i in current["active_incidents"]:
         if i["incident_id"] not in prev_incidents:
             events.append(build_realtime_event("incident_created", i, current["timestamp"]))
@@ -708,17 +1015,27 @@ def build_realtime_events(current: Dict[str, Any], previous: Dict[str, Any] | No
     prev_containers = {c["name"]: c for c in previous["containers"]}
     for c in current["containers"]:
         pc = prev_containers.get(c["name"])
-        if pc is None or any(pc.get(f) != c.get(f) for f in ("status", "health_status", "restart_count")):
+        if pc is None or any(
+            pc.get(f) != c.get(f) for f in ("status", "health_status", "restart_count")
+        ):
             events.append(build_realtime_event("container_status_changed", c, current["timestamp"]))
     return events
 
 
-def _remediation_key(action: Dict[str, Any]) -> tuple:
-    return (str(action.get("timestamp", "")), str(action.get("service_name", "")), str(action.get("action", "")), str(action.get("incident_id", "")), str(action.get("source", "")))
+def _remediation_key(action: dict[str, Any]) -> tuple:
+    return (
+        str(action.get("timestamp", "")),
+        str(action.get("service_name", "")),
+        str(action.get("action", "")),
+        str(action.get("incident_id", "")),
+        str(action.get("source", "")),
+    )
 
 
-async def run_dashboard_broadcaster(app: Any, interval_seconds: float = DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS) -> None:
-    previous_context: Dict[str, Any] | None = None
+async def run_dashboard_broadcaster(
+    app: Any, interval_seconds: float = DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS
+) -> None:
+    previous_context: dict[str, Any] | None = None
     manager = app.state.websocket_manager
     while True:
         try:
@@ -729,20 +1046,57 @@ async def run_dashboard_broadcaster(app: Any, interval_seconds: float = DEFAULT_
                     await manager.broadcast_with_backoff(event)
                 # Broadcast container updates to /ws/containers channel
                 if context.get("containers"):
-                    await manager.broadcast_with_backoff({
-                        "type": "container_list",
-                        "timestamp": context["timestamp"],
-                        "payload": {"containers": context["containers"], "count": len(context["containers"])},
-                    }, channel="containers")
+                    await manager.broadcast_with_backoff(
+                        {
+                            "type": "container_list",
+                            "timestamp": context["timestamp"],
+                            "payload": {
+                                "containers": context["containers"],
+                                "count": len(context["containers"]),
+                            },
+                        },
+                        channel="containers",
+                    )
                 # Broadcast target updates to /ws/targets channel
                 repo = app.state.services.platform_repository
                 if repo is not None:
                     targets = repo.list_monitoring_targets()
-                    await manager.broadcast_with_backoff({
-                        "type": "target_list",
-                        "timestamp": context["timestamp"],
-                        "payload": {"targets": targets, "count": len(targets)},
-                    }, channel="targets")
+                    await manager.broadcast_with_backoff(
+                        {
+                            "type": "target_list",
+                            "timestamp": context["timestamp"],
+                            "payload": {"targets": targets, "count": len(targets)},
+                        },
+                        channel="targets",
+                    )
+                # Broadcast agent activity updates to /ws/dashboard channel
+                agent_activity = context.get("agent_activity", {})
+                if agent_activity.get("recent_actions"):
+                    await manager.broadcast_with_backoff(
+                        {
+                            "type": "agent_activity",
+                            "timestamp": context["timestamp"],
+                            "payload": agent_activity,
+                        }
+                    )
+                # Broadcast mission control execution updates
+                try:
+                    from src.mission_control import list_executions as mc_list_executions
+
+                    mc_repo = app.state.services.platform_repository
+                    if mc_repo is not None:
+                        mc_executions = mc_list_executions(mc_repo, limit=5)
+                        if mc_executions:
+                            await manager.broadcast_with_backoff(
+                                {
+                                    "type": "execution_update",
+                                    "timestamp": context["timestamp"],
+                                    "payload": {"executions": [e.to_dict() for e in mc_executions]},
+                                },
+                                channel="mission-control",
+                            )
+                except Exception:
+                    pass
                 manager.reset_failures()
                 previous_context = context
             else:
@@ -750,22 +1104,28 @@ async def run_dashboard_broadcaster(app: Any, interval_seconds: float = DEFAULT_
                 manager.reset_failures()
         except Exception as exc:
             import logging
+
             logging.getLogger(__name__).error("WebSocket broadcaster error: %s", exc, exc_info=True)
         await asyncio.sleep(interval_seconds)
 
 
-def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
-    def check_grafana() -> Dict[str, Any]:
+def build_integrations_context(services: DashboardServices) -> dict[str, Any]:
+    def check_grafana() -> dict[str, Any]:
         grafana_dir = BASE_DIR / "grafana"
         provisioned = grafana_dir.exists()
         health_url = None
         dashboard_url = None
         reachable = False
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
+
             config = getattr(services, "config", None)
-            if config and hasattr(config, "integrations") and hasattr(config.integrations, "grafana_url"):
+            if (
+                config
+                and hasattr(config, "integrations")
+                and hasattr(config.integrations, "grafana_url")
+            ):
                 health_url = f"{config.integrations.grafana_url.rstrip('/')}/api/health"
             if not health_url and provisioned:
                 health_url = "http://localhost:3000/api/health"
@@ -778,17 +1138,28 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
         except Exception:
             reachable = False
         status = "connected" if reachable else ("configured" if provisioned else "not configured")
-        return {"name": "Grafana", "status": status, "description": "Provisioned dashboards.", "url": dashboard_url, "reachable": reachable}
+        return {
+            "name": "Grafana",
+            "status": status,
+            "description": "Provisioned dashboards.",
+            "url": dashboard_url,
+            "reachable": reachable,
+        }
 
-    def check_prometheus() -> Dict[str, Any]:
+    def check_prometheus() -> dict[str, Any]:
         prometheus_dir = BASE_DIR / "grafana" / "prometheus"
         reachable = False
         scrape_url = None
         try:
-            import urllib.request
             import urllib.error
+            import urllib.request
+
             config = getattr(services, "config", None)
-            if config and hasattr(config, "integrations") and hasattr(config.integrations, "prometheus_url"):
+            if (
+                config
+                and hasattr(config, "integrations")
+                and hasattr(config.integrations, "prometheus_url")
+            ):
                 base = config.integrations.prometheus_url.rstrip("/")
             else:
                 base = "http://localhost:9090"
@@ -801,10 +1172,20 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
             scrape_url = f"{base}/metrics"
         except Exception:
             reachable = False
-        status = "connected" if reachable else ("configured" if prometheus_dir.exists() else "not configured")
-        return {"name": "Prometheus", "status": status, "description": "Metrics endpoint available.", "url": scrape_url, "reachable": reachable}
+        status = (
+            "connected"
+            if reachable
+            else ("configured" if prometheus_dir.exists() else "not configured")
+        )
+        return {
+            "name": "Prometheus",
+            "status": status,
+            "description": "Metrics endpoint available.",
+            "url": scrape_url,
+            "reachable": reachable,
+        }
 
-    def check_docker() -> Dict[str, Any]:
+    def check_docker() -> dict[str, Any]:
         scanner = getattr(services, "docker_scanner", None)
         reachable = False
         container_count = 0
@@ -816,13 +1197,21 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
                 containers = report.get("containers", [])
                 container_count = len(containers)
                 running_count = sum(1 for c in containers if c.get("status") == "running")
-        return {"name": "Docker", "status": "connected" if reachable else "disconnected", "description": f"Container runtime inventory ({running_count}/{container_count} running).", "reachable": reachable, "container_count": container_count, "running_count": running_count}
+        return {
+            "name": "Docker",
+            "status": "connected" if reachable else "disconnected",
+            "description": f"Container runtime inventory ({running_count}/{container_count} running).",
+            "reachable": reachable,
+            "container_count": container_count,
+            "running_count": running_count,
+        }
 
-    def check_mcp() -> Dict[str, Any]:
+    def check_mcp() -> dict[str, Any]:
         reachable = False
         tools_available = 0
         try:
             from src.mcp_server import create_mcp_server
+
             server = create_mcp_server()
             tools = getattr(server, "tools", None)
             if tools is not None:
@@ -833,6 +1222,7 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
                 if callable(list_fn):
                     try:
                         import asyncio
+
                         result = asyncio.get_event_loop().run_until_complete(list_fn())
                         tools_available = len(result) if isinstance(result, list) else 0
                         reachable = tools_available > 0
@@ -841,9 +1231,15 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
         except Exception:
             reachable = False
         status = "available" if reachable else "unavailable"
-        return {"name": "MCP", "status": status, "description": f"FastMCP server ({tools_available} tools).", "reachable": reachable, "tool_count": tools_available}
+        return {
+            "name": "MCP",
+            "status": status,
+            "description": f"FastMCP server ({tools_available} tools).",
+            "reachable": reachable,
+            "tool_count": tools_available,
+        }
 
-    def check_sqlite() -> Dict[str, Any]:
+    def check_sqlite() -> dict[str, Any]:
         repository = getattr(services, "platform_repository", None)
         reachable = False
         try:
@@ -853,35 +1249,130 @@ def build_integrations_context(services: DashboardServices) -> Dict[str, Any]:
         except Exception:
             reachable = False
         status = "connected" if reachable else "disconnected"
-        return {"name": "SQLite", "status": status, "description": "SQLite persistence.", "reachable": reachable}
+        return {
+            "name": "SQLite",
+            "status": status,
+            "description": "SQLite persistence.",
+            "reachable": reachable,
+        }
 
-    return {"integrations": [check_grafana(), check_prometheus(), check_docker(), check_mcp(), check_sqlite()]}
-
-
-def build_mcp_context() -> Dict[str, Any]:
-    return {"mcp_tools": [
-        {"name": "get_system_health", "description": "Current system and Docker health report.", "example": '{"tool": "get_system_health"}'},
-        {"name": "list_containers", "description": "List Docker containers.", "example": '{"tool": "list_containers", "include_all": true}'},
-        {"name": "list_incidents", "description": "List incidents by status.", "example": '{"tool": "list_incidents", "status": "active"}'},
-        {"name": "get_metrics", "description": "Current metrics snapshot.", "example": '{"tool": "get_metrics"}'},
-        {"name": "get_http_monitoring", "description": "HTTP endpoint status.", "example": '{"tool": "get_http_monitoring"}'},
-        {"name": "get_ssl_monitoring", "description": "SSL certificate status.", "example": '{"tool": "get_ssl_monitoring"}'},
-        {"name": "get_tcp_monitoring", "description": "TCP target status.", "example": '{"tool": "get_tcp_monitoring"}'},
-        {"name": "generate_report", "description": "Generate weekly or monthly report.", "example": '{"tool": "generate_report", "report_type": "weekly"}'},
-        {"name": "restart_container", "description": "Restart a Docker container.", "example": '{"tool": "restart_container", "container_name": "api"}'},
-    ], "claude_config": json.dumps({"mcpServers": {"aegisnex": {"command": "python", "args": ["-m", "src.mcp_server"], "cwd": str(BASE_DIR)}}}, indent=2)}
-
-
-def build_reports_context(services: DashboardServices) -> Dict[str, Any]:
     return {
-        "reports": [
-            {"name": "Weekly report", "report_type": "weekly", "payload": {"window": {"label": "Last 7 days"}}},
-            {"name": "Monthly report", "report_type": "monthly", "payload": {"window": {"label": "Last 30 days"}}},
+        "integrations": [
+            check_grafana(),
+            check_prometheus(),
+            check_docker(),
+            check_mcp(),
+            check_sqlite(),
         ]
     }
 
 
-def build_notifications_context(services: DashboardServices) -> Dict[str, Any]:
+def build_mcp_context() -> dict[str, Any]:
+    tools = [
+        {
+            "name": "get_system_health",
+            "description": "Current system and Docker health report.",
+            "example": '{"tool": "get_system_health"}',
+        },
+        {
+            "name": "list_containers",
+            "description": "List Docker containers.",
+            "example": '{"tool": "list_containers", "include_all": true}',
+        },
+        {
+            "name": "list_incidents",
+            "description": "List incidents by status.",
+            "example": '{"tool": "list_incidents", "status": "active"}',
+        },
+        {
+            "name": "get_metrics",
+            "description": "Current metrics snapshot.",
+            "example": '{"tool": "get_metrics"}',
+        },
+        {
+            "name": "get_http_monitoring",
+            "description": "HTTP endpoint status.",
+            "example": '{"tool": "get_http_monitoring"}',
+        },
+        {
+            "name": "get_ssl_monitoring",
+            "description": "SSL certificate status.",
+            "example": '{"tool": "get_ssl_monitoring"}',
+        },
+        {
+            "name": "get_tcp_monitoring",
+            "description": "TCP target status.",
+            "example": '{"tool": "get_tcp_monitoring"}',
+        },
+        {
+            "name": "generate_report",
+            "description": "Generate weekly or monthly report.",
+            "example": '{"tool": "generate_report", "report_type": "weekly"}',
+        },
+        {
+            "name": "restart_container",
+            "description": "Restart a Docker container.",
+            "example": '{"tool": "restart_container", "container_name": "api"}',
+        },
+    ]
+    try:
+        tools_info = []
+        for tool in tools:
+            tools_info.append(tool)
+    except Exception:
+        tools_info = tools
+    return {
+        "mcp_tools": tools_info,
+        "claude_config": json.dumps(
+            {
+                "mcpServers": {
+                    "aegisnex": {
+                        "command": "python",
+                        "args": ["-m", "src.mcp_server"],
+                        "cwd": str(BASE_DIR),
+                    }
+                }
+            },
+            indent=2,
+        ),
+    }
+
+
+def build_reports_context(services: DashboardServices) -> dict[str, Any]:
+    reports = [
+        {
+            "name": "Weekly report",
+            "report_type": "weekly",
+            "payload": {"window": {"label": "Last 7 days"}},
+        },
+        {
+            "name": "Monthly report",
+            "report_type": "monthly",
+            "payload": {"window": {"label": "Last 30 days"}},
+        },
+    ]
+    try:
+        from src.reporting import OperationalReporter
+
+        repo = getattr(services, "platform_repository", None)
+        if repo is not None:
+            db_path = str(repo._sqlite_path()) if hasattr(repo, "_sqlite_path") else None
+            if db_path:
+                reporter = OperationalReporter(db_path)
+                available = []
+                if hasattr(reporter, "weekly_report"):
+                    available.append("weekly")
+                if hasattr(reporter, "monthly_report"):
+                    available.append("monthly")
+                if hasattr(reporter, "service_health_report"):
+                    available.append("service_health")
+                reports = [r for r in reports if r["report_type"] in available]
+    except Exception:
+        pass
+    return {"reports": reports}
+
+
+def build_notifications_context(services: DashboardServices) -> dict[str, Any]:
     rows = storage_rows(services, "notifications")
     rows = sorted(rows, key=lambda r: str(r.get("timestamp", "")), reverse=True)
     return {"notification_stats": build_notification_statistics(rows), "notifications": rows[:25]}
@@ -902,128 +1393,210 @@ async def save_metrics_snapshot_task(app: Any, interval_seconds: int = 60) -> No
                 stopped = len([c for c in containers if c.get("status") == "stopped"])
                 incident_mgr = app.state.services.incident_manager
                 all_incidents = incident_mgr.list_incidents()
-                active_incidents = len([i for i in all_incidents if i.status in {"active", "acknowledged"}])
+                active_incidents = len(
+                    [i for i in all_incidents if i.status in {"active", "acknowledged"}]
+                )
                 resolved_incidents = len([i for i in all_incidents if i.status == "resolved"])
-                repo.save_metrics_snapshot({
-                    "aegisnex_system_cpu_usage_percent": float(metrics.get("cpu_percent", 0)),
-                    "aegisnex_system_memory_usage_percent": float(metrics.get("ram_percent", 0)),
-                    "aegisnex_system_disk_usage_percent": float(metrics.get("disk_percent", 0)),
-                    "aegisnex_system_network_bytes_sent": float(metrics.get("network_bytes_sent", 0)),
-                    "aegisnex_system_network_bytes_received": float(metrics.get("network_bytes_recv", 0)),
-                    "aegisnex_containers_running": float(running),
-                    "aegisnex_containers_stopped": float(stopped),
-                    "aegisnex_incidents_active": float(active_incidents),
-                    "aegisnex_incidents_resolved": float(resolved_incidents),
-                    "aegisnex_incidents_total": float(len(all_incidents)),
-                })
+                repo.save_metrics_snapshot(
+                    {
+                        "aegisnex_system_cpu_usage_percent": float(metrics.get("cpu_percent", 0)),
+                        "aegisnex_system_memory_usage_percent": float(
+                            metrics.get("ram_percent", 0)
+                        ),
+                        "aegisnex_system_disk_usage_percent": float(metrics.get("disk_percent", 0)),
+                        "aegisnex_system_network_bytes_sent": float(
+                            metrics.get("network_bytes_sent", 0)
+                        ),
+                        "aegisnex_system_network_bytes_received": float(
+                            metrics.get("network_bytes_recv", 0)
+                        ),
+                        "aegisnex_containers_running": float(running),
+                        "aegisnex_containers_stopped": float(stopped),
+                        "aegisnex_incidents_active": float(active_incidents),
+                        "aegisnex_incidents_resolved": float(resolved_incidents),
+                        "aegisnex_incidents_total": float(len(all_incidents)),
+                    }
+                )
         except Exception:
             import logging
+
             logging.getLogger(__name__).exception("Metrics snapshot task failed")
         await asyncio.sleep(interval_seconds)
 
 
-async def incident_broadcast_task(app: Any, event_type: str, payload: Dict[str, Any]) -> None:
+async def incident_broadcast_task(app: Any, event_type: str, payload: dict[str, Any]) -> None:
     """Broadcast an incident event to the incidents WebSocket channel."""
     try:
         manager = app.state.websocket_manager
-        event = build_realtime_event(event_type.replace("incident_", "") if event_type.startswith("incident_") else event_type, payload)
+        event = build_realtime_event(
+            event_type.replace("incident_", "")
+            if event_type.startswith("incident_")
+            else event_type,
+            payload,
+        )
         await manager.broadcast(event, channel="incidents")
     except Exception:
         pass
 
 
-def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthManager | None = None) -> Any:
+def create_app(
+    services: DashboardServices | None = None,
+    auth_manager: AuthManager | None = None,
+    telemetry_db_path: str | None = None,
+) -> Any:
     try:
-        from fastapi import FastAPI, Response, HTTPException
+        from fastapi import FastAPI, HTTPException, Response
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import RedirectResponse
         from fastapi.staticfiles import StaticFiles
         from fastapi.templating import Jinja2Templates
     except ModuleNotFoundError as exc:
-        raise RuntimeError("Dashboard dependencies are missing. Install requirements.txt first.") from exc
+        raise RuntimeError(
+            "Dashboard dependencies are missing. Install requirements.txt first."
+        ) from exc
 
     @asynccontextmanager
     async def lifespan(fastapi_app: Any) -> Any:
         # Set broadcast callback on incident manager
         im = getattr(fastapi_app.state.services, "incident_manager", None)
         if im is not None:
-            async def _incident_broadcast(event_type: str, payload: Dict[str, Any]) -> None:
+
+            async def _incident_broadcast(event_type: str, payload: dict[str, Any]) -> None:
                 await incident_broadcast_task(fastapi_app, event_type, payload)
+
             im.broadcast_callback = _incident_broadcast
 
-        fastapi_app.state.websocket_broadcast_task = asyncio.create_task(run_dashboard_broadcaster(fastapi_app, fastapi_app.state.websocket_poll_interval_seconds))
-        fastapi_app.state.metrics_snapshot_task = asyncio.create_task(save_metrics_snapshot_task(fastapi_app, 60))
+        fastapi_app.state.websocket_broadcast_task = asyncio.create_task(
+            run_dashboard_broadcaster(
+                fastapi_app, fastapi_app.state.websocket_poll_interval_seconds
+            )
+        )
+        fastapi_app.state.metrics_snapshot_task = asyncio.create_task(
+            save_metrics_snapshot_task(fastapi_app, 60)
+        )
         fastapi_app.state.monitoring_engine_task = None
         if getattr(fastapi_app.state.services, "monitoring_engine", None) is not None:
-            fastapi_app.state.monitoring_engine_task = asyncio.create_task(fastapi_app.state.services.monitoring_engine.run_forever())
+            fastapi_app.state.monitoring_engine_task = asyncio.create_task(
+                fastapi_app.state.services.monitoring_engine.run_forever()
+            )
         from src.agents.orchestrator import AgentOrchestrator
+
         orchestrator = AgentOrchestrator(repo=fastapi_app.state.services.platform_repository)
         fastapi_app.state.agent_orchestrator = orchestrator
+
+        # Initialize AI Governance
+        from src.ai_governance import GovernanceManager
+        from src.governance_seed import seed_governance
+
+        governance = GovernanceManager(database_path=_auth_db)
+        fastapi_app.state.governance = governance
+        try:
+            seed_counts = seed_governance(governance)
+            logger.info("Governance seed complete: %s", seed_counts)
+        except Exception:
+            logger.exception("Governance seeding failed (non-fatal)")
 
         # Start autonomous pipeline
         pipeline = getattr(fastapi_app.state.services, "autonomous_pipeline", None)
         if pipeline is not None:
             try:
-                pipeline._agents = orchestrator.registry if hasattr(orchestrator, "registry") else None
+                pipeline._agents = (
+                    orchestrator.registry if hasattr(orchestrator, "registry") else None
+                )
                 asyncio.create_task(pipeline.start())
             except Exception:
                 logger.exception("Failed to start autonomous pipeline")
         try:
             yield
         finally:
-            for task_name in ("monitoring_engine_task", "websocket_broadcast_task", "metrics_snapshot_task"):
+            for task_name in (
+                "monitoring_engine_task",
+                "websocket_broadcast_task",
+                "metrics_snapshot_task",
+            ):
                 t = getattr(fastapi_app.state, task_name, None)
                 if t is not None:
                     t.cancel()
-                    try: await t
-                    except asyncio.CancelledError: pass
+                    try:
+                        await t
+                    except asyncio.CancelledError:
+                        pass
 
     app = FastAPI(title="AegisNex Dashboard", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=get_cors_origins(), allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"], allow_headers=["Authorization", "Content-Type", "Accept"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TLSRedirectMiddleware)
+
+    # CSRF protection for state-changing operations
+    from src.middleware.csrf import CSRFMiddleware
+    app.add_middleware(CSRFMiddleware)
+    from src.telemetry.collector import TelemetryCollector
     from src.telemetry.middleware import TelemetryMiddleware
-    app.add_middleware(TelemetryMiddleware)
+
+    _tc = (
+        TelemetryCollector(db_path=telemetry_db_path) if telemetry_db_path else TelemetryCollector()
+    )
+    app.add_middleware(TelemetryMiddleware, collector=_tc)
     app.state.limiter = limiter
     app.add_exception_handler(429, _rate_limit_exceeded_handler)
 
     configure_logging()
     from src.opentelemetry import instrument_app
+
     instrument_app(app)
 
     logger = get_logger(__name__)
     logger.info("AegisNex dashboard starting")
 
     app.state.services = services or create_services()
-    app.state.auth_manager = auth_manager or AuthManager()
+    _repo = getattr(app.state.services, "platform_repository", None)
+    _repo_path = getattr(_repo, "_sqlite_path", None)
+    _auth_db = str(_repo_path()) if callable(_repo_path) else "aegisnex.db"
+    app.state.auth_manager = auth_manager or AuthManager(user_store=UserStore(_auth_db))
     app.state.auth_manager.user_store.seed_default_admin()
     from src.cache import DashboardCache
+
     app.state.dashboard_cache = DashboardCache()
-    from src.telemetry.collector import TelemetryCollector
-    app.state.telemetry_collector = TelemetryCollector()
+    app.state.telemetry_collector = _tc
     repo = app.state.services.platform_repository
     if repo is not None:
         repo.initialize()
     from src.multitenant.manager import TenantManager
+
     app.state.tenant_manager = TenantManager(repo) if repo is not None else None
     from src.websocket_manager import WebSocketManager
+
     app.state.websocket_manager = WebSocketManager()
-    app.state.websocket_poll_interval_seconds = float(os.getenv("AEGISNEX_WS_POLL_INTERVAL_SECONDS", str(DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS)))
+    app.state.websocket_poll_interval_seconds = float(
+        os.getenv("AEGISNEX_WS_POLL_INTERVAL_SECONDS", str(DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS))
+    )
     app.state.websocket_broadcast_task = None
     app.state.monitoring_engine_task = None
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+    # Include modular routers
+    from src.routers.auth import router as auth_router
+    from src.routers.monitoring import router as monitoring_router
+    app.include_router(auth_router)
+    app.include_router(monitoring_router)
+
     # ---- Helper functions ----
     def current_user(request: FastAPIRequest) -> Any:
         return app.state.auth_manager.get_user_from_token(_extract_token(request))
 
-    def auth_context(request: FastAPIRequest, **extra: Any) -> Dict[str, Any]:
-        context: Dict[str, Any] = {"request": request, "user": current_user(request)}
+    def auth_context(request: FastAPIRequest, **extra: Any) -> dict[str, Any]:
+        context: dict[str, Any] = {"request": request, "user": current_user(request)}
         context.update(extra)
         return context
 
-    def protected_context(request: FastAPIRequest) -> Dict[str, Any] | None:
+    def protected_context(request: FastAPIRequest) -> dict[str, Any] | None:
         user = current_user(request)
         if user is None:
             return None
@@ -1032,7 +1605,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         context["user"] = user
         return context
 
-    def api_context_fn() -> Dict[str, Any]:
+    def api_context_fn() -> dict[str, Any]:
         return collect_dashboard_context(app.state.services)
 
     def actor_from_request(request: FastAPIRequest) -> str:
@@ -1042,25 +1615,44 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     def run_monitoring_once() -> None:
         engine = getattr(app.state.services, "monitoring_engine", None)
         if engine is not None:
-            try: engine.run_once()
-            except Exception: pass
+            try:
+                engine.run_once()
+            except Exception:
+                pass
 
     def render_report_response(report_type: str, report_format: str) -> Any:
         from src.reporting import OperationalReporter
+
         repo = getattr(app.state.services, "platform_repository", None)
-        database_path = str(getattr(repo, "_sqlite_path", lambda: Path("aegisnex.db"))()) if repo else "aegisnex.db"
+        database_path = (
+            str(getattr(repo, "_sqlite_path", lambda: Path("aegisnex.db"))())
+            if repo
+            else "aegisnex.db"
+        )
         reporter = OperationalReporter(database_path)
         report = reporter.weekly_report() if report_type == "weekly" else reporter.monthly_report()
         if report_format == "json":
-            return Response(content=json.dumps(report, indent=2), media_type="application/json", headers={"Content-Disposition": f"attachment; filename={report_type}_report.json"})
+            return Response(
+                content=json.dumps(report, indent=2),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename={report_type}_report.json"},
+            )
         if report_format == "csv":
             output_path = BASE_DIR / "reports" / f"{report_type}_report.csv"
             reporter.export_report(report, output_path, "csv")
-            return Response(content=output_path.read_text(encoding="utf-8"), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={report_type}_report.csv"})
+            return Response(
+                content=output_path.read_text(encoding="utf-8"),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename={report_type}_report.csv"},
+            )
         if report_format == "pdf":
             output_path = BASE_DIR / "reports" / f"{report_type}_report.pdf"
             reporter.export_report(report, output_path, "pdf")
-            return Response(content=output_path.read_bytes(), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename={report_type}_report.pdf"})
+            return Response(
+                content=output_path.read_bytes(),
+                media_type="application/pdf",
+                headers={"Content-Disposition": f"attachment; filename={report_type}_report.pdf"},
+            )
         return Response(content="Unsupported report format", status_code=400)
 
     # ---- WebSocket ----
@@ -1074,7 +1666,11 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         await manager.connect(websocket, channel="dashboard")
         try:
             context = await asyncio.to_thread(collect_dashboard_context, app.state.services)
-            await websocket.send_json(build_realtime_event("metric_update", build_dashboard_api_snapshot(context), context["timestamp"]))
+            await websocket.send_json(
+                build_realtime_event(
+                    "metric_update", build_dashboard_api_snapshot(context), context["timestamp"]
+                )
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
@@ -1094,7 +1690,13 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             incidents = app.state.services.incident_manager.list_incidents()
             payload = [i.to_dict() for i in incidents]
-            await websocket.send_json({"type": "incident_list", "timestamp": utc_now(), "payload": {"incidents": payload, "count": len(payload)}})
+            await websocket.send_json(
+                {
+                    "type": "incident_list",
+                    "timestamp": utc_now(),
+                    "payload": {"incidents": payload, "count": len(payload)},
+                }
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
@@ -1113,7 +1715,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         await manager.connect(websocket, channel="containers")
         try:
             context = await asyncio.to_thread(collect_dashboard_context, app.state.services)
-            await websocket.send_json({"type": "container_list", "timestamp": utc_now(), "payload": {"containers": context["containers"], "count": len(context["containers"])}})
+            await websocket.send_json(
+                {
+                    "type": "container_list",
+                    "timestamp": utc_now(),
+                    "payload": {
+                        "containers": context["containers"],
+                        "count": len(context["containers"]),
+                    },
+                }
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
@@ -1133,7 +1744,13 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             repo = app.state.services.platform_repository
             targets = repo.list_monitoring_targets() if repo else []
-            await websocket.send_json({"type": "target_list", "timestamp": utc_now(), "payload": {"targets": targets, "count": len(targets)}})
+            await websocket.send_json(
+                {
+                    "type": "target_list",
+                    "timestamp": utc_now(),
+                    "payload": {"targets": targets, "count": len(targets)},
+                }
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
@@ -1152,16 +1769,21 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             scanner = app.state.services.docker_scanner
             import docker
+
             client = docker.from_env(timeout=5)
             container = client.containers.get(name)
             # Send recent logs first
             log_result = scanner.get_container_logs(name, tail=100)
             if log_result.get("status") == "ok":
-                await websocket.send_json({"type": "logs_init", "container": name, "logs": log_result["logs"]})
+                await websocket.send_json(
+                    {"type": "logs_init", "container": name, "logs": log_result["logs"]}
+                )
             # Stream live logs
             async for log_line in _stream_container_logs(container):
                 try:
-                    await websocket.send_json({"type": "log_line", "container": name, "line": log_line})
+                    await websocket.send_json(
+                        {"type": "log_line", "container": name, "line": log_line}
+                    )
                 except Exception:
                     break
         except docker.errors.NotFound:
@@ -1187,7 +1809,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     # ---- Public auth pages ----
     @app.get("/login")
     async def login_page() -> RedirectResponse:
-        return RedirectResponse(url="http://localhost:3000/login", status_code=302)
+        frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "").strip()
+        if not frontend_url:
+            environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+            if environment in {"development", "dev", "local", "test"}:
+                frontend_url = "http://localhost:3000"
+            else:
+                frontend_url = "/"
+        return RedirectResponse(url=f"{frontend_url}/login", status_code=302)
 
     @app.post("/api/login")
     @limiter.limit("5/minute")
@@ -1202,22 +1831,34 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if repo is not None:
             repo.record_audit_log(email, "login", "session", email, {})
         response = Response(
-            content=json.dumps({
-                "access_token": access_token,
-                "token_type": "bearer",
-                "refresh_token": refresh_token,
-            }),
+            content=json.dumps(
+                {
+                    "access_token": access_token,
+                    "token_type": "bearer",
+                }
+            ),
             media_type="application/json",
         )
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
-        _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
+        _set_refresh_cookie(
+            response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds
+        )
         return response
 
     @app.post("/api/auth/demo-login")
+    @limiter.limit("5/minute")
     async def api_demo_login(request: FastAPIRequest) -> Any:
-        from src.demo_credentials import get_demo_credentials
+        environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+        if environment not in {"development", "dev", "local", "test"}:
+            raise HTTPException(status_code=404, detail="Demo login is not available in production")
+        import os as _os
 
-        username, password = get_demo_credentials()
+        username = _os.getenv("AEGISNEX_DEMO_USERNAME", "admin")
+        password = _os.getenv("AEGISNEX_DEMO_PASSWORD")
+        if not password:
+            raise HTTPException(
+                status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD."
+            )
         result = app.state.auth_manager.login(username, password)
         if result is None:
             app.state.auth_manager.user_store.seed_default_admin()
@@ -1229,15 +1870,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if repo is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
         response = Response(
-            content=json.dumps({
-                "access_token": access_token,
-                "token_type": "bearer",
-                "refresh_token": refresh_token,
-            }),
+            content=json.dumps(
+                {
+                    "access_token": access_token,
+                    "token_type": "bearer",
+                }
+            ),
             media_type="application/json",
         )
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
-        _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
+        _set_refresh_cookie(
+            response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds
+        )
         return response
 
     @app.get("/api/auth/verify")
@@ -1262,13 +1906,30 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and user is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(user.email, "logout", "session", user.email, {})
-        response = RedirectResponse(url="http://localhost:3000/login", status_code=302)
+        response = RedirectResponse(url="/login", status_code=302)
+        _clear_auth_cookies(response)
+        return response
+
+    @app.post("/api/logout")
+    async def api_logout(request: FastAPIRequest) -> Any:
+        token = _extract_token(request)
+        if token:
+            user = app.state.auth_manager.get_user_from_token(token)
+            app.state.auth_manager.logout(token)
+            repo = getattr(app.state.services, "platform_repository", None)
+            if repo is not None and user is not None and hasattr(repo, "record_audit_log"):
+                repo.record_audit_log(user.email, "logout", "session", user.email, {})
+        response = Response(
+            content=json.dumps({"message": "Logged out"}),
+            media_type="application/json",
+        )
         _clear_auth_cookies(response)
         return response
 
     @app.post("/api/auth/refresh")
+    @limiter.limit("10/minute")
     async def auth_refresh(request: FastAPIRequest) -> Any:
-        refresh_token = request.cookies.get("aegisnex_refresh") or request.headers.get("x-refresh-token", "")
+        refresh_token = request.cookies.get("aegisnex_refresh", "")
         if not refresh_token:
             raise HTTPException(status_code=401, detail="Refresh token required")
         refreshed = app.state.auth_manager.refresh_session(refresh_token)
@@ -1276,91 +1937,107 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             raise HTTPException(status_code=401, detail="Invalid refresh token")
         access_token, next_refresh_token = refreshed
         response = Response(
-            content=json.dumps({
-                "access_token": access_token,
-                "token_type": "bearer",
-            }),
+            content=json.dumps(
+                {
+                    "access_token": access_token,
+                    "token_type": "bearer",
+                }
+            ),
             media_type="application/json",
         )
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
-        _set_refresh_cookie(response, next_refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
+        _set_refresh_cookie(
+            response, next_refresh_token, app.state.auth_manager.refresh_token_ttl_seconds
+        )
         return response
 
     # ---- Protected template pages ----
     @app.get("/")
     def dashboard_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="dashboard.html", context=ctx, request=request)
 
     @app.get("/infrastructure")
     def infrastructure_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="infrastructure.html", context=ctx, request=request)
 
     @app.get("/containers")
     def containers_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="containers.html", context=ctx, request=request)
 
     @app.get("/incidents")
     def incidents_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="incidents.html", context=ctx, request=request)
 
     @app.get("/actions")
     def actions_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="actions.html", context=ctx, request=request)
 
     @app.get("/reports")
     def reports_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         ctx.update(build_reports_context(app.state.services))
         return templates.TemplateResponse(name="reports.html", context=ctx, request=request)
 
     @app.get("/reports/{report_type}/{report_format}")
     def download_report(request: FastAPIRequest, report_type: str, report_format: str) -> Any:
         user = current_user(request)
-        if user is None: return RedirectResponse(url="/login", status_code=303)
+        if user is None:
+            return RedirectResponse(url="/login", status_code=303)
         return render_report_response(report_type, report_format)
 
     @app.get("/notifications")
     def notifications_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         ctx.update(build_notifications_context(app.state.services))
         return templates.TemplateResponse(name="notifications.html", context=ctx, request=request)
 
     @app.get("/mcp")
     def mcp_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         ctx.update(build_mcp_context())
         return templates.TemplateResponse(name="mcp.html", context=ctx, request=request)
 
     @app.get("/integrations")
     def integrations_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         ctx.update(build_integrations_context(app.state.services))
         return templates.TemplateResponse(name="integrations.html", context=ctx, request=request)
 
     @app.get("/settings")
     def settings_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         return templates.TemplateResponse(name="settings.html", context=ctx, request=request)
 
     @app.get("/audit")
     def audit_page(request: FastAPIRequest) -> Any:
         ctx = protected_context(request)
-        if ctx is None: return RedirectResponse(url="/login", status_code=303)
+        if ctx is None:
+            return RedirectResponse(url="/login", status_code=303)
         repo = getattr(app.state.services, "platform_repository", None)
         logs = repo.list_audit_logs(limit=100) if repo else []
         ctx["logs"] = logs
@@ -1368,34 +2045,91 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Authenticated API endpoints (Viewer: read-only) ----
     @app.get("/api/system-health")
-    def api_system_health(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_system_health(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        ctx = api_context_fn()
-        return {"timestamp": ctx["timestamp"], "health_score": ctx["health_score"], "metrics": ctx["metrics"], "active_incident_count": len(ctx["active_incidents"]), "running_container_count": len(ctx["running_containers"])}
+        try:
+            ctx = api_context_fn()
+            return {
+                "timestamp": ctx["timestamp"],
+                "health_score": ctx["health_score"],
+                "metrics": ctx["metrics"],
+                "active_incident_count": len(ctx["active_incidents"]),
+                "running_container_count": len(ctx["running_containers"]),
+            }
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "timestamp": utc_now(),
+                "health_score": 0,
+                "metrics": {},
+                "active_incident_count": 0,
+                "running_container_count": 0,
+            }
 
     @app.get("/api/containers")
-    def api_containers(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_containers(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        ctx = api_context_fn()
-        return {"timestamp": ctx["timestamp"], "containers": ctx["containers"], "running_containers": ctx["running_containers"], "count": len(ctx["containers"])}
+        try:
+            ctx = api_context_fn()
+            return {
+                "timestamp": ctx["timestamp"],
+                "containers": ctx["containers"],
+                "running_containers": ctx["running_containers"],
+                "count": len(ctx["containers"]),
+            }
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "timestamp": utc_now(),
+                "containers": [],
+                "running_containers": [],
+                "count": 0,
+            }
 
     @app.get("/api/incidents")
-    def api_incidents(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_incidents(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         limit = int(request.query_params.get("limit", 100))
         offset = int(request.query_params.get("offset", 0))
+        org_id_param = request.query_params.get("org_id")
+        org_id = int(org_id_param) if org_id_param else None
         limit = max(1, min(limit, 1000))
         repo = app.state.services.platform_repository
         if repo is None:
             ctx = api_context_fn()
             incidents = ctx["active_incidents"] + ctx["resolved_incidents"]
+            if org_id is not None:
+                incidents = [item for item in incidents if item.get("org_id") == org_id]
             incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
-            return {"active_incidents": ctx["active_incidents"], "resolved_incidents": ctx["resolved_incidents"], "recent_incidents": ctx["recent_incidents"], "incidents": incidents[:limit], "active_count": len(ctx["active_incidents"]), "resolved_count": len(ctx["resolved_incidents"]), "count": len(incidents), "limit": limit, "offset": offset}
-        all_incidents = repo.list_incidents(limit=limit, offset=offset)
-        total = repo.fetch_all("incidents", limit=0, offset=0)
-        active = [i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}]
+            return {
+                "active_incidents": ctx["active_incidents"],
+                "resolved_incidents": ctx["resolved_incidents"],
+                "recent_incidents": ctx["recent_incidents"],
+                "incidents": incidents[:limit],
+                "active_count": len(ctx["active_incidents"]),
+                "resolved_count": len(ctx["resolved_incidents"]),
+                "count": len(incidents),
+                "limit": limit,
+                "offset": offset,
+            }
+        all_incidents = repo.list_incidents(limit=limit, offset=offset, org_id=org_id)
+        total = repo.list_incidents(org_id=org_id)
+        active = [
+            i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}
+        ]
         resolved = [i for i in all_incidents if i.get("incident_status") == "resolved"]
-        return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": all_incidents[:6], "incidents": all_incidents, "active_count": len(active), "resolved_count": len(resolved), "count": len(all_incidents), "total": len(total), "limit": limit, "offset": offset}
+        return {
+            "active_incidents": active,
+            "resolved_incidents": resolved,
+            "recent_incidents": all_incidents[:6],
+            "incidents": all_incidents,
+            "active_count": len(active),
+            "resolved_count": len(resolved),
+            "count": len(all_incidents),
+            "total": len(total),
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/incidents/{incident_id}")
     def api_incident_detail(incident_id: str, request: FastAPIRequest) -> Any:
@@ -1411,17 +2145,429 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="Incident not found", status_code=404)
         timeline = repo.list_incident_transitions(incident_id) if repo is not None else []
         if not timeline:
-            timeline = [{"id": 0, "incident_id": incident_id, "timestamp": incident.get("timestamp"), "from_status": None, "to_status": incident.get("incident_status", incident.get("status", "active")), "actor": "system", "details": {"reason": "created"}}]
+            timeline = [
+                {
+                    "id": 0,
+                    "incident_id": incident_id,
+                    "timestamp": incident.get("timestamp"),
+                    "from_status": None,
+                    "to_status": incident.get("incident_status", incident.get("status", "active")),
+                    "actor": "system",
+                    "details": {"reason": "created"},
+                }
+            ]
         return {"incident": incident, "timeline": timeline, "count": len(timeline)}
 
-    @app.get("/api/metrics")
-    def api_metrics(request: FastAPIRequest) -> Dict[str, Any]:
+    @app.post("/api/incidents/{incident_id}/client")
+    async def api_assign_incident_client(incident_id: str, request: FastAPIRequest) -> Any:
+        user = require_role(*OPERATOR_ROLES)(request)
+        repo = app.state.services.platform_repository
+        if repo is None:
+            return Response(content="Platform database unavailable", status_code=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            return Response(content="Invalid JSON body", status_code=400)
+        raw_org_id = payload.get("org_id")
+        org_id = int(raw_org_id) if raw_org_id not in (None, "", 0, "0") else None
+        org_name = None
+        if org_id is not None:
+            try:
+                mgr: TenantManager = request.app.state.tenant_manager
+                org = mgr.get_organization(org_id)
+                org_name = org.name
+            except ValueError:
+                return Response(content="Client organization not found", status_code=404)
+        result = repo.assign_incident_org(incident_id, org_id, org_name, actor=user.email)
+        if result is None:
+            return Response(content="Incident not found", status_code=404)
+        try:
+            request.app.state.services.incident_manager.update_incident(
+                incident_id,
+                org_id=org_id,
+                org_name=org_name,
+            )
+        except KeyError:
+            pass
+        return result
+
+    @app.post("/api/incidents/{incident_id}/explain")
+    async def api_incident_explain(incident_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        ctx = api_context_fn()
-        return {"timestamp": ctx["timestamp"], "metrics": ctx["metrics"], "network": ctx["network"], "chart_data": ctx["chart_data"]["metrics"]}
+        repo = getattr(app.state.services, "platform_repository", None)
+        incident = repo.get_incident(incident_id) if repo is not None else None
+        if incident is None:
+            for item in app.state.services.incident_manager.list_incidents():
+                if item.incident_id == incident_id:
+                    incident = item.to_dict()
+                    break
+        if incident is None:
+            return Response(content="Incident not found", status_code=404)
+        try:
+            from src.intelligence.providers.base import Message
+            from src.intelligence.retrieval.rag import RAGEngine
+
+            rag = RAGEngine(repo=repo)
+            query = (
+                f"Incident {incident.get('incident_id', '')}: "
+                f"{incident.get('description', '')} "
+                f"service={incident.get('service_name', '')} "
+                f"type={incident.get('incident_type', '')} "
+                f"severity={incident.get('severity', '')}"
+            )
+            retrieval = rag.retrieve(query, limit=5)
+            similar_incidents = [d for d in retrieval.documents if d.source_type == "incident"]
+            runbooks = [d for d in retrieval.documents if d.source_type == "runbook"]
+            audit_logs = [d for d in retrieval.documents if d.source_type == "audit"]
+            context_text = retrieval.context_text
+            provider = getattr(rag, "_provider", None)
+            if provider is not None:
+                from src.intelligence.retrieval.rag import SYSTEM_PROMPT_TEMPLATE
+
+                system_prompt = SYSTEM_PROMPT_TEMPLATE.format(context=context_text)
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    Message(
+                        role="user",
+                        content=(
+                            f"Analyze this incident and provide:\n"
+                            f"1. **Root Cause Analysis**: What likely caused this incident based on the evidence.\n"
+                            f"2. **Similar Past Incidents**: Reference any similar incidents from the context.\n"
+                            f"3. **Recommended Actions**: Specific steps to resolve and prevent recurrence.\n"
+                            f"4. **Risk Assessment**: Severity and potential impact if unresolved.\n\n"
+                            f"Incident Details:\n"
+                            f"- Service: {incident.get('service_name', 'unknown')}\n"
+                            f"- Type: {incident.get('incident_type', 'unknown')}\n"
+                            f"- Severity: {incident.get('severity', 'unknown')}\n"
+                            f"- Description: {incident.get('description', 'No description')}\n"
+                            f"- Status: {incident.get('incident_status', incident.get('status', 'active'))}\n"
+                            f"- Created: {incident.get('timestamp', 'unknown')}\n"
+                        ),
+                    ),
+                ]
+                ai_response = provider.chat(messages).content
+            else:
+                ai_response = (
+                    f"**Incident Analysis** (rule-based — configure AEGIS_AI_PROVIDER for LLM analysis)\n\n"
+                    f"**Service**: {incident.get('service_name', 'unknown')}\n"
+                    f"**Type**: {incident.get('incident_type', 'unknown')}\n"
+                    f"**Severity**: {incident.get('severity', 'unknown')}\n"
+                    f"**Description**: {incident.get('description', 'No description')}\n\n"
+                    f"**Similar Past Incidents Found**: {len(similar_incidents)}\n"
+                )
+                for doc in similar_incidents[:3]:
+                    ai_response += f"- {doc.content[:200]}\n"
+                if runbooks:
+                    ai_response += f"\n**Relevant Runbooks**: {len(runbooks)}\n"
+                    for doc in runbooks[:2]:
+                        ai_response += f"- {doc.metadata.get('title', doc.source)}\n"
+            result = {
+                "incident_id": incident_id,
+                "analysis": ai_response,
+                "similar_incidents": [
+                    {"source": d.source, "content": d.content[:300], "relevance": d.relevance_score}
+                    for d in similar_incidents[:5]
+                ],
+                "runbooks": [
+                    {
+                        "source": d.source,
+                        "title": d.metadata.get("title", ""),
+                        "content": d.content[:200],
+                    }
+                    for d in runbooks[:3]
+                ],
+                "audit_context": [
+                    {"content": d.content[:200], "timestamp": d.timestamp} for d in audit_logs[:3]
+                ],
+                "confidence": sum(d.relevance_score for d in retrieval.documents)
+                / max(len(retrieval.documents), 1),
+                "timestamp": utc_now(),
+            }
+            if repo is not None and hasattr(repo, "record_audit_log"):
+                repo.record_audit_log(
+                    "system",
+                    "incident.explain",
+                    "incident",
+                    incident_id,
+                    {"similar_count": len(similar_incidents), "runbook_count": len(runbooks)},
+                )
+            return result
+        except Exception as exc:
+            get_logger(__name__).warning("Incident explain error: %s", exc)
+            return {
+                "incident_id": incident_id,
+                "analysis": f"Analysis failed: {exc}",
+                "similar_incidents": [],
+                "runbooks": [],
+                "audit_context": [],
+                "confidence": 0.0,
+                "timestamp": utc_now(),
+            }
+
+    @app.post("/api/incidents/{incident_id}/propose-remediation")
+    async def api_propose_remediation(incident_id: str, request: FastAPIRequest) -> Any:
+        require_role(*OPERATOR_ROLES)(request)
+        body = await request.json()
+        proposed_by = body.get("proposed_by", "system")
+        remediation_plan = body.get("plan", {})
+        confidence = float(body.get("confidence", 0.0))
+        if not _is_diagnostics_only_plan(remediation_plan):
+            return Response(
+                content="Only diagnostics-only remediation plans are supported in this iteration",
+                status_code=400,
+            )
+        incident_manager = app.state.services.incident_manager
+        repo = getattr(app.state.services, "platform_repository", None)
+        try:
+            incident = incident_manager.propose_remediation(
+                incident_id,
+                proposed_by,
+                remediation_plan,
+                confidence,
+            )
+            approval = None
+            if repo is not None and hasattr(repo, "create_approval_request"):
+                approval_id = f"incident-diagnostics-{uuid.uuid4().hex[:12]}"
+                approval = repo.create_approval_request(
+                    approval_id=approval_id,
+                    request_type="incident_diagnostic_remediation",
+                    requester=str(proposed_by),
+                    summary=f"Approve diagnostic evidence collection for {incident.service_name}",
+                    details={
+                        "incident_id": incident.incident_id,
+                        "service_name": incident.service_name,
+                        "incident_type": incident.incident_type,
+                        "severity": incident.severity,
+                        "mode": "diagnostics_only",
+                        "read_only": True,
+                        "actions": remediation_plan.get("actions", []),
+                    },
+                )
+            return {
+                "incident": incident.to_dict(),
+                "approval": approval,
+                "message": "Diagnostics plan proposed",
+            }
+        except KeyError:
+            return Response(content="Incident not found", status_code=404)
+        except Exception as exc:
+            return Response(content=f"Failed to propose remediation: {exc}", status_code=500)
+
+    @app.post("/api/incidents/{incident_id}/approve-remediation")
+    async def api_approve_remediation(incident_id: str, request: FastAPIRequest) -> Any:
+        require_role(*OPERATOR_ROLES)(request)
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        actor = body.get(
+            "actor",
+            request.user.get("username", "unknown") if hasattr(request, "user") else "system",
+        )
+        incident_manager = app.state.services.incident_manager
+        try:
+            incident = incident_manager.approve_remediation(incident_id, actor)
+            return {"incident": incident.to_dict(), "message": "Remediation approved"}
+        except KeyError:
+            return Response(content="Incident not found", status_code=404)
+        except ValueError as exc:
+            return Response(content=str(exc), status_code=400)
+        except Exception as exc:
+            return Response(content=f"Failed to approve remediation: {exc}", status_code=500)
+
+    @app.post("/api/incidents/{incident_id}/reject-remediation")
+    async def api_reject_remediation(incident_id: str, request: FastAPIRequest) -> Any:
+        require_role(*OPERATOR_ROLES)(request)
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        actor = body.get(
+            "actor",
+            request.user.get("username", "unknown") if hasattr(request, "user") else "system",
+        )
+        reason = body.get("reason", "")
+        incident_manager = app.state.services.incident_manager
+        try:
+            incident = incident_manager.reject_remediation(incident_id, actor, reason)
+            return {"incident": incident.to_dict(), "message": "Remediation rejected"}
+        except KeyError:
+            return Response(content="Incident not found", status_code=404)
+        except ValueError as exc:
+            return Response(content=str(exc), status_code=400)
+        except Exception as exc:
+            return Response(content=f"Failed to reject remediation: {exc}", status_code=500)
+
+    @app.post("/api/incidents/{incident_id}/execute-remediation")
+    async def api_execute_remediation(incident_id: str, request: FastAPIRequest) -> Any:
+        require_role(*OPERATOR_ROLES)(request)
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
+        incident_manager = app.state.services.incident_manager
+        pipeline = getattr(app.state.services, "autonomous_pipeline", None)
+        try:
+            incident_obj = None
+            for inc in incident_manager.list_incidents():
+                if inc.incident_id == incident_id:
+                    incident_obj = inc
+                    break
+            if incident_obj is None:
+                return Response(content="Incident not found", status_code=404)
+            if incident_obj.remediation_approval_status != "approved":
+                return Response(content="Remediation not approved", status_code=400)
+            plan = incident_obj.proposed_remediation or {}
+            if not _is_diagnostics_only_plan(plan):
+                return Response(
+                    content="Only approved diagnostics-only plans can be executed from this endpoint",
+                    status_code=400,
+                )
+            if plan.get("mode") == "diagnostics_only":
+                timeline = []
+                repo = getattr(app.state.services, "platform_repository", None)
+                if repo is not None and hasattr(repo, "list_incident_transitions"):
+                    timeline = repo.list_incident_transitions(incident_id)
+                execution_result = {
+                    "mode": "diagnostics_only",
+                    "read_only": True,
+                    "incident_id": incident_obj.incident_id,
+                    "service_name": incident_obj.service_name,
+                    "incident_type": incident_obj.incident_type,
+                    "severity": incident_obj.severity,
+                    "status": incident_obj.status,
+                    "description": incident_obj.description,
+                    "health_check_results": incident_obj.health_check_results,
+                    "timeline": timeline,
+                    "executed_at": utc_now(),
+                    "evidence_packet": {
+                        "source": "incident_record",
+                        "title": f"Diagnostic evidence packet for {incident_obj.service_name}",
+                        "summary": (
+                            "Read-only evidence collection completed from the incident record, "
+                            "health check results, and status timeline."
+                        ),
+                        "approval_required": True,
+                        "infrastructure_mutated": False,
+                        "artifact_type": "diagnostic_evidence",
+                        "evidence_counts": {
+                            "health_check_results": len(incident_obj.health_check_results or []),
+                            "timeline_events": len(timeline),
+                        },
+                    },
+                }
+                successful = True
+            elif pipeline and hasattr(pipeline, "_execute_remediation"):
+                execution_result = await pipeline._execute_remediation(
+                    plan, body.get("correlation_id")
+                )
+                successful = bool(execution_result)
+            else:
+                execution_result = {"message": "No pipeline available, marked as executed"}
+                successful = True
+            incident_manager.mark_remediation_executed(incident_id, successful, execution_result)
+            repo = getattr(app.state.services, "platform_repository", None)
+            if repo is not None and hasattr(repo, "record_audit_log"):
+                repo.record_audit_log(
+                    "system",
+                    "incident.diagnostics_collected",
+                    "incident",
+                    incident_id,
+                    {
+                        "mode": plan.get("mode"),
+                        "read_only": plan.get("read_only"),
+                        "successful": successful,
+                    },
+                )
+            return {
+                "incident": incident_manager._get_required(incident_id).to_dict(),
+                "execution_result": execution_result,
+                "successful": successful,
+            }
+        except KeyError:
+            return Response(content="Incident not found", status_code=404)
+        except Exception as exc:
+            return Response(content=f"Failed to execute remediation: {exc}", status_code=500)
+
+    @app.get("/api/learning/entries")
+    async def api_learning_entries(request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        entries = []
+        if repo and hasattr(repo, "get_knowledge_entries"):
+            try:
+                entries = repo.get_knowledge_entries()
+            except Exception:
+                entries = []
+        return {"entries": entries, "count": len(entries), "timestamp": utc_now()}
+
+    @app.get("/api/learning/stats")
+    async def api_learning_stats(request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        history = getattr(app.state.services, "execution_history", None)
+        stats = {
+            "knowledge_entries": 0,
+            "total_executions": 0,
+            "successful_executions": 0,
+            "failed_executions": 0,
+            "avg_confidence": 0.0,
+        }
+        if repo and hasattr(repo, "get_knowledge_entries"):
+            try:
+                entries = repo.get_knowledge_entries()
+                stats["knowledge_entries"] = len(entries)
+                confidences = [
+                    e.get("confidence", 0.0)
+                    for e in entries
+                    if isinstance(e, dict) and e.get("confidence")
+                ]
+                if confidences:
+                    stats["avg_confidence"] = sum(confidences) / len(confidences)
+            except Exception:
+                pass
+        if history and hasattr(history, "get_stats"):
+            try:
+                h_stats = history.get_stats()
+                stats["total_executions"] = h_stats.get("total", 0)
+                stats["successful_executions"] = h_stats.get("completed", 0)
+                stats["failed_executions"] = h_stats.get("failed", 0)
+            except Exception:
+                pass
+        incident_manager = app.state.services.incident_manager
+        all_incidents = incident_manager.list_incidents()
+        stats["total_incidents"] = len(all_incidents)
+        stats["incidents_with_remediation"] = sum(
+            1 for i in all_incidents if i.remediation_attempted
+        )
+        stats["incidents_with_proposals"] = sum(1 for i in all_incidents if i.proposed_remediation)
+        return {"stats": stats, "timestamp": utc_now()}
+
+    @app.get("/api/metrics")
+    def api_metrics(request: FastAPIRequest) -> dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        try:
+            ctx = api_context_fn()
+            return {
+                "timestamp": ctx["timestamp"],
+                "metrics": ctx["metrics"],
+                "network": ctx["network"],
+                "chart_data": ctx["chart_data"]["metrics"],
+            }
+        except Exception as exc:
+            return {
+                "error": str(exc),
+                "timestamp": utc_now(),
+                "metrics": {},
+                "network": {},
+                "chart_data": {},
+            }
 
     @app.get("/api/metrics/history")
-    def api_metrics_history(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_metrics_history(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         minutes = int(request.query_params.get("minutes", 60))
         minutes = max(1, min(minutes, 1440))
@@ -1429,8 +2575,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if repo is None:
             return {"history": [], "count": 0}
         rows = repo.fetch_all("metrics_snapshots")
-        from datetime import datetime, timezone, timedelta
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        from datetime import datetime, timedelta
+
+        cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
         filtered = []
         for row in rows:
             ts = row.get("timestamp", "")
@@ -1443,31 +2590,39 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"history": filtered, "count": len(filtered), "minutes": minutes}
 
     @app.get("/api/notifications")
-    def api_notifications(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_notifications(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         ctx = api_context_fn()
         rows = storage_rows(app.state.services, "notifications")
         rows = sorted(rows, key=lambda r: str(r.get("timestamp", "")), reverse=True)
-        return {"notification_stats": ctx["notification_stats"], "notifications": rows[:25], "count": len(rows)}
+        return {
+            "notification_stats": ctx["notification_stats"],
+            "notifications": rows[:25],
+            "count": len(rows),
+        }
 
     @app.get("/api/remediations")
-    def api_remediations(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_remediations(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         ctx = api_context_fn()
-        return {"actions": ctx["actions"], "recent_remediations": ctx["recent_remediations"], "count": len(ctx["actions"])}
+        return {
+            "actions": ctx["actions"],
+            "recent_remediations": ctx["recent_remediations"],
+            "count": len(ctx["actions"]),
+        }
 
     @app.get("/api/dashboard")
-    def api_dashboard(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_dashboard(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         return build_dashboard_api_snapshot(collect_dashboard_context(app.state.services))
 
     @app.get("/api/mcp")
-    def api_mcp(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_mcp(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         return build_mcp_context()
 
     @app.get("/api/http-monitoring")
-    def api_http_monitoring(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_http_monitoring(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         monitor = getattr(app.state.services, "http_monitor", None)
         if monitor is not None:
@@ -1475,10 +2630,17 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None:
             return build_monitoring_summary(repo, "http")
-        return {"status": "disabled", "timestamp": utc_now(), "availability_percent": 100.0, "available_count": 0, "total_count": 0, "checks": []}
+        return {
+            "status": "disabled",
+            "timestamp": utc_now(),
+            "availability_percent": 100.0,
+            "available_count": 0,
+            "total_count": 0,
+            "checks": [],
+        }
 
     @app.get("/api/ssl-monitoring")
-    def api_ssl_monitoring(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ssl_monitoring(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         monitor = getattr(app.state.services, "ssl_monitor", None)
         if monitor is not None:
@@ -1486,10 +2648,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None:
             return build_monitoring_summary(repo, "ssl")
-        return {"status": "disabled", "timestamp": utc_now(), "warning_count": 0, "total_count": 0, "checks": []}
+        return {
+            "status": "disabled",
+            "timestamp": utc_now(),
+            "warning_count": 0,
+            "total_count": 0,
+            "checks": [],
+        }
 
     @app.get("/api/tcp-monitoring")
-    def api_tcp_monitoring(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_tcp_monitoring(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         monitor = getattr(app.state.services, "tcp_monitor", None)
         if monitor is not None:
@@ -1497,22 +2665,36 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None:
             return build_monitoring_summary(repo, "tcp")
-        return {"status": "disabled", "timestamp": utc_now(), "availability_percent": 100.0, "reachable_count": 0, "total_count": 0, "checks": []}
+        return {
+            "status": "disabled",
+            "timestamp": utc_now(),
+            "availability_percent": 100.0,
+            "reachable_count": 0,
+            "total_count": 0,
+            "checks": [],
+        }
 
     @app.get("/api/audit-logs")
-    def api_audit_logs(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_audit_logs(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return {"logs": [], "count": 0}
+        if repo is None:
+            return {"logs": [], "count": 0}
         limit = int(request.query_params.get("limit", 100))
         offset = int(request.query_params.get("offset", 0))
         limit = max(1, min(limit, 1000))
         logs = repo.list_audit_logs(limit=limit, offset=offset)
         total = repo.fetch_all("audit_logs", limit=0, offset=0)
-        return {"logs": logs, "count": len(logs), "total": len(total), "limit": limit, "offset": offset}
+        return {
+            "logs": logs,
+            "count": len(logs),
+            "total": len(total),
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/reports")
-    def api_reports(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_reports(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         return build_reports_context(app.state.services)
 
@@ -1522,13 +2704,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return render_report_response(report_type, report_format)
 
     @app.get("/api/monitoring-targets")
-    def api_monitoring_targets(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_monitoring_targets(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return {"targets": [], "count": 0}
+        if repo is None:
+            return {"targets": [], "count": 0}
         targets = repo.list_monitoring_targets(include_inactive=True)
         latest_results = repo.latest_check_results()
-        latest_by_target = {str(r.get("target_id") or r.get("target_name")): r for r in latest_results}
+        latest_by_target = {
+            str(r.get("target_id") or r.get("target_name")): r for r in latest_results
+        }
         enriched = []
         for target in targets:
             key = str(target.get("id"))
@@ -1541,49 +2726,61 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"targets": enriched, "count": len(enriched)}
 
     @app.get("/api/monitoring-targets/{target_id}/history")
-    def api_monitoring_target_history(target_id: int, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_monitoring_target_history(target_id: int, request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return {"history": [], "count": 0}
+        if repo is None:
+            return {"history": [], "count": 0}
         rows = repo.check_history(target_id, limit=100)
         return {"history": rows, "count": len(rows)}
 
     @app.get("/api/integrations")
-    def api_integrations(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_integrations(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         return build_integrations_context(app.state.services)
 
     @app.get("/api/integrations/catalog")
-    def api_integrations_catalog(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_integrations_catalog(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         from src.integrations.marketplace import get_marketplace_catalog
+
         cat = get_marketplace_catalog()
         return {"catalog": cat, "count": len(cat)}
 
     @app.get("/api/integrations/installed")
-    def api_integrations_installed(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_integrations_installed(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         from src.integrations.marketplace import get_installed_integrations
+
         inst = get_installed_integrations()
         return {"integrations": inst, "count": len(inst)}
 
     @app.get("/api/integrations/status")
-    def api_integrations_status(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_integrations_status(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         from src.integrations.status_center import build_integration_status_center
+
         return build_integration_status_center(app.state.services)
 
     @app.get("/api/platform/health")
-    def api_platform_health(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_platform_health(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        from src.integrations.status_center import build_integration_status_center, platform_health_summary
+        from src.integrations.status_center import (
+            build_integration_status_center,
+        )
+
         status = build_integration_status_center(app.state.services)
-        return {"platform_health": status["platform_health"], "integrations": status["integrations"], "timestamp": utc_now()}
+        return {
+            "platform_health": status["platform_health"],
+            "integrations": status["integrations"],
+            "timestamp": utc_now(),
+        }
 
     @app.post("/api/integrations/install")
     async def api_install_integration(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.integrations.marketplace import install_integration
+
         payload = await request.json()
         name = str(payload.get("name", "")).strip().lower()
         config = payload.get("config", {})
@@ -1594,25 +2791,31 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content=f"Unknown integration: {name}", status_code=404)
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "install", "integration", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "install", "integration", name, {}
+            )
         return {"status": "ok", "name": name}
 
     @app.post("/api/integrations/{name}/uninstall")
     def api_uninstall_integration(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.integrations.marketplace import uninstall_integration
+
         removed = uninstall_integration(name)
         if not removed:
             return Response(content=f"Integration not found: {name}", status_code=404)
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "uninstall", "integration", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "uninstall", "integration", name, {}
+            )
         return {"status": "ok", "name": name}
 
     @app.put("/api/integrations/{name}")
     async def api_update_integration(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.integrations.marketplace import install_integration
+
         payload = await request.json()
         config = payload.get("config", {})
         provider = install_integration(name, config)
@@ -1620,7 +2823,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content=f"Unknown integration: {name}", status_code=404)
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "update", "integration", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "update", "integration", name, {}
+            )
         return {"status": "ok", "name": name}
 
     @app.post("/api/integrations/{name}/health")
@@ -1628,17 +2833,22 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         require_role(*VIEWER_ROLES)(request)
         from src.integrations.base import get_integration
         from src.integrations.marketplace import get_installed_integrations
+
         installed = get_installed_integrations()
         config = None
         for inst in installed:
             if inst.get("integration_id") == name:
-                config = {"credentials": inst.get("credentials", {}), "settings": inst.get("settings", {})}
+                config = {
+                    "credentials": inst.get("credentials", {}),
+                    "settings": inst.get("settings", {}),
+                }
                 break
         provider = get_integration(name, config or {})
         if provider is None:
             return Response(content=f"Unknown integration: {name}", status_code=404)
         try:
             import asyncio
+
             result = asyncio.run(provider.health_check())
             return {"status": "ok", "name": name, "health": result}
         except Exception as exc:
@@ -1648,14 +2858,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     def api_integration_test(name: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         from src.integrations.status_center import test_integration_connection
+
         return test_integration_connection(app.state.services, name)
 
     @app.get("/api/system-info")
-    def api_system_info(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_system_info(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         docker_version = None
         try:
             import docker
+
             client = docker.from_env(timeout=5)
             docker_version = client.version().get("Version", "unknown")
         except Exception:
@@ -1663,18 +2875,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         uptime_seconds = None
         try:
             import psutil
+
             uptime_seconds = int(time.time() - psutil.boot_time())
         except Exception:
             uptime_seconds = None
         return {
             "os": f"{platform.system()} {platform.release()}",
-            "hostname": socket.gethostname(),
             "uptime_seconds": uptime_seconds,
             "docker_version": docker_version,
         }
 
     @app.get("/api/settings")
-    def api_get_settings(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_get_settings(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -1686,10 +2898,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     async def api_acknowledge_incident(incident_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         try:
-            incident = app.state.services.incident_manager.acknowledge_incident(incident_id, actor=user.email)
+            incident = app.state.services.incident_manager.acknowledge_incident(
+                incident_id, actor=user.email
+            )
         except KeyError:
             return Response(content="Incident not found", status_code=404)
-        app.state.services.platform_repository.record_audit_log(user.email, "acknowledge", "incident", incident_id, {})
+        app.state.services.platform_repository.record_audit_log(
+            user.email, "acknowledge", "incident", incident_id, {}
+        )
         return incident.to_dict()
 
     @app.post("/api/incidents/{incident_id}/resolve")
@@ -1702,20 +2918,28 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         except Exception:
             notes = None
         try:
-            incident = app.state.services.incident_manager.resolve_incident(incident_id, actor=user.email, resolution_notes=notes)
+            incident = app.state.services.incident_manager.resolve_incident(
+                incident_id, actor=user.email, resolution_notes=notes
+            )
         except KeyError:
             return Response(content="Incident not found", status_code=404)
-        app.state.services.platform_repository.record_audit_log(user.email, "resolve", "incident", incident_id, {"resolution_notes": notes})
+        app.state.services.platform_repository.record_audit_log(
+            user.email, "resolve", "incident", incident_id, {"resolution_notes": notes}
+        )
         return incident.to_dict()
 
     @app.post("/api/incidents/{incident_id}/reopen")
     def api_reopen_incident(incident_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         try:
-            incident = app.state.services.incident_manager.reopen_incident(incident_id, actor=user.email)
+            incident = app.state.services.incident_manager.reopen_incident(
+                incident_id, actor=user.email
+            )
         except KeyError:
             return Response(content="Incident not found", status_code=404)
-        app.state.services.platform_repository.record_audit_log(user.email, "reopen", "incident", incident_id, {})
+        app.state.services.platform_repository.record_audit_log(
+            user.email, "reopen", "incident", incident_id, {}
+        )
         return incident.to_dict()
 
     # ---- Operator: container actions ----
@@ -1725,10 +2949,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         scanner = app.state.services.docker_scanner
         result = scanner.start_container(name)
         if result.get("status") == "error":
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_start", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_start", "container", name, {}
+            )
         return result
 
     @app.post("/api/containers/{name}/stop")
@@ -1737,10 +2965,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         scanner = app.state.services.docker_scanner
         result = scanner.stop_container(name)
         if result.get("status") == "error":
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_stop", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_stop", "container", name, {}
+            )
         return result
 
     @app.post("/api/containers/{name}/restart")
@@ -1749,10 +2981,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         scanner = app.state.services.docker_scanner
         result = scanner.restart_container(name)
         if result.get("status") == "error":
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_restart", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_restart", "container", name, {}
+            )
         return result
 
     @app.get("/api/containers/{name}/logs")
@@ -1762,7 +2998,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         scanner = app.state.services.docker_scanner
         result = scanner.get_container_logs(name, tail=tail)
         if result.get("status") == "error":
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         return result
 
     @app.get("/api/containers/{name}/inspect")
@@ -1771,31 +3009,47 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         scanner = app.state.services.docker_scanner
         try:
             import docker
+
             client = docker.from_env(timeout=5)
             container = client.containers.get(name)
             attrs = container.attrs
             return {"status": "ok", "container": name, "inspect": attrs}
         except docker.errors.NotFound:
-            return Response(content=json.dumps({"status": "error", "message": "Container not found"}), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps({"status": "error", "message": "Container not found"}),
+                status_code=404,
+                media_type="application/json",
+            )
         except docker.errors.DockerException as exc:
             get_logger(__name__).warning("Docker inspect error: %s", exc)
-            return Response(content=json.dumps({"status": "error", "message": "Container inspection failed"}), status_code=503, media_type="application/json")
+            return Response(
+                content=json.dumps({"status": "error", "message": "Container inspection failed"}),
+                status_code=503,
+                media_type="application/json",
+            )
 
     @app.get("/api/observability")
     def api_observability(request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        from src.observability import get_tracker
-        return get_tracker().get_summary()
+        try:
+            from src.observability import get_tracker
+
+            return get_tracker().get_summary()
+        except Exception as exc:
+            return {"error": str(exc), "summary": {}}
 
     # ---- Operator: monitoring targets ----
     @app.post("/api/monitoring-targets")
     async def api_create_monitoring_target(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return Response(content="Platform database unavailable", status_code=503)
+        if repo is None:
+            return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            target = repo.create_monitoring_target(payload, actor=user.email if user else "anonymous")
+            target = repo.create_monitoring_target(
+                payload, actor=user.email if user else "anonymous"
+            )
             run_monitoring_once()
             return target
         except ValueError as exc:
@@ -1805,11 +3059,15 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     async def api_update_monitoring_target(target_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return Response(content="Platform database unavailable", status_code=503)
+        if repo is None:
+            return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            target = repo.update_monitoring_target(target_id, payload, actor=user.email if user else "anonymous")
-            if target is None: return Response(content="Monitoring target not found", status_code=404)
+            target = repo.update_monitoring_target(
+                target_id, payload, actor=user.email if user else "anonymous"
+            )
+            if target is None:
+                return Response(content="Monitoring target not found", status_code=404)
             run_monitoring_once()
             return target
         except ValueError as exc:
@@ -1819,23 +3077,29 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     def api_delete_monitoring_target(target_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         repo = app.state.services.platform_repository
-        if repo is None: return Response(content="Platform database unavailable", status_code=503)
-        deleted = repo.delete_monitoring_target(target_id, actor=user.email if user else "anonymous")
-        if not deleted: return Response(content="Monitoring target not found", status_code=404)
+        if repo is None:
+            return Response(content="Platform database unavailable", status_code=503)
+        deleted = repo.delete_monitoring_target(
+            target_id, actor=user.email if user else "anonymous"
+        )
+        if not deleted:
+            return Response(content="Monitoring target not found", status_code=404)
         return {"status": "ok"}
 
     @app.post("/api/monitoring-targets/{target_id}/run")
     def api_run_monitoring_target(target_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         engine = getattr(app.state.services, "monitoring_engine", None)
-        if engine is None: return Response(content="Monitoring engine unavailable", status_code=503)
+        if engine is None:
+            return Response(content="Monitoring engine unavailable", status_code=503)
         result = engine.run_target(target_id, actor=user.email if user else "anonymous")
-        if result is None: return Response(content="Monitoring target not found", status_code=404)
+        if result is None:
+            return Response(content="Monitoring target not found", status_code=404)
         return result
 
     # ---- Operator: notification channels ----
     @app.get("/api/notification-channels")
-    def api_list_notification_channels(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_notification_channels(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -1862,7 +3126,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            channel = repo.create_notification_channel(payload, actor=user.email if user else "anonymous")
+            channel = repo.create_notification_channel(
+                payload, actor=user.email if user else "anonymous"
+            )
             return channel
         except ValueError as exc:
             return Response(content=str(exc), status_code=400)
@@ -1875,7 +3141,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            channel = repo.update_notification_channel(channel_id, payload, actor=user.email if user else "anonymous")
+            channel = repo.update_notification_channel(
+                channel_id, payload, actor=user.email if user else "anonymous"
+            )
             if channel is None:
                 return Response(content="Notification channel not found", status_code=404)
             return channel
@@ -1888,7 +3156,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = app.state.services.platform_repository
         if repo is None:
             return Response(content="Platform database unavailable", status_code=503)
-        deleted = repo.delete_notification_channel(channel_id, actor=user.email if user else "anonymous")
+        deleted = repo.delete_notification_channel(
+            channel_id, actor=user.email if user else "anonymous"
+        )
         if not deleted:
             return Response(content="Notification channel not found", status_code=404)
         return {"status": "ok"}
@@ -1902,36 +3172,59 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         result = {"status": "error", "message": "Unsupported channel type or no channel configured"}
         if repo is not None:
             channels = repo.list_notification_channels()
-            matches = [c for c in channels if str(c.get("channel_type", "")).lower() == channel_type]
+            matches = [
+                c for c in channels if str(c.get("channel_type", "")).lower() == channel_type
+            ]
             if matches:
                 config = matches[0].get("config", {})
                 return await _send_test_notification(channel_type, config, test_message)
         try:
             config_obj = Config.load()
             if channel_type == "email" and config_obj.smtp.enabled:
-                return await _send_test_notification("email", {
-                    "host": config_obj.smtp.host,
-                    "port": config_obj.smtp.port,
-                    "username": config_obj.smtp.username,
-                    "password": config_obj.smtp.password,
-                    "recipient": config_obj.smtp.recipient,
-                    "sender": config_obj.smtp.username,
-                }, test_message)
+                return await _send_test_notification(
+                    "email",
+                    {
+                        "host": config_obj.smtp.host,
+                        "port": config_obj.smtp.port,
+                        "username": config_obj.smtp.username,
+                        "password": config_obj.smtp.password,
+                        "recipient": config_obj.smtp.recipient,
+                        "sender": config_obj.smtp.username,
+                    },
+                    test_message,
+                )
             if channel_type == "slack" and config_obj.notifications.slack.enabled:
-                return await _send_test_notification("slack", {"webhook_url": config_obj.notifications.slack.webhook_url}, test_message)
+                return await _send_test_notification(
+                    "slack",
+                    {"webhook_url": config_obj.notifications.slack.webhook_url},
+                    test_message,
+                )
             if channel_type == "discord" and config_obj.notifications.discord.enabled:
-                return await _send_test_notification("discord", {"webhook_url": config_obj.notifications.discord.webhook_url}, test_message)
+                return await _send_test_notification(
+                    "discord",
+                    {"webhook_url": config_obj.notifications.discord.webhook_url},
+                    test_message,
+                )
         except Exception:
             pass
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "test_notification", "notification_channel", channel_type, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous",
+                "test_notification",
+                "notification_channel",
+                channel_type,
+                {},
+            )
         return result
 
-    async def _send_test_notification(channel_type: str, config: Dict[str, Any], test_message: str) -> Any:
+    async def _send_test_notification(
+        channel_type: str, config: dict[str, Any], test_message: str
+    ) -> Any:
         if channel_type == "email":
             try:
                 from src.notifications.email import EmailProvider
+
                 provider = EmailProvider(
                     smtp_host=str(config.get("host", "")),
                     smtp_port=int(config.get("port", 587)),
@@ -1954,9 +3247,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 if not webhook_url:
                     return {"status": "error", "message": "Webhook URL not configured"}
                 import json as _json
-                from urllib.request import Request as _Request, urlopen as _urlopen
-                payload = _json.dumps({"text": test_message} if channel_type == "slack" else {"content": test_message}).encode("utf-8")
-                req = _Request(webhook_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                from urllib.request import Request as _Request
+                from urllib.request import urlopen as _urlopen
+
+                payload = _json.dumps(
+                    {"text": test_message} if channel_type == "slack" else {"content": test_message}
+                ).encode("utf-8")
+                req = _Request(
+                    webhook_url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
                 with _urlopen(req, timeout=10):
                     return {"status": "ok", "message": "Test sent"}
             except Exception as exc:
@@ -1973,7 +3275,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             payload = await request.json()
             settings = repo.update_settings(payload)
-            repo.record_audit_log(user.email, "update", "settings", "all", {"keys": list(payload.keys())})
+            repo.record_audit_log(
+                user.email, "update", "settings", "all", {"keys": list(payload.keys())}
+            )
             return {"settings": settings, "status": "ok"}
         except ValueError as exc:
             return Response(content=str(exc), status_code=400)
@@ -1992,12 +3296,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             except KeyError:
                 return Response(content="Incident not found", status_code=404)
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "delete", "incident", incident_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "delete", "incident", incident_id, {}
+            )
         return {"status": "ok"}
 
     # ---- Admin: user management ----
     @app.get("/api/users")
-    def api_list_users(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_users(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2005,34 +3311,40 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         rows = repo.fetch_all("users")
         sanitized = []
         for row in rows:
-            sanitized.append({
-                "id": row.get("id"),
-                "email": row.get("email"),
-                "role": row.get("role", "viewer"),
-                "is_active": bool(row.get("is_active", 0)),
-                "is_superuser": bool(row.get("is_superuser", 0)),
-                "is_verified": bool(row.get("is_verified", 0)),
-                "created_at": row.get("created_at"),
-            })
+            sanitized.append(
+                {
+                    "id": row.get("id"),
+                    "email": row.get("email"),
+                    "role": row.get("role", "viewer"),
+                    "is_active": bool(row.get("is_active", 0)),
+                    "is_superuser": bool(row.get("is_superuser", 0)),
+                    "is_verified": bool(row.get("is_verified", 0)),
+                    "created_at": row.get("created_at"),
+                }
+            )
         return {"users": sanitized, "count": len(sanitized)}
 
     @app.put("/api/users/{user_id}/role")
     def api_update_user_role(user_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*ADMIN_ROLES)(request)
         from fastapi import HTTPException
+
         role = request.query_params.get("role", "")
-        from src.auth import Role
         normalized_role = Role.from_str(role).value
         if role not in Role.valid_roles() and normalized_role not in Role.valid_roles():
-            raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(Role.valid_roles())}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid role. Must be one of: {', '.join(Role.valid_roles())}",
+            )
         store = app.state.auth_manager.user_store
         try:
-            from src.auth import _hashlib
             with store._connect() as conn:
                 conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user_id))
-        except Exception as exc:
+        except Exception:
             raise HTTPException(status_code=500, detail="Failed to update user role")
-        app.state.services.platform_repository.record_audit_log(user.email, "update_role", "user", str(user_id), {"role": normalized_role})
+        app.state.services.platform_repository.record_audit_log(
+            user.email, "update_role", "user", str(user_id), {"role": normalized_role}
+        )
         return {"status": "ok", "user_id": user_id, "role": normalized_role}
 
     @app.post("/api/users/{user_id}/deactivate")
@@ -2046,12 +3358,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="Cannot deactivate superuser", status_code=400)
         store.deactivate_user(user_id)
         app.state.auth_manager.blacklist.revoke_all_for_user(user_id, app.state.auth_manager)
-        app.state.services.platform_repository.record_audit_log(admin_user.email, "deactivate", "user", str(user_id), {})
+        app.state.services.platform_repository.record_audit_log(
+            admin_user.email, "deactivate", "user", str(user_id), {}
+        )
         return {"status": "ok"}
 
     # ---- Admin: API keys ----
     @app.get("/api/api-keys")
-    def api_list_api_keys(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_api_keys(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2059,16 +3373,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         keys = repo.list_api_keys()
         sanitized = []
         for k in keys:
-            sanitized.append({
-                "id": k.get("id"),
-                "name": k.get("name"),
-                "key_prefix": k.get("key_prefix"),
-                "role": k.get("role", "viewer"),
-                "is_active": bool(k.get("is_active", False)),
-                "created_at": k.get("created_at"),
-                "last_used_at": k.get("last_used_at"),
-                "request_count": k.get("request_count", 0),
-            })
+            sanitized.append(
+                {
+                    "id": k.get("id"),
+                    "name": k.get("name"),
+                    "key_prefix": k.get("key_prefix"),
+                    "role": k.get("role", "viewer"),
+                    "is_active": bool(k.get("is_active", False)),
+                    "created_at": k.get("created_at"),
+                    "last_used_at": k.get("last_used_at"),
+                    "request_count": k.get("request_count", 0),
+                }
+            )
         return {"keys": sanitized, "count": len(sanitized)}
 
     @app.post("/api/api-keys")
@@ -2085,12 +3401,17 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not name:
             return Response(content="name is required", status_code=400)
         role = str(payload.get("role", "read_only")).strip().lower()
-        from src.auth import Role
         normalized_role = Role.from_str(role).value
         from src.auth import generate_api_key
+
         full_key, key_hash, key_prefix = generate_api_key()
         repo.create_api_key(name, key_hash, key_prefix, normalized_role, actor=user.email)
-        return {"name": name, "api_key": full_key, "key_prefix": key_prefix, "role": normalized_role}
+        return {
+            "name": name,
+            "api_key": full_key,
+            "key_prefix": key_prefix,
+            "role": normalized_role,
+        }
 
     @app.put("/api/api-keys/{key_id}")
     async def api_update_api_key(key_id: int, request: FastAPIRequest) -> Any:
@@ -2120,7 +3441,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Admin: alert rules ----
     @app.get("/api/alert-rules")
-    def api_list_alert_rules(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_alert_rules(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2182,15 +3503,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         role = str(payload.get("role", "read_only")).strip().lower()
         if not email:
             return Response(content="email is required", status_code=400)
-        from src.auth import Role
         normalized_role = Role.from_str(role).value
         token = secrets.token_urlsafe(32)
         org_id = payload.get("org_id")
-        invite = repo.create_invite(email=email, token=token, role=normalized_role, invited_by=user.email, org_id=org_id)
+        invite = repo.create_invite(
+            email=email, token=token, role=normalized_role, invited_by=user.email, org_id=org_id
+        )
         return {"invite": invite, "invite_url": f"/accept-invite?token={token}"}
 
     @app.get("/api/invites")
-    def api_list_invites(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_invites(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2199,6 +3521,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"invites": invites, "count": len(invites)}
 
     @app.post("/api/invites/accept")
+    @limiter.limit("5/minute")
     async def api_accept_invite(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -2218,13 +3541,22 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         try:
             user, access_token, refresh_token = auth_mgr.register(invite["email"], password)
             from src.auth import Role
+
             normalized_role = Role.from_str(invite.get("role", "read_only")).value
             with auth_mgr.user_store._connect() as conn:
                 conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user.id))
             repo.accept_invite(token)
-            repo.record_audit_log(user.email, "accept_invite", "user", user.email, {"invited_role": normalized_role})
+            repo.record_audit_log(
+                user.email, "accept_invite", "user", user.email, {"invited_role": normalized_role}
+            )
             response = Response(
-                content=json.dumps({"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}),
+                content=json.dumps(
+                    {
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                        "token_type": "bearer",
+                    }
+                ),
                 media_type="application/json",
             )
             _set_auth_cookie(response, access_token, auth_mgr.token_ttl_seconds)
@@ -2234,6 +3566,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Enterprise: Password Reset ----
     @app.post("/api/password-reset/request")
+    @limiter.limit("3/minute")
     async def api_request_password_reset(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -2253,6 +3586,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"status": "ok", "message": "If the email exists, a reset link has been sent"}
 
     @app.post("/api/password-reset/confirm")
+    @limiter.limit("5/minute")
     async def api_confirm_password_reset(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -2279,9 +3613,10 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Enterprise: Secrets Management ----
     @app.get("/api/secrets")
-    def api_list_secrets(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_secrets(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*OPERATOR_ROLES)(request)
         from src.secrets import SecretManager
+
         mgr = SecretManager(repo=app.state.services.platform_repository)
         secrets = mgr.list_secrets()
         return {"secrets": secrets, "count": len(secrets)}
@@ -2302,6 +3637,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not name or not value:
             return Response(content="name and value are required", status_code=400)
         from src.secrets import SecretManager
+
         mgr = SecretManager(repo=repo)
         result = mgr.store_secret(name, value, category, actor=user.email)
         return {"status": "ok", "secret": result}
@@ -2313,6 +3649,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if repo is None:
             return Response(content="Platform database unavailable", status_code=503)
         from src.secrets import SecretManager
+
         mgr = SecretManager(repo=repo)
         mgr.delete_secret(name, actor=user.email)
         return {"status": "ok"}
@@ -2330,7 +3667,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Enterprise: Enhanced Audit Logs ----
     @app.get("/api/audit-logs/filter")
-    def api_audit_logs_filtered(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_audit_logs_filtered(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*AUDITOR_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2343,15 +3680,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         execution_id = request.query_params.get("execution_id") or None
         limit = max(1, min(limit, 1000))
         logs = repo.list_audit_logs_enhanced(
-            limit=limit, offset=offset,
-            actor_filter=actor, action_filter=action,
-            resource_type_filter=resource_type, execution_id_filter=execution_id,
+            limit=limit,
+            offset=offset,
+            actor_filter=actor,
+            action_filter=action,
+            resource_type_filter=resource_type,
+            execution_id_filter=execution_id,
         )
         return {"logs": logs, "count": len(logs), "limit": limit, "offset": offset}
 
     # ---- Enterprise: Approval Workflows ----
     @app.get("/api/approvals")
-    def api_list_approvals(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_approvals(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*OPERATOR_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2375,9 +3715,41 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if decision not in ("approved", "rejected"):
             return Response(content="decision must be 'approved' or 'rejected'", status_code=400)
         comment = str(payload.get("comment", "")).strip()
-        result = repo.respond_approval(approval_id, decision, reviewed_by=user.email, comment=comment)
+        existing = (
+            repo.get_approval_request(approval_id)
+            if hasattr(repo, "get_approval_request")
+            else None
+        )
+        result = repo.respond_approval(
+            approval_id, decision, reviewed_by=user.email, comment=comment
+        )
         if result is None:
             return Response(content="Approval request not found", status_code=404)
+        if existing and existing.get("request_type") == "incident_diagnostic_remediation":
+            details = existing.get("details") or {}
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except json.JSONDecodeError:
+                    details = {}
+            incident_id = (
+                str(details.get("incident_id", "")).strip() if isinstance(details, dict) else ""
+            )
+            if incident_id:
+                incident_manager = app.state.services.incident_manager
+                try:
+                    incident = incident_manager._get_required(incident_id)
+                    if incident.remediation_approval_status == "pending":
+                        if decision == "approved":
+                            incident_manager.approve_remediation(incident_id, user.email)
+                        else:
+                            incident_manager.reject_remediation(
+                                incident_id,
+                                user.email,
+                                comment or "Rejected from approval queue",
+                            )
+                except KeyError:
+                    pass
         return result
 
     # ---- Enterprise: Policy Management ----
@@ -2431,7 +3803,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"status": "ok"}
 
     @app.get("/api/policies")
-    def api_list_policies(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_policies(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
@@ -2441,10 +3813,10 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Enterprise: System Administration ----
     @app.get("/api/admin/diagnostics")
-    def api_admin_diagnostics(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_admin_diagnostics(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
-        diagnostics: Dict[str, Any] = {
+        diagnostics: dict[str, Any] = {
             "timestamp": utc_now(),
             "database": repo.health_check() if repo else {"status": "unavailable"},
             "system": {},
@@ -2454,6 +3826,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         }
         try:
             import psutil
+
             diagnostics["system"] = {
                 "cpu_percent": psutil.cpu_percent(interval=0.5),
                 "memory_percent": psutil.virtual_memory().percent,
@@ -2464,6 +3837,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             pass
         try:
             import docker
+
             client = docker.from_env(timeout=3)
             info = client.info()
             diagnostics["docker"] = {
@@ -2484,21 +3858,23 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return diagnostics
 
     @app.get("/api/admin/health")
-    def api_admin_health(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_admin_health(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
-        checks: Dict[str, Any] = {
+        checks: dict[str, Any] = {
             "timestamp": utc_now(),
             "database": repo.health_check() if repo else {"status": "unavailable"},
         }
         try:
             import docker
+
             client = docker.from_env(timeout=3)
             checks["docker"] = {"status": "connected", "ping": client.ping()}
         except Exception:
             checks["docker"] = {"status": "disconnected"}
         try:
             import psutil
+
             checks["disk"] = {
                 "status": "ok" if psutil.disk_usage("/").percent < 90 else "warning",
                 "usage_percent": psutil.disk_usage("/").percent,
@@ -2524,6 +3900,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         include_knowledge = bool(payload.get("include_knowledge", True))
         label = str(payload.get("label", "")).strip()
         from src.backup import BackupManager
+
         bm = BackupManager(repo=repo)
         result = bm.export_backup(tables=tables, include_knowledge=include_knowledge, label=label)
         if repo:
@@ -2551,25 +3928,35 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         tables = payload.get("tables")
         restore_knowledge = bool(payload.get("restore_knowledge", True))
         from src.backup import BackupManager
+
         bm = BackupManager(repo=repo)
-        result = bm.restore_backup(file_path, tables=tables, restore_knowledge=restore_knowledge, actor=user.email)
+        result = bm.restore_backup(
+            file_path, tables=tables, restore_knowledge=restore_knowledge, actor=user.email
+        )
         return result
 
     @app.get("/api/backup/list")
-    def api_backup_list(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_backup_list(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
         stored = repo.list_backup_records(limit=50) if repo else []
         from src.backup import BackupManager
+
         bm = BackupManager(repo=repo)
         files = bm.list_backups()
-        return {"files": files, "records": stored, "file_count": len(files), "record_count": len(stored)}
+        return {
+            "files": files,
+            "records": stored,
+            "file_count": len(files),
+            "record_count": len(stored),
+        }
 
     @app.delete("/api/backup/{file_path:path}")
     def api_backup_delete(file_path: str, request: FastAPIRequest) -> Any:
         user = require_role(*ADMIN_ROLES)(request)
         repo = app.state.services.platform_repository
         from src.backup import BackupManager
+
         bm = BackupManager(repo=repo)
         if not bm.delete_backup(file_path):
             return Response(content="Backup file not found", status_code=404)
@@ -2579,7 +3966,10 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Compliance API ----
     from src.compliance.engine import ComplianceEngine
-    compliance_engine = ComplianceEngine(repo=getattr(app.state.services, "platform_repository", None))
+
+    compliance_engine = ComplianceEngine(
+        repo=getattr(app.state.services, "platform_repository", None)
+    )
     app.state.compliance_engine = compliance_engine
 
     @app.get("/api/compliance/frameworks")
@@ -2636,7 +4026,10 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         require_role(*VIEWER_ROLES)(request)
         engine: ComplianceEngine = request.app.state.compliance_engine
         from src.compliance.evidence import EvidenceCollector
-        collector = EvidenceCollector(repo=getattr(request.app.state.services, "platform_repository", None))
+
+        collector = EvidenceCollector(
+            repo=getattr(request.app.state.services, "platform_repository", None)
+        )
         report_format = request.query_params.get("format", "json")
         try:
             report = collector.generate_report(framework_id, format=report_format)
@@ -2648,7 +4041,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(
                 content=report,
                 media_type=media_type,
-                headers={"Content-Disposition": f"attachment; filename=compliance_{framework_id}.{report_format}"},
+                headers={
+                    "Content-Disposition": f"attachment; filename=compliance_{framework_id}.{report_format}"
+                },
             )
         except ValueError as exc:
             return Response(content=str(exc), status_code=404)
@@ -2665,11 +4060,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             if not _extract_token(request):
                 raise HTTPException(status_code=401, detail="Authentication required for /metrics")
         from src.prometheus_exporter import PrometheusExporter
+
         payload, content_type = PrometheusExporter(app.state.services).render()
         return Response(content=payload, media_type=content_type)
 
     # ---- AI Intelligence Engine ----
-    _ai_pending_approvals: Dict[str, Dict[str, Any]] = {}
+    _ai_pending_approvals: dict[str, dict[str, Any]] = {}
 
     @app.post("/api/ai/chat")
     async def api_ai_chat(request: FastAPIRequest) -> Any:
@@ -2684,11 +4080,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_chat
         from src.intelligence.history import save_workflow
+
         try:
             result = run_chat(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI chat error: %s", exc)
-            return Response(content=json.dumps({"error": "AI chat processing failed"}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "AI chat processing failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
         if repo is not None:
             try:
                 save_workflow(
@@ -2708,7 +4109,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                     provider_used=result.get("provider_used", ""),
                     model_used=result.get("model_used", ""),
                     execution_duration_ms=result.get("execution_duration_ms", 0.0),
-                    tools_used=[s.get("node", "") for s in result.get("steps", []) if isinstance(s, dict)],
+                    tools_used=[
+                        s.get("node", "") for s in result.get("steps", []) if isinstance(s, dict)
+                    ],
                     plan_text=result.get("answer", "")[:200],
                 )
             except Exception as exc:
@@ -2728,11 +4131,16 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_analyze
         from src.intelligence.history import save_workflow
+
         try:
             result = run_analyze(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI analyze error: %s", exc)
-            return Response(content=json.dumps({"error": "AI analysis failed"}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "AI analysis failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
         if repo is not None:
             try:
                 save_workflow(
@@ -2771,15 +4179,20 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="request is required", status_code=400)
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_plan
+
         try:
             result = run_plan(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI plan error: %s", exc)
-            return Response(content=json.dumps({"error": "AI planning failed"}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "AI planning failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
         return result
 
     @app.get("/api/ai/history")
-    def api_ai_history(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_history(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is None:
@@ -2787,7 +4200,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         limit = int(request.query_params.get("limit", 20))
         offset = int(request.query_params.get("offset", 0))
         limit = max(1, min(limit, 100))
-        from src.intelligence.history import list_history, get_history_count
+        from src.intelligence.history import get_history_count, list_history
+
         try:
             rows = list_history(repo, limit=limit, offset=offset)
             total = get_history_count(repo)
@@ -2796,16 +4210,17 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return {"history": [], "count": 0, "error": str(exc)}
 
     @app.get("/api/ai/workflows")
-    def api_ai_workflows(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_workflows(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             from src.intelligence.graph import get_workflows
+
             return get_workflows()
         except Exception as exc:
             return {"error": str(exc)}
 
     @app.get("/api/ai/executions")
-    def api_ai_executions(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_executions(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is None:
@@ -2814,7 +4229,8 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         offset = int(request.query_params.get("offset", 0))
         limit = max(1, min(limit, 100))
         try:
-            from src.intelligence.history import list_history, get_history_count, get_history_stats
+            from src.intelligence.history import get_history_count, get_history_stats, list_history
+
             rows = list_history(repo, limit=limit, offset=offset)
             total = get_history_count(repo)
             stats = get_history_stats(repo)
@@ -2823,15 +4239,17 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return {"executions": [], "count": 0, "stats": {}, "error": str(exc)}
 
     @app.get("/api/ai/memory")
-    def api_ai_memory(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_memory(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         query = request.query_params.get("query", "")
         memory_type = request.query_params.get("type", "all")
         limit = int(request.query_params.get("limit", 10))
         try:
-            from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
             import os
-            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+            from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+
+            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
             store = SQLiteMemoryStore(db_path=db_path)
             if not query:
                 if memory_type == "conversations":
@@ -2857,15 +4275,22 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 result = store.search_remediations(query, limit)
             else:
                 result = store.search_all(query, limit)
-            return {"entries": result.entries, "count": result.count, "total": result.total, "type": memory_type, "query": query}
+            return {
+                "entries": result.entries,
+                "count": result.count,
+                "total": result.total,
+                "type": memory_type,
+                "query": query,
+            }
         except Exception as exc:
             return {"entries": [], "count": 0, "error": str(exc)}
 
     @app.get("/api/ai/tools")
-    def api_ai_tools(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_tools(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
-            from src.intelligence.tools import list_tool_definitions, TOOL_REGISTRY
+            from src.intelligence.tools import list_tool_definitions
+
             definitions = list_tool_definitions()
             return {"tools": definitions, "count": len(definitions)}
         except Exception as exc:
@@ -2879,11 +4304,12 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         nonlocal _skill_engine
         if _skill_engine is None:
             from src.skills.engine import create_default_engine
+
             _skill_engine = create_default_engine()
         return _skill_engine
 
     @app.get("/api/skills")
-    def api_list_skills(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_skills(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             engine = _get_skill_engine()
@@ -2909,7 +4335,11 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             result = await engine.execute_skill(skill_id, context)
             return result
         except Exception as exc:
-            return Response(content=json.dumps({"status": "error", "error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"status": "error", "error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.post("/api/skills/auto-select")
     async def api_auto_select_skills(request: FastAPIRequest) -> Any:
@@ -2946,7 +4376,11 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             results = await engine.execute_pipeline(skill_ids, context)
             return {"results": results, "count": len(results)}
         except Exception as exc:
-            return Response(content=json.dumps({"status": "error", "error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"status": "error", "error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.post("/api/ai/approve")
     async def api_ai_approve(request: FastAPIRequest) -> Any:
@@ -2958,10 +4392,15 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         approval_id = str(payload.get("approval_id", "")).strip()
         if not approval_id:
             return Response(content="approval_id is required", status_code=400)
-        app.state._ai_pending_approvals[approval_id] = {"status": "approved", "approved_at": utc_now()}
+        app.state._ai_pending_approvals[approval_id] = {
+            "status": "approved",
+            "approved_at": utc_now(),
+        }
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "approve", "ai_approval", approval_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "approve", "ai_approval", approval_id, {}
+            )
         return {"status": "approved", "approval_id": approval_id}
 
     @app.post("/api/ai/reject")
@@ -2974,26 +4413,37 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         approval_id = str(payload.get("approval_id", "")).strip()
         if not approval_id:
             return Response(content="approval_id is required", status_code=400)
-        app.state._ai_pending_approvals[approval_id] = {"status": "rejected", "rejected_at": utc_now()}
+        app.state._ai_pending_approvals[approval_id] = {
+            "status": "rejected",
+            "rejected_at": utc_now(),
+        }
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "reject", "ai_approval", approval_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "reject", "ai_approval", approval_id, {}
+            )
         return {"status": "rejected", "approval_id": approval_id}
 
     @app.get("/api/ai/pending-approvals")
-    def api_ai_pending_approvals(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_pending_approvals(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        pending = {k: v for k, v in app.state._ai_pending_approvals.items() if v.get("status") == "pending"}
+        pending = {
+            k: v for k, v in app.state._ai_pending_approvals.items() if v.get("status") == "pending"
+        }
         return {"approvals": pending, "count": len(pending)}
 
     # ---- Sprint 9: Runbooks, Workflows, Timeline, Risk, Policies ----
     @app.get("/api/runbooks")
-    def api_list_runbooks(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_runbooks(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             from src.intelligence.runbooks.registry import get_registry
+
             registry = get_registry()
-            return {"runbooks": [r.to_dict() for r in registry.list_all()], "count": registry.count()}
+            return {
+                "runbooks": [r.to_dict() for r in registry.list_all()],
+                "count": registry.count(),
+            }
         except Exception as exc:
             return {"runbooks": [], "count": 0, "error": str(exc)}
 
@@ -3008,8 +4458,9 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         if not runbook_name:
             return Response(content="runbook is required", status_code=400)
         try:
-            from src.intelligence.runbooks.registry import get_registry
             from src.intelligence.runbooks.engine import RunbookEngine
+            from src.intelligence.runbooks.registry import get_registry
+
             registry = get_registry()
             engine = RunbookEngine(registry)
             result = engine.execute(runbook_name)
@@ -3029,14 +4480,25 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content="workflow is required", status_code=400)
         try:
             from src.intelligence.graph import run_workflow
+
             repo = getattr(app.state.services, "platform_repository", None)
             result = run_workflow(workflow_name, repo=repo)
-            return {"status": "completed", "confidence": result.get("confidence", 0.0), "goal_achieved": result.get("goal_achieved", False), "workflow_triggered": result.get("workflow_triggered", ""), "runbook": result.get("current_runbook", "")}
+            return {
+                "status": "completed",
+                "confidence": result.get("confidence", 0.0),
+                "goal_achieved": result.get("goal_achieved", False),
+                "workflow_triggered": result.get("workflow_triggered", ""),
+                "runbook": result.get("current_runbook", ""),
+            }
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/workflows/history")
-    def api_workflow_history(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workflow_history(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is None:
@@ -3044,47 +4506,68 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         limit = int(request.query_params.get("limit", 20))
         try:
             from src.intelligence.history import list_history
+
             rows = list_history(repo, limit=limit)
             return {"history": rows, "count": len(rows)}
         except Exception as exc:
             return {"history": [], "count": 0, "error": str(exc)}
 
     @app.get("/api/ai/timeline")
-    def api_ai_timeline(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_timeline(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
-            from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
             import os
-            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+            from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+
+            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
             store = SQLiteMemoryStore(db_path=db_path)
             conversations = store.get_recent_conversations(limit=20)
             learnings = store.get_recent_learnings(limit=20)
             timeline = []
             for c in conversations:
-                timeline.append({"type": "conversation", "timestamp": c.get("created_at", ""), "summary": c.get("request", "")[:120], "confidence": c.get("confidence", 0.0), "goal_achieved": bool(c.get("goal_achieved", 0))})
+                timeline.append(
+                    {
+                        "type": "conversation",
+                        "timestamp": c.get("created_at", ""),
+                        "summary": c.get("request", "")[:120],
+                        "confidence": c.get("confidence", 0.0),
+                        "goal_achieved": bool(c.get("goal_achieved", 0)),
+                    }
+                )
             for l in learnings:
-                timeline.append({"type": "learning", "timestamp": l.get("created_at", ""), "summary": l.get("root_cause", "")[:120], "category": l.get("category", ""), "severity": l.get("severity", "info")})
+                timeline.append(
+                    {
+                        "type": "learning",
+                        "timestamp": l.get("created_at", ""),
+                        "summary": l.get("root_cause", "")[:120],
+                        "category": l.get("category", ""),
+                        "severity": l.get("severity", "info"),
+                    }
+                )
             timeline.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
             return {"timeline": timeline[:50], "count": len(timeline[:50])}
         except Exception as exc:
             return {"timeline": [], "count": 0, "error": str(exc)}
 
     @app.get("/api/ai/policies")
-    def api_ai_policies(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_policies(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             from src.intelligence.policy import PolicyEngine
+
             engine = PolicyEngine()
             return {"policies": engine.list_policies(), "count": len(engine.list_policies())}
         except Exception as exc:
             return {"policies": [], "count": 0, "error": str(exc)}
 
     @app.get("/api/ai/risk")
-    def api_ai_risk(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_ai_risk(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         tool = request.query_params.get("tool", "")
         try:
             from src.intelligence.risk import RiskEngine
+
             engine = RiskEngine()
             if tool:
                 assessment = engine.assess_tool(tool)
@@ -3097,14 +4580,15 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     def _get_knowledge_services() -> tuple:
         from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
-        from src.intelligence.retrieval.rag import RAGEngine
-        from src.intelligence.retrieval.embeddings import EmbeddingService
-        from src.intelligence.retrieval.vector_store import SQLiteVectorStore
-        from src.intelligence.retrieval.chunker import SemanticChunker
         from src.intelligence.providers.factory import create_provider
+        from src.intelligence.retrieval.chunker import SemanticChunker
+        from src.intelligence.retrieval.embeddings import EmbeddingService
+        from src.intelligence.retrieval.rag import RAGEngine
+        from src.intelligence.retrieval.vector_store import SQLiteVectorStore
         from src.knowledge.indexer import KnowledgeIndexer
         from src.knowledge.retriever import KnowledgeRetriever
-        mem_db = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+        mem_db = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
         store = SQLiteMemoryStore(db_path=mem_db)
         rag = RAGEngine()
         try:
@@ -3112,10 +4596,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             emb = EmbeddingService(provider)
         except Exception:
             emb = EmbeddingService()
-        vec_db_path = mem_db.replace(".db", "_vectors.db") if mem_db.endswith(".db") else mem_db + "_vectors"
+        vec_db_path = (
+            mem_db.replace(".db", "_vectors.db") if mem_db.endswith(".db") else mem_db + "_vectors"
+        )
         vec_store = SQLiteVectorStore(vec_db_path)
         chunker = SemanticChunker(emb)
-        indexer = KnowledgeIndexer(store=store, rag=rag, embedding_service=emb, vector_store=vec_store, chunker=chunker)
+        indexer = KnowledgeIndexer(
+            store=store, rag=rag, embedding_service=emb, vector_store=vec_store, chunker=chunker
+        )
         retriever = KnowledgeRetriever(rag=rag, indexer=indexer)
         return store, rag, indexer, retriever
 
@@ -3129,17 +4617,26 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 return Response(content="No file provided", status_code=400)
             content_bytes = await file.read()
             filename = str(file.filename) if file.filename else "uploaded.md"
-            filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', filename)
-            filename = filename.lstrip('.')
+            filename = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", filename)
+            filename = filename.lstrip(".")
             temp_dir = BASE_DIR / "data" / "knowledge_uploads"
             temp_dir.mkdir(parents=True, exist_ok=True)
             dest = temp_dir / filename
             dest.write_bytes(content_bytes)
             _, _, indexer, _ = _get_knowledge_services()
             count = indexer.index_document(str(dest))
-            return {"status": "ok", "document": filename, "chunks_indexed": count, "path": str(dest)}
+            return {
+                "status": "ok",
+                "document": filename,
+                "chunks_indexed": count,
+                "path": str(dest),
+            }
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.post("/api/knowledge/index-directory")
     async def api_knowledge_index_directory(request: FastAPIRequest) -> Any:
@@ -3205,30 +4702,36 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         approval_id = str(payload.get("approval_id", "")).strip()
         decision = str(payload.get("decision", "")).strip().lower()
         if not approval_id or decision not in ("approve", "reject"):
-            return Response(content="approval_id and decision (approve/reject) are required", status_code=400)
+            return Response(
+                content="approval_id and decision (approve/reject) are required", status_code=400
+            )
         key = f"approval_{approval_id}"
         if key in app.state._ai_pending_approvals:
             app.state._ai_pending_approvals[key] = {"status": decision, "responded_at": utc_now()}
         status_text = "approved" if decision == "approve" else "rejected"
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", decision, "ai_approval", approval_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", decision, "ai_approval", approval_id, {}
+            )
         return {"status": status_text, "approval_id": approval_id}
 
     # ---- Enterprise Search ----
     @app.get("/api/search")
-    def api_search(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_search(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         q = request.query_params.get("q", "").strip()
         domain = request.query_params.get("domain", "all").strip()
         limit = int(request.query_params.get("limit", 20))
         limit = max(1, min(limit, 100))
         try:
-            from src.search.engine import SearchEngine
             import os as _os
+
             from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+            from src.search.engine import SearchEngine
+
             repo = app.state.services.platform_repository
-            mem_db = _os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+            mem_db = _os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
             store = SQLiteMemoryStore(db_path=mem_db)
             engine = SearchEngine(repo=repo, memory_store=store)
             results = engine.search(q, domain=domain, limit=limit)
@@ -3251,13 +4754,21 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 "duration_ms": results.duration_ms,
             }
         except Exception as exc:
-            return {"results": [], "total": 0, "domains": {}, "query": q, "duration_ms": 0, "error": str(exc)}
+            return {
+                "results": [],
+                "total": 0,
+                "domains": {},
+                "query": q,
+                "duration_ms": 0,
+                "error": str(exc),
+            }
 
     @app.get("/api/search/domains")
-    def api_search_domains(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_search_domains(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             from src.search.indexer import SearchIndexer
+
             repo = app.state.services.platform_repository
             indexer = SearchIndexer(repo)
             stats = indexer.get_index_stats()
@@ -3273,6 +4784,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         user = require_role(*OPERATOR_ROLES)(request)
         try:
             from src.search.indexer import SearchIndexer
+
             repo = app.state.services.platform_repository
             indexer = SearchIndexer(repo)
             domains = None
@@ -3284,16 +4796,23 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
                 pass
             result = indexer.build_index(domains=domains)
             if repo is not None:
-                repo.record_audit_log(user.email if user else "anonymous", "reindex", "search", ",".join(domains) if domains else "all", {})
+                repo.record_audit_log(
+                    user.email if user else "anonymous",
+                    "reindex",
+                    "search",
+                    ",".join(domains) if domains else "all",
+                    {},
+                )
             return {"status": "ok", "domains": result}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
     @app.get("/api/search/stats")
-    def api_search_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_search_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         try:
             from src.search.indexer import SearchIndexer
+
             repo = app.state.services.platform_repository
             indexer = SearchIndexer(repo)
             stats = indexer.get_index_stats()
@@ -3303,11 +4822,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
 
     # ---- Multi-Agent Collaboration endpoints ----
     @app.get("/api/agents")
-    def api_list_agents(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_agents(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
-        agents = orchestrator.list_agents()
-        return {"agents": agents, "count": len(agents)}
+        try:
+            orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
+            agents = orchestrator.list_agents()
+            return {"agents": agents, "count": len(agents)}
+        except Exception as exc:
+            return {"error": str(exc), "agents": [], "count": 0}
 
     @app.post("/api/agents/dispatch")
     async def api_dispatch_agent(request: FastAPIRequest) -> Any:
@@ -3325,7 +4847,11 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             result = await orchestrator.dispatch_task(task, target_agent=target)
             return result
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.post("/api/agents/collaborate")
     async def api_collaborate_agents(request: FastAPIRequest) -> Any:
@@ -3345,14 +4871,21 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             result = await orchestrator.collaborate(agent_ids, task)
             return result
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/agents/state")
-    def api_agent_state(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_agent_state(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
-        state = orchestrator.get_shared_state()
-        return {"state": state}
+        try:
+            orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
+            state = orchestrator.get_shared_state()
+            return {"state": state}
+        except Exception as exc:
+            return {"error": str(exc), "state": {}}
 
     @app.post("/api/agents/fan-out")
     async def api_fan_out_agents(request: FastAPIRequest) -> Any:
@@ -3369,57 +4902,69 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             results = await orchestrator.fan_out(task)
             return {
                 "results": [
-                    {"agent_id": r.agent_id, "success": r.success, "summary": r.summary,
-                     "duration_ms": r.duration_ms}
+                    {
+                        "agent_id": r.agent_id,
+                        "success": r.success,
+                        "summary": r.summary,
+                        "duration_ms": r.duration_ms,
+                    }
                     for r in results
                 ],
                 "count": len(results),
             }
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     # ---- Telemetry endpoints ----
     @app.get("/api/telemetry/api-stats")
-    def api_telemetry_api_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_api_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = int(request.query_params.get("hours", 24))
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_api_stats(hours=max(1, min(hours, 168)))
 
     @app.get("/api/telemetry/workflow-stats")
-    def api_telemetry_workflow_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_workflow_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = int(request.query_params.get("hours", 24))
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_workflow_stats(hours=max(1, min(hours, 168)))
 
     @app.get("/api/telemetry/agent-stats")
-    def api_telemetry_agent_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_agent_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = int(request.query_params.get("hours", 24))
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_agent_stats(hours=max(1, min(hours, 168)))
 
     @app.get("/api/telemetry/tool-failures")
-    def api_telemetry_tool_failures(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_tool_failures(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = int(request.query_params.get("hours", 24))
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_tool_failure_stats(hours=max(1, min(hours, 168)))
 
     @app.get("/api/telemetry/approval-stats")
-    def api_telemetry_approval_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_approval_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = int(request.query_params.get("hours", 24))
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_approval_stats(hours=max(1, min(hours, 168)))
 
     @app.get("/api/telemetry/dashboard")
+    def api_telemetry_dashboard(request: FastAPIRequest) -> dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        collector: TelemetryCollector = request.app.state.telemetry_collector
+        return collector.get_dashboard()
 
     # ---- Autonomous Operations ----
 
     @app.get("/api/autonomous/status")
-    def api_autonomous_status(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_autonomous_status(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         pipeline = getattr(request.app.state.services, "autonomous_pipeline", None)
         history = getattr(request.app.state.services, "execution_history", None)
@@ -3436,7 +4981,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         }
 
     @app.get("/api/autonomous/executions")
-    def api_autonomous_executions(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_autonomous_executions(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         history = getattr(request.app.state.services, "execution_history", None)
         status = request.query_params.get("status")
@@ -3452,10 +4997,14 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             record = history.get_record(execution_id)
             if record:
                 return record.to_dict()
-        return Response(content=json.dumps({"error": "Execution not found"}), status_code=404, media_type="application/json")
+        return Response(
+            content=json.dumps({"error": "Execution not found"}),
+            status_code=404,
+            media_type="application/json",
+        )
 
     @app.get("/api/autonomous/pipeline")
-    def api_autonomous_pipeline_results(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_autonomous_pipeline_results(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         pipeline = getattr(request.app.state.services, "autonomous_pipeline", None)
         if pipeline:
@@ -3463,32 +5012,36 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"results": []}
 
     @app.get("/api/autonomous/policies")
-    def api_autonomous_policies(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_autonomous_policies(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         policy = getattr(request.app.state.services, "policy_engine", None)
         if policy:
-            return {"policies": policy.list_policies(), "safe": policy.get_safe_actions(), "approval": policy.get_approval_actions(), "forbidden": policy.get_forbidden_actions()}
+            return {
+                "policies": policy.list_policies(),
+                "safe": policy.get_safe_actions(),
+                "approval": policy.get_approval_actions(),
+                "forbidden": policy.get_forbidden_actions(),
+            }
         return {"policies": [], "safe": [], "approval": [], "forbidden": []}
 
     @app.get("/api/autonomous/healing")
-    def api_autonomous_healing(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_autonomous_healing(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         healing = getattr(request.app.state.services, "self_healing_engine", None)
         if healing:
             return {"actions": healing.history}
         return {"actions": []}
-    def api_telemetry_dashboard(request: FastAPIRequest) -> Dict[str, Any]:
-        require_role(*VIEWER_ROLES)(request)
-        collector: TelemetryCollector = request.app.state.telemetry_collector
-        return collector.get_dashboard()
 
     # ---- Multi-Tenant endpoints ----
     @app.get("/api/orgs")
-    def api_list_orgs(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_orgs(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        mgr: TenantManager = request.app.state.tenant_manager
-        orgs = mgr.list_organizations()
-        return {"organizations": [o.__dict__ for o in orgs], "count": len(orgs)}
+        try:
+            mgr: TenantManager = request.app.state.tenant_manager
+            orgs = mgr.list_organizations()
+            return {"organizations": [o.__dict__ for o in orgs], "count": len(orgs)}
+        except Exception as exc:
+            return {"error": str(exc), "organizations": [], "count": 0}
 
     @app.post("/api/orgs")
     async def api_create_org(request: FastAPIRequest) -> Any:
@@ -3544,7 +5097,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"status": "ok"}
 
     @app.get("/api/orgs/{org_id}/teams")
-    def api_list_teams(org_id: int, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_teams(org_id: int, request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         mgr: TenantManager = request.app.state.tenant_manager
         teams = mgr.list_teams(org_id)
@@ -3572,7 +5125,7 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             return Response(content=str(exc), status_code=400)
 
     @app.get("/api/orgs/{org_id}/projects")
-    def api_list_projects(org_id: int, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_projects(org_id: int, request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         team_id_param = request.query_params.get("team_id")
         team_id = int(team_id_param) if team_id_param else None
@@ -3633,20 +5186,22 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
     @app.get("/api/orgs/{org_id}/users")
     def api_org_users(org_id: int, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        from src.multitenant.models import TenantUser
         p = request.app.state.services.platform_repository
         if p is None:
             return {"users": [], "count": 0}
-        rows = p._fetch_all("SELECT u.id, u.email, tu.role FROM tenant_users tu JOIN users u ON u.id = tu.user_id WHERE tu.org_id = ?", (org_id,))
+        rows = p._fetch_all(
+            "SELECT u.id, u.email, tu.role FROM tenant_users tu JOIN users u ON u.id = tu.user_id WHERE tu.org_id = ?",
+            (org_id,),
+        )
         return {"users": rows, "count": len(rows)}
 
     # ---- Public health endpoints ----
     @app.get("/api/health")
-    def api_health() -> Dict[str, Any]:
+    def api_health() -> dict[str, Any]:
         return {"status": "ok", "timestamp": utc_now(), "service": "aegisnex"}
 
     @app.get("/api/health/ready")
-    def api_health_ready() -> Dict[str, Any]:
+    def api_health_ready() -> dict[str, Any]:
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None:
             db_status = repo.health_check()
@@ -3655,17 +5210,18 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
         return {"status": "ready"}
 
     @app.get("/api/health/live")
-    def api_health_live() -> Dict[str, Any]:
+    def api_health_live() -> dict[str, Any]:
         return {"status": "alive"}
 
     @app.get("/api/health/status")
-    def api_health_status(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_health_status(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         repo = getattr(app.state.services, "platform_repository", None)
         db_health = repo.health_check() if repo is not None else {"status": "unknown"}
         docker_ok = False
         try:
             import docker
+
             client = docker.from_env(timeout=3)
             docker_ok = bool(client.ping())
         except Exception:
@@ -3678,10 +5234,1170 @@ def create_app(services: Optional[DashboardServices] = None, auth_manager: AuthM
             "docker": {"status": "connected" if docker_ok else "disconnected"},
         }
 
+    # =========================================================================
+    # AI Governance Routes
+    # =========================================================================
+
+    def _get_governance(request: FastAPIRequest):
+        gov = getattr(request.app.state, "governance", None)
+        if gov is None:
+            from src.ai_governance import GovernanceManager
+
+            gov = GovernanceManager()
+            request.app.state.governance = gov
+        return gov
+
+    def _governance_tenant_id(request: FastAPIRequest) -> str:
+        user = require_auth(request, request.app.state.auth_manager)
+        direct_org_id = getattr(user, "org_id", None)
+        if direct_org_id is not None:
+            return f"org:{direct_org_id}"
+        tenant_manager = getattr(request.app.state, "tenant_manager", None)
+        if tenant_manager is not None and getattr(user, "id", 0) > 0:
+            try:
+                tenants = tenant_manager.get_user_tenants(user.id)
+            except Exception:
+                tenants = []
+            if tenants:
+                return f"org:{tenants[0].org_id}"
+        return "default"
+
+    def _create_governance_approval(
+        request: FastAPIRequest,
+        *,
+        requester: str,
+        summary: str,
+        details: dict[str, Any],
+    ) -> str | None:
+        services = getattr(request.app.state, "services", None)
+        repo = getattr(services, "platform_repository", None)
+        if repo is None or not hasattr(repo, "create_approval_request"):
+            return None
+        import uuid
+
+        approval_id = f"gov-{uuid.uuid4().hex[:12]}"
+        repo.create_approval_request(
+            approval_id=approval_id,
+            request_type="ai_governance_action",
+            requester=requester,
+            summary=summary,
+            details=details,
+        )
+        return approval_id
+
+    @app.get("/api/governance/stats")
+    async def governance_stats(request: FastAPIRequest):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        return gov.get_agent_stats(tenant_id=tenant_id)
+
+    @app.get("/api/governance/agents")
+    async def governance_list_agents(
+        request: FastAPIRequest,
+        status: str | None = None,
+        risk_level: str | None = None,
+        team: str | None = None,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        agents = gov.list_agents(
+            status=status, risk_level=risk_level, team=team, tenant_id=tenant_id
+        )
+        return {"agents": [a.to_dict() for a in agents]}
+
+    @app.post("/api/governance/agents")
+    async def governance_register_agent(request: FastAPIRequest):
+        require_role(*OPERATOR_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        from src.ai_governance import AIAgent
+
+        agent = AIAgent(
+            agent_id=body.get("agent_id", ""),
+            name=body.get("name", ""),
+            agent_type=body.get("agent_type", "general"),
+            description=body.get("description", ""),
+            owner=body.get("owner", "system"),
+            team=body.get("team", "platform"),
+            department=body.get("department", body.get("team", "platform")),
+            purpose=body.get("purpose", body.get("description", "")),
+            provider=body.get("provider", "openai"),
+            model=body.get("model", "gpt-4o-mini"),
+            version=body.get("version", "1.0.0"),
+            status=body.get("status", "active"),
+            risk_level=body.get("risk_level", "medium"),
+            trust_score=float(body.get("trust_score", 50)),
+            daily_budget=float(body.get("daily_budget", 25.0)),
+            monthly_budget=float(body.get("monthly_budget", 750.0)),
+            average_cost=float(body.get("average_cost", 0.0)),
+            average_latency=float(body.get("average_latency", 0.0)),
+            success_rate=float(body.get("success_rate", 100.0)),
+            permissions=json.dumps(body.get("permissions", [])),
+            connected_tools=json.dumps(body.get("connected_tools", body.get("allowed_tools", []))),
+            policies=json.dumps(body.get("policies", [])),
+            approval_required=bool(body.get("approval_required", False)),
+            allowed_tools=json.dumps(body.get("allowed_tools", [])),
+            allowed_resources=json.dumps(body.get("allowed_resources", [])),
+            max_actions_per_hour=int(body.get("max_actions_per_hour", 100)),
+        )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        if gov.get_agent(agent.agent_id, tenant_id=tenant_id):
+            raise HTTPException(status_code=409, detail="Agent already registered")
+        result = gov.register_agent(agent, tenant_id=tenant_id)
+        if result is None:
+            raise HTTPException(status_code=500, detail="Failed to register agent")
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email,
+                "register_agent",
+                "ai_agent",
+                agent.agent_id,
+                {"name": agent.name, "tenant_id": tenant_id},
+            )
+        return result.to_dict()
+
+    @app.get("/api/governance/agents/{agent_id}")
+    async def governance_get_agent(request: FastAPIRequest, agent_id: str):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        agent = gov.get_agent(agent_id, tenant_id=tenant_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return agent.to_dict()
+
+    @app.get("/api/governance/agents/{agent_id}/history")
+    async def governance_get_agent_history(request: FastAPIRequest, agent_id: str, limit: int = 50):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        if not gov.get_agent(agent_id, tenant_id=tenant_id):
+            raise HTTPException(status_code=404, detail="Agent not found")
+        history = gov.get_agent_history(
+            agent_id, limit=max(1, min(limit, 500)), tenant_id=tenant_id
+        )
+        return {"agent_id": agent_id, "history": [a.to_dict() for a in history]}
+
+    @app.get("/api/governance/agents/{agent_id}/policies")
+    async def governance_get_agent_policies(request: FastAPIRequest, agent_id: str):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        if not gov.get_agent(agent_id, tenant_id=tenant_id):
+            raise HTTPException(status_code=404, detail="Agent not found")
+        policies = gov.get_agent_policies(agent_id, tenant_id=tenant_id)
+        return {"agent_id": agent_id, "policies": [p.to_dict() for p in policies]}
+
+    @app.get("/api/governance/agents/{agent_id}/tools")
+    async def governance_get_agent_tools(request: FastAPIRequest, agent_id: str):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        if not gov.get_agent(agent_id, tenant_id=tenant_id):
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return gov.get_agent_tools(agent_id, tenant_id=tenant_id)
+
+    @app.get("/api/governance/agents/{agent_id}/metrics")
+    async def governance_get_agent_metrics(request: FastAPIRequest, agent_id: str):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        metrics = gov.get_agent_metrics(agent_id, tenant_id=tenant_id)
+        if metrics is None:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return metrics
+
+    @app.put("/api/governance/agents/{agent_id}")
+    async def governance_update_agent(request: FastAPIRequest, agent_id: str):
+        require_role(*OPERATOR_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        fields = {}
+        for key in (
+            "name",
+            "description",
+            "owner",
+            "team",
+            "department",
+            "purpose",
+            "provider",
+            "model",
+            "version",
+            "status",
+            "risk_level",
+            "trust_score",
+            "daily_budget",
+            "monthly_budget",
+            "average_cost",
+            "average_latency",
+            "success_rate",
+            "approval_required",
+            "max_actions_per_hour",
+        ):
+            if key in body:
+                fields[key] = body[key]
+        if "allowed_tools" in body:
+            fields["allowed_tools"] = json.dumps(body["allowed_tools"])
+        if "allowed_resources" in body:
+            fields["allowed_resources"] = json.dumps(body["allowed_resources"])
+        if "permissions" in body:
+            fields["permissions"] = json.dumps(body["permissions"])
+        if "connected_tools" in body:
+            fields["connected_tools"] = json.dumps(body["connected_tools"])
+        if "policies" in body:
+            fields["policies"] = json.dumps(body["policies"])
+        ok = gov.update_agent(agent_id, tenant_id=tenant_id, **fields)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email, "update_agent", "ai_agent", agent_id, {**fields, "tenant_id": tenant_id}
+            )
+        return {"status": "updated"}
+
+    @app.delete("/api/governance/agents/{agent_id}")
+    async def governance_delete_agent(request: FastAPIRequest, agent_id: str):
+        require_role(*ADMIN_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        ok = gov.delete_agent(agent_id, tenant_id=tenant_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email, "delete_agent", "ai_agent", agent_id, {"tenant_id": tenant_id}
+            )
+        return {"status": "deleted"}
+
+    @app.get("/api/governance/actions")
+    async def governance_list_actions(
+        request: FastAPIRequest,
+        agent_id: str | None = None,
+        action_type: str | None = None,
+        verdict: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        actions = gov.list_actions(
+            agent_id=agent_id,
+            action_type=action_type,
+            verdict=verdict,
+            limit=limit,
+            offset=offset,
+            tenant_id=tenant_id,
+        )
+        return {"actions": [a.to_dict() for a in actions]}
+
+    @app.get("/api/governance/actions/stats")
+    async def governance_action_stats(
+        request: FastAPIRequest,
+        agent_id: str | None = None,
+        hours: int = 24,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        return gov.get_action_stats(agent_id=agent_id, hours=hours, tenant_id=tenant_id)
+
+    @app.get("/api/governance/audit/verify")
+    async def governance_audit_verify(request: FastAPIRequest):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        return gov.verify_action_audit_chain(tenant_id=tenant_id)
+
+    @app.get("/api/governance/audit/export.csv")
+    async def governance_audit_export_csv(request: FastAPIRequest, limit: int = 5000):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        content = gov.export_action_audit_csv(tenant_id=tenant_id, limit=limit)
+        return Response(
+            content=content,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=commandmesh_action_audit.csv"},
+        )
+
+    @app.get("/api/governance/costs/summary")
+    async def governance_cost_summary(
+        request: FastAPIRequest,
+        agent_id: str | None = None,
+        limit: int = 1000,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        actions = gov.list_actions(
+            agent_id=agent_id,
+            action_type="chat_completion",
+            limit=max(1, min(limit, 5000)),
+            tenant_id=tenant_id,
+        )
+        summary: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "total_calls": 0,
+            "estimated_selected_usd": 0.0,
+            "estimated_requested_usd": 0.0,
+            "estimated_savings_usd": 0.0,
+            "by_agent": {},
+            "by_model": {},
+            "by_provider": {},
+            "by_tier": {},
+        }
+
+        def _bucket(name: str, key: str) -> dict[str, Any]:
+            bucket = summary[name].setdefault(
+                key or "unknown",
+                {
+                    "calls": 0,
+                    "estimated_selected_usd": 0.0,
+                    "estimated_requested_usd": 0.0,
+                    "estimated_savings_usd": 0.0,
+                },
+            )
+            return bucket
+
+        for action in actions:
+            try:
+                outputs = (
+                    json.loads(action.outputs)
+                    if isinstance(action.outputs, str)
+                    else action.outputs
+                )
+            except Exception:
+                outputs = {}
+            if not isinstance(outputs, dict):
+                continue
+            cost = outputs.get("cost") if isinstance(outputs.get("cost"), dict) else {}
+            routing = outputs.get("routing") if isinstance(outputs.get("routing"), dict) else {}
+            selected = float(cost.get("estimated_selected_usd", 0.0) or 0.0)
+            requested = float(cost.get("estimated_requested_usd", selected) or selected)
+            savings = float(cost.get("estimated_savings_usd", requested - selected) or 0.0)
+            summary["total_calls"] += 1
+            summary["estimated_selected_usd"] += selected
+            summary["estimated_requested_usd"] += requested
+            summary["estimated_savings_usd"] += savings
+            groups = {
+                "by_agent": action.agent_id,
+                "by_model": str(
+                    routing.get("selected_model") or action.target_resource.replace("model:", "")
+                ),
+                "by_provider": str(
+                    outputs.get("provider") or routing.get("selected_provider") or "unknown"
+                ),
+                "by_tier": str(routing.get("selected_tier") or "unknown"),
+            }
+            for group, key in groups.items():
+                bucket = _bucket(group, key)
+                bucket["calls"] += 1
+                bucket["estimated_selected_usd"] += selected
+                bucket["estimated_requested_usd"] += requested
+                bucket["estimated_savings_usd"] += savings
+
+        for key in ("estimated_selected_usd", "estimated_requested_usd", "estimated_savings_usd"):
+            summary[key] = round(summary[key], 8)
+        for group in ("by_agent", "by_model", "by_provider", "by_tier"):
+            for bucket in summary[group].values():
+                for key in (
+                    "estimated_selected_usd",
+                    "estimated_requested_usd",
+                    "estimated_savings_usd",
+                ):
+                    bucket[key] = round(bucket[key], 8)
+        return summary
+
+    @app.post("/api/governance/actions")
+    async def governance_record_action(request: FastAPIRequest):
+        require_role(*OPERATOR_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        from src.ai_governance import AgentAction
+
+        action = AgentAction(
+            action_id=body.get("action_id", ""),
+            agent_id=body.get("agent_id", ""),
+            action_type=body.get("action_type", "unknown"),
+            action_summary=body.get("action_summary", ""),
+            target_resource=body.get("target_resource", ""),
+            inputs=json.dumps(body.get("inputs", {})),
+            outputs=json.dumps(body.get("outputs", {})),
+            reasoning=body.get("reasoning", ""),
+            confidence_score=float(body.get("confidence_score", 0)),
+            policy_verdict=body.get("policy_verdict", "allowed"),
+            status=body.get("status", "success"),
+            duration_ms=float(body.get("duration_ms", 0)),
+        )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        result = gov.record_action(action, tenant_id=tenant_id)
+        response = result.to_dict()
+        if result.policy_verdict == "pending_approval":
+            user = require_auth(request, request.app.state.auth_manager)
+            approval_id = _create_governance_approval(
+                request,
+                requester=user.email,
+                summary=f"AI governance approval required for {result.agent_id}: {result.action_summary}",
+                details={
+                    "tenant_id": tenant_id,
+                    "agent_id": result.agent_id,
+                    "action_id": result.action_id,
+                    "action_type": result.action_type,
+                    "target_resource": result.target_resource,
+                    "policy_verdict": result.policy_verdict,
+                },
+            )
+            if approval_id:
+                response["approval_id"] = approval_id
+        return response
+
+    @app.post("/api/governance/evaluate")
+    async def governance_evaluate_action(request: FastAPIRequest):
+        require_role(*VIEWER_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        verdict, reason = gov.evaluate_policies(
+            agent_id=body.get("agent_id", ""),
+            action_type=body.get("action_type", ""),
+            target=body.get("target", ""),
+            tenant_id=tenant_id,
+        )
+        response: dict[str, Any] = {"verdict": verdict, "reason": reason}
+        if verdict == "pending_approval":
+            user = require_auth(request, request.app.state.auth_manager)
+            approval_id = _create_governance_approval(
+                request,
+                requester=user.email,
+                summary=f"AI governance approval required for {body.get('agent_id', '')}: {body.get('action_type', '')}",
+                details={
+                    "tenant_id": tenant_id,
+                    "agent_id": body.get("agent_id", ""),
+                    "action_type": body.get("action_type", ""),
+                    "target": body.get("target", ""),
+                    "reason": reason,
+                },
+            )
+            if approval_id:
+                response["approval_id"] = approval_id
+        return response
+
+    @app.get("/api/governance/policies")
+    async def governance_list_policies(
+        request: FastAPIRequest,
+        enabled_only: bool = False,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        policies = gov.list_policies(enabled_only=enabled_only, tenant_id=tenant_id)
+        return {"policies": [p.to_dict() for p in policies]}
+
+    @app.post("/api/governance/policies")
+    async def governance_create_policy(request: FastAPIRequest):
+        require_role(*ADMIN_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        from src.ai_governance import AgentPolicy
+
+        policy = AgentPolicy(
+            policy_id=0,
+            name=body.get("name", ""),
+            description=body.get("description", ""),
+            policy_type=body.get("policy_type", "access_control"),
+            target_agents=json.dumps(body.get("target_agents", ["*"])),
+            conditions=json.dumps(body.get("conditions", {})),
+            effect=body.get("effect", "allow"),
+            priority=int(body.get("priority", 100)),
+            enabled=body.get("enabled", True),
+        )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        try:
+            result = gov.create_policy(policy, tenant_id=tenant_id)
+        except Exception as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email, "create_policy", "ai_policy", policy.name, {"tenant_id": tenant_id}
+            )
+        return result.to_dict()
+
+    @app.put("/api/governance/policies/{name}")
+    async def governance_update_policy(request: FastAPIRequest, name: str):
+        require_role(*ADMIN_ROLES)(request)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(
+                content="Invalid JSON body", status_code=400, media_type="application/json"
+            )
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        fields = {}
+        for key in ("description", "policy_type", "effect", "priority", "enabled"):
+            if key in body:
+                fields[key] = body[key]
+        if "target_agents" in body:
+            fields["target_agents"] = json.dumps(body["target_agents"])
+        if "conditions" in body:
+            fields["conditions"] = json.dumps(body["conditions"])
+        ok = gov.update_policy(name, tenant_id=tenant_id, **fields)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Policy not found")
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email, "update_policy", "ai_policy", name, {"tenant_id": tenant_id}
+            )
+        return {"status": "updated"}
+
+    @app.delete("/api/governance/policies/{name}")
+    async def governance_delete_policy(request: FastAPIRequest, name: str):
+        require_role(*ADMIN_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        ok = gov.delete_policy(name, tenant_id=tenant_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Policy not found")
+        user = require_auth(request, request.app.state.auth_manager)
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email, "delete_policy", "ai_policy", name, {"tenant_id": tenant_id}
+            )
+        return {"status": "deleted"}
+
+    @app.get("/api/governance/anomalies")
+    async def governance_list_anomalies(
+        request: FastAPIRequest,
+        agent_id: str | None = None,
+        status: str | None = None,
+        severity: str | None = None,
+        limit: int = 50,
+    ):
+        require_role(*VIEWER_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        anomalies = gov.list_anomalies(
+            agent_id=agent_id, status=status, severity=severity, limit=limit, tenant_id=tenant_id
+        )
+        return {"anomalies": [a.to_dict() for a in anomalies]}
+
+    @app.post("/api/governance/anomalies/detect")
+    async def governance_detect_anomalies(
+        request: FastAPIRequest,
+        agent_id: str | None = None,
+        window_hours: int = 1,
+    ):
+        require_role(*OPERATOR_ROLES)(request)
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        detected = gov.detect_anomalies(
+            agent_id=agent_id, window_hours=window_hours, tenant_id=tenant_id
+        )
+        return {"detected": detected, "count": len(detected)}
+
+    @app.put("/api/governance/anomalies/{anomaly_id}/resolve")
+    async def governance_resolve_anomaly(request: FastAPIRequest, anomaly_id: int):
+        require_role(*OPERATOR_ROLES)(request)
+        body = (
+            await request.json()
+            if request.headers.get("content-type") == "application/json"
+            else {}
+        )
+        user = require_auth(request, request.app.state.auth_manager)
+        gov = _get_governance(request)
+        status = body.get("status", "resolved")
+        tenant_id = _governance_tenant_id(request)
+        ok = gov.resolve_anomaly(
+            anomaly_id, resolved_by=user.email, status=status, tenant_id=tenant_id
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Anomaly not found")
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email,
+                "resolve_anomaly",
+                "ai_anomaly",
+                str(anomaly_id),
+                {"status": status, "tenant_id": tenant_id},
+            )
+        return {"status": "resolved"}
+
+    # =========================================================================
+    # CommandMesh OpenAI-compatible Proxy
+    # =========================================================================
+
+    def _message_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    value = item.get("text") or item.get("content") or ""
+                    if value:
+                        parts.append(str(value))
+            return "\n".join(parts)
+        return str(content or "")
+
+    def _proxy_agent_id(request: FastAPIRequest, body: dict[str, Any]) -> tuple[str, bool]:
+        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        header_agent = request.headers.get("X-Agent-ID") or request.headers.get("X-Aegis-Agent-ID")
+        agent_id = str(metadata.get("agent_id") or header_agent or "openai-proxy-agent").strip()
+        return agent_id, agent_id == "openai-proxy-agent"
+
+    def _ensure_default_proxy_agent(gov: Any, tenant_id: str, agent_id: str) -> None:
+        if gov.get_agent(agent_id, tenant_id=tenant_id):
+            return
+        from src.ai_governance import AIAgent, RiskLevel
+
+        gov.register_agent(
+            AIAgent(
+                agent_id=agent_id,
+                name="OpenAI Proxy Agent",
+                agent_type="proxy",
+                description="Default CommandMesh proxy identity for OpenAI-compatible model calls",
+                owner="platform",
+                team="ai-platform",
+                risk_level=RiskLevel.MEDIUM.value,
+                trust_score=70.0,
+                allowed_tools=json.dumps(["chat_completion"]),
+                allowed_resources=json.dumps(["/v1/chat/completions"]),
+                max_actions_per_hour=500,
+            ),
+            tenant_id=tenant_id,
+        )
+
+    def _openai_error(
+        message: str, status_code: int, error_type: str = "commandmesh_policy_error", **extra: Any
+    ) -> Response:
+        payload = {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": None,
+                "code": error_type,
+                **extra,
+            }
+        }
+        return Response(
+            content=json.dumps(payload), status_code=status_code, media_type="application/json"
+        )
+
+    @app.post("/v1/chat/completions")
+    @app.post("/api/v1/chat/completions")
+    async def commandmesh_chat_completions(request: FastAPIRequest) -> Any:
+        user = require_auth(request, request.app.state.auth_manager)
+        try:
+            body = await request.json()
+        except Exception:
+            return _openai_error("Invalid JSON body", 400, "invalid_request_error")
+        if not isinstance(body, dict):
+            return _openai_error("Request body must be a JSON object", 400, "invalid_request_error")
+        if body.get("stream"):
+            return _openai_error(
+                "Streaming chat completions are not supported by CommandMesh proxy v1",
+                400,
+                "unsupported_feature",
+            )
+
+        raw_messages = body.get("messages", [])
+        if not isinstance(raw_messages, list) or not raw_messages:
+            return _openai_error("messages must be a non-empty array", 400, "invalid_request_error")
+
+        from src.ai_governance import ActionVerdict, AgentAction
+        from src.commandmesh_routing import decide_route, estimate_cost_usd
+        from src.intelligence.providers.base import Message
+
+        gov = _get_governance(request)
+        tenant_id = _governance_tenant_id(request)
+        agent_id, is_default_agent = _proxy_agent_id(request, body)
+        if is_default_agent:
+            _ensure_default_proxy_agent(gov, tenant_id, agent_id)
+
+        messages = [
+            Message(
+                role=str(item.get("role", "user")),
+                content=_message_text(item.get("content")),
+                name=str(item["name"]) if isinstance(item, dict) and item.get("name") else None,
+            )
+            for item in raw_messages
+            if isinstance(item, dict)
+        ]
+        if not messages:
+            return _openai_error(
+                "messages must contain valid message objects", 400, "invalid_request_error"
+            )
+
+        requested_model = str(body.get("model") or "").strip()
+        requested_provider = str(
+            body.get("provider")
+            or os.getenv("AEGIS_COMMANDMESH_PROVIDER")
+            or os.getenv("AEGIS_AI_PROVIDER", "openai")
+        )
+        prompt_text = "\n".join(m.content for m in messages)
+        estimated_prompt_tokens = len(re.findall(r"\w+|[^\w\s]", prompt_text, re.UNICODE))
+        tools = body.get("tools") if isinstance(body.get("tools"), list) else None
+        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        route = decide_route(
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            prompt_text=prompt_text,
+            prompt_tokens=estimated_prompt_tokens,
+            has_tools=bool(tools),
+            metadata=metadata,
+        )
+
+        target_resource = f"model:{route.selected_model or 'default'}"
+        verdict, reason = gov.evaluate_policies(
+            agent_id, "chat_completion", target_resource, tenant_id=tenant_id
+        )
+        action_id = f"cmpl-{__import__('uuid').uuid4().hex[:16]}"
+
+        if verdict != ActionVerdict.ALLOWED.value:
+            approval_id = None
+            if verdict == ActionVerdict.PENDING_APPROVAL.value:
+                approval_id = _create_governance_approval(
+                    request,
+                    requester=user.email,
+                    summary=f"Model call requires approval for {agent_id}",
+                    details={
+                        "tenant_id": tenant_id,
+                        "agent_id": agent_id,
+                        "action_id": action_id,
+                        "action_type": "chat_completion",
+                        "target_resource": target_resource,
+                        "requested_model": requested_model,
+                        "selected_model": route.selected_model,
+                        "selected_provider": route.selected_provider,
+                        "route_reason": route.reason,
+                        "reason": reason,
+                    },
+                )
+            gov.record_action(
+                AgentAction(
+                    action_id=action_id,
+                    agent_id=agent_id,
+                    action_type="chat_completion",
+                    action_summary=f"Blocked model call to {target_resource}",
+                    target_resource=target_resource,
+                    inputs=json.dumps(
+                        {
+                            "requested_model": requested_model,
+                            "selected_model": route.selected_model,
+                            "message_count": len(raw_messages),
+                            "route_reason": route.reason,
+                        }
+                    ),
+                    outputs=json.dumps(
+                        {"verdict": verdict, "reason": reason, "approval_id": approval_id}
+                    ),
+                    reasoning=reason or "",
+                    confidence_score=1.0,
+                    policy_verdict=verdict,
+                    status="blocked"
+                    if verdict == ActionVerdict.DENIED.value
+                    else "pending_approval",
+                ),
+                tenant_id=tenant_id,
+            )
+            return _openai_error(
+                reason or "CommandMesh policy blocked this model call",
+                403,
+                verdict,
+                approval_id=approval_id,
+            )
+
+        provider_factory = getattr(request.app.state, "commandmesh_provider_factory", None)
+        if provider_factory is None:
+            from src.intelligence.providers.factory import create_provider
+
+            provider_factory = create_provider
+        provider = provider_factory(route.selected_provider)
+        kwargs = {
+            "model": route.selected_model or None,
+            "temperature": body.get("temperature"),
+            "max_tokens": body.get("max_tokens"),
+        }
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        started = datetime.now(UTC)
+        if tools:
+            reply = provider.chat_with_tools(messages, tools, **kwargs)
+        else:
+            reply = provider.chat(messages, **kwargs)
+        duration_ms = (datetime.now(UTC) - started).total_seconds() * 1000
+
+        prompt_tokens = provider.count_tokens(prompt_text)
+        completion_tokens = provider.count_tokens(reply.content)
+        selected_cost = estimate_cost_usd(
+            prompt_tokens,
+            completion_tokens,
+            route.input_cost_per_million,
+            route.output_cost_per_million,
+        )
+        requested_cost = estimate_cost_usd(
+            prompt_tokens,
+            completion_tokens,
+            route.requested_input_cost_per_million,
+            route.requested_output_cost_per_million,
+        )
+        response_model = (
+            route.selected_model
+            or getattr(getattr(provider, "config", None), "model", "")
+            or "default"
+        )
+        message: dict[str, Any] = {"role": reply.role or "assistant", "content": reply.content}
+        if reply.tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.args
+                        if isinstance(call.args, str)
+                        else json.dumps(call.args),
+                    },
+                }
+                for call in reply.tool_calls
+            ]
+        payload = {
+            "id": action_id,
+            "object": "chat.completion",
+            "created": int(datetime.now(UTC).timestamp()),
+            "model": response_model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": message,
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+            "commandmesh": {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "provider": getattr(provider, "provider_name", route.selected_provider),
+                "policy_verdict": verdict,
+                "policy_reason": reason,
+                "duration_ms": round(duration_ms, 2),
+                "routing": {
+                    "requested_provider": route.requested_provider,
+                    "requested_model": route.requested_model,
+                    "selected_provider": route.selected_provider,
+                    "selected_model": response_model,
+                    "selected_tier": route.selected_tier,
+                    "complexity": route.complexity.level,
+                    "complexity_score": route.complexity.score,
+                    "complexity_reasons": route.complexity.reasons,
+                    "reason": route.reason,
+                    "routing_disabled": route.routing_disabled,
+                },
+                "cost": {
+                    "estimated_selected_usd": selected_cost,
+                    "estimated_requested_usd": requested_cost,
+                    "estimated_savings_usd": round(requested_cost - selected_cost, 8),
+                    "selected_input_cost_per_million": route.input_cost_per_million,
+                    "selected_output_cost_per_million": route.output_cost_per_million,
+                },
+            },
+        }
+        gov.record_action(
+            AgentAction(
+                action_id=action_id,
+                agent_id=agent_id,
+                action_type="chat_completion",
+                action_summary=f"Proxied model call to {response_model}",
+                target_resource=f"model:{response_model}",
+                inputs=json.dumps(
+                    {
+                        "requested_model": requested_model,
+                        "selected_model": response_model,
+                        "message_count": len(messages),
+                        "prompt_tokens": prompt_tokens,
+                        "route_reason": route.reason,
+                    }
+                ),
+                outputs=json.dumps(
+                    {
+                        "completion_tokens": completion_tokens,
+                        "provider": getattr(provider, "provider_name", route.selected_provider),
+                        "routing": payload["commandmesh"]["routing"],
+                        "cost": payload["commandmesh"]["cost"],
+                    }
+                ),
+                reasoning=reason or "Allowed by CommandMesh policy",
+                confidence_score=1.0,
+                policy_verdict=verdict,
+                status="success",
+                duration_ms=duration_ms,
+            ),
+            tenant_id=tenant_id,
+        )
+        repo = getattr(request.app.state.services, "platform_repository", None)
+        if repo is not None:
+            repo.record_audit_log(
+                user.email,
+                "commandmesh_chat_completion",
+                "model_call",
+                action_id,
+                {
+                    "tenant_id": tenant_id,
+                    "agent_id": agent_id,
+                    "model": response_model,
+                    "provider": getattr(provider, "provider_name", route.selected_provider),
+                    "policy_verdict": verdict,
+                    "route_reason": route.reason,
+                    "selected_tier": route.selected_tier,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "estimated_cost_usd": selected_cost,
+                },
+            )
+        return payload
+
+    # ---- Mission Control ----
+    from src.mission_control import (
+        count_executions as mc_count_executions,
+    )
+    from src.mission_control import (
+        delete_execution as mc_delete_execution,
+    )
+    from src.mission_control import (
+        ensure_table as mc_ensure_table,
+    )
+    from src.mission_control import (
+        get_execution as mc_get_execution,
+    )
+    from src.mission_control import (
+        get_execution_stats as mc_get_execution_stats,
+    )
+    from src.mission_control import (
+        list_executions as mc_list_executions,
+    )
+
+    @app.on_event("startup")
+    def _init_mission_control():
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is not None:
+            try:
+                mc_ensure_table(repo)
+            except Exception:
+                pass
+
+    @app.get("/api/mission-control/executions")
+    def api_mc_list_executions(request: FastAPIRequest) -> dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is None:
+            return {"executions": [], "count": 0, "total": 0, "limit": 50, "offset": 0}
+        try:
+            limit = int(request.query_params.get("limit", 50))
+            offset = int(request.query_params.get("offset", 0))
+            status = request.query_params.get("status") or None
+            search = request.query_params.get("search") or None
+            user = request.query_params.get("user") or None
+            limit = max(1, min(limit, 200))
+            executions = mc_list_executions(
+                repo, limit=limit, offset=offset, status=status, search=search, user=user
+            )
+            total = mc_count_executions(repo, status=status, search=search, user=user)
+            return {
+                "executions": [e.to_dict() for e in executions],
+                "count": len(executions),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+        except Exception as exc:
+            get_logger(__name__).warning("MC list error: %s", exc)
+            return {"executions": [], "count": 0, "total": 0, "limit": 50, "offset": 0}
+
+    @app.get("/api/mission-control/stats")
+    def api_mc_stats(request: FastAPIRequest) -> dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is None:
+            return {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+                "queued": 0,
+                "avg_latency": 0,
+                "avg_cost": 0,
+                "avg_confidence": 0,
+                "total_cost": 0,
+            }
+        try:
+            return mc_get_execution_stats(repo)
+        except Exception as exc:
+            get_logger(__name__).warning("MC stats error: %s", exc)
+            return {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+                "queued": 0,
+                "avg_latency": 0,
+                "avg_cost": 0,
+                "avg_confidence": 0,
+                "total_cost": 0,
+            }
+
+    @app.get("/api/mission-control/executions/{execution_id}")
+    def api_mc_get_execution(execution_id: str, request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is None:
+            return Response(content="Service unavailable", status_code=503)
+        try:
+            execution = mc_get_execution(repo, execution_id)
+            if execution is None:
+                return Response(content="Execution not found", status_code=404)
+            stats = mc_get_execution_stats(repo)
+            return {"execution": execution.to_dict(), "stats": stats}
+        except Exception as exc:
+            get_logger(__name__).warning("MC get error: %s", exc)
+            return Response(content="Internal error", status_code=500)
+
+    @app.get("/api/mission-control/executions/{execution_id}/export")
+    def api_mc_export_execution(execution_id: str, request: FastAPIRequest) -> Any:
+        require_role(*VIEWER_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is None:
+            return Response(content="Service unavailable", status_code=503)
+        try:
+            execution = mc_get_execution(repo, execution_id)
+            if execution is None:
+                return Response(content="Execution not found", status_code=404)
+            from starlette.responses import Response as StarletteResponse
+
+            export_data = json.dumps(execution.to_dict(), indent=2, default=str)
+            return StarletteResponse(
+                content=export_data,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename=execution-{execution_id}.json"
+                },
+            )
+        except Exception as exc:
+            get_logger(__name__).warning("MC export error: %s", exc)
+            return Response(content="Internal error", status_code=500)
+
+    @app.delete("/api/mission-control/executions/{execution_id}")
+    def api_mc_delete_execution(execution_id: str, request: FastAPIRequest) -> dict[str, Any]:
+        require_role(*ADMIN_ROLES)(request)
+        repo = getattr(app.state.services, "platform_repository", None)
+        if repo is None:
+            return {"error": "Service unavailable"}
+        try:
+            mc_delete_execution(repo, execution_id)
+            return {"status": "deleted", "execution_id": execution_id}
+        except Exception as exc:
+            get_logger(__name__).warning("MC delete error: %s", exc)
+            return {"error": str(exc)}
+
+    # ---- Mission Control WebSocket ----
+
+    @app.websocket("/ws/mission-control")
+    async def ws_mission_control(websocket: FastAPIRequest) -> None:
+        token = _websocket_token(websocket)
+        if token is None:
+            await websocket.accept()
+            await websocket.close(code=4001)
+            return
+        user, _ = authenticate_request(websocket, auth_manager)
+        if user is None:
+            await websocket.accept()
+            await websocket.close(code=4001)
+            return
+        manager: WebSocketManager = app.state.websocket_manager
+        await manager.connect(websocket, channel="mission-control")
+        try:
+            repo = getattr(app.state.services, "platform_repository", None)
+            if repo is not None:
+                executions = mc_list_executions(repo, limit=20)
+                await websocket.send_json(
+                    {
+                        "type": "execution_list",
+                        "timestamp": utc_now(),
+                        "payload": {
+                            "executions": [e.to_dict() for e in executions],
+                            "count": len(executions),
+                        },
+                    }
+                )
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    msg = json.loads(data)
+                    if msg.get("type") == "ping":
+                        await websocket.send_json({"type": "pong", "timestamp": utc_now()})
+                except json.JSONDecodeError:
+                    pass
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            manager.disconnect(websocket, channel="mission-control")
+
     return app
 
 
-try:
-    app = create_app()
-except (RuntimeError, AttributeError):
+if "pytest" in sys.modules:
     app = None
+else:
+    try:
+        app = create_app()
+    except (RuntimeError, AttributeError) as exc:
+        print(f"FATAL: create_app() failed: {exc}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+        app = None

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 
 class ConfigError(ValueError):
@@ -150,7 +151,7 @@ class Config:
         cls,
         config_path: str | Path = "config.yaml",
         env_path: str | Path = ".env",
-    ) -> "Config":
+    ) -> Config:
         load_env_file(env_path)
         path = Path(config_path)
         if not path.exists():
@@ -166,7 +167,7 @@ class Config:
         return config
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "Config":
+    def from_mapping(cls, raw: Mapping[str, Any]) -> Config:
         monitoring_raw = _section(raw, "monitoring")
         thresholds_raw = _section(monitoring_raw, "thresholds")
         docker_raw = _section(raw, "docker")
@@ -204,12 +205,8 @@ class Config:
 
         return cls(
             monitoring=MonitoringConfig(
-                cpu_interval_seconds=_float(
-                    monitoring_raw, "cpu_interval_seconds", 0.1
-                ),
-                watchdog_interval_seconds=_int(
-                    monitoring_raw, "watchdog_interval_seconds", 300
-                ),
+                cpu_interval_seconds=_float(monitoring_raw, "cpu_interval_seconds", 0.1),
+                watchdog_interval_seconds=_int(monitoring_raw, "watchdog_interval_seconds", 300),
                 thresholds=ThresholdConfig(
                     cpu_percent=_float(thresholds_raw, "cpu_percent", 90),
                     memory_percent=_float(thresholds_raw, "memory_percent", 90),
@@ -218,26 +215,18 @@ class Config:
             ),
             docker=DockerConfig(
                 include_all=_bool(docker_raw, "include_all", True),
-                client_timeout_seconds=_int(
-                    docker_raw, "client_timeout_seconds", 10
-                ),
-                restart_timeout_seconds=_int(
-                    docker_raw, "restart_timeout_seconds", 10
-                ),
+                client_timeout_seconds=_int(docker_raw, "client_timeout_seconds", 10),
+                restart_timeout_seconds=_int(docker_raw, "restart_timeout_seconds", 10),
             ),
             guardian=GuardianConfig(
-                restart_cooldown_seconds=_int(
-                    guardian_raw, "restart_cooldown_seconds", 300
-                ),
+                restart_cooldown_seconds=_int(guardian_raw, "restart_cooldown_seconds", 300),
                 max_restart_attempts=_int(guardian_raw, "max_restart_attempts", 3),
                 restart_history_path=_str(
                     guardian_raw, "restart_history_path", "restart_history.json"
                 ),
             ),
             incidents=IncidentConfig(
-                history_path=_str(
-                    incidents_raw, "history_path", "incident_history.json"
-                )
+                history_path=_str(incidents_raw, "history_path", "incident_history.json")
             ),
             storage=StorageConfig(
                 database_path=_str(storage_raw, "database_path", "aegisnex.db"),
@@ -256,9 +245,7 @@ class Config:
                         "NOTIFY_EMAIL_HOST",
                         _str(notification_email_raw, "host", "smtp.gmail.com"),
                     ),
-                    port=_env_int(
-                        "NOTIFY_EMAIL_PORT", _int(notification_email_raw, "port", 587)
-                    ),
+                    port=_env_int("NOTIFY_EMAIL_PORT", _int(notification_email_raw, "port", 587)),
                     starttls=_env_bool(
                         "NOTIFY_EMAIL_STARTTLS",
                         _bool(notification_email_raw, "starttls", True),
@@ -300,9 +287,7 @@ class Config:
                 ),
             ),
             health_checks=HealthChecksConfig(
-                docker=DockerHealthCheckConfig(
-                    enabled=_bool(docker_health_raw, "enabled", True)
-                ),
+                docker=DockerHealthCheckConfig(enabled=_bool(docker_health_raw, "enabled", True)),
                 http=HttpHealthCheckConfig(
                     enabled=_bool(http_health_raw, "enabled", False),
                     timeout_seconds=_int(http_health_raw, "timeout_seconds", 5),
@@ -329,22 +314,16 @@ class Config:
                     "SMTP_TIMEOUT_SECONDS",
                     _int(smtp_raw, "timeout_seconds", 10),
                 ),
-                starttls=_env_bool(
-                    "SMTP_STARTTLS", _bool(smtp_raw, "starttls", True)
-                ),
+                starttls=_env_bool("SMTP_STARTTLS", _bool(smtp_raw, "starttls", True)),
                 username=smtp_username,
                 password=smtp_password,
                 recipient=smtp_recipient,
-                subject=_env_str(
-                    "SMTP_SUBJECT", _str(smtp_raw, "subject", "AegisNex Alert")
-                ),
+                subject=_env_str("SMTP_SUBJECT", _str(smtp_raw, "subject", "AegisNex Alert")),
             ),
         )
 
     def validate(self) -> None:
-        _require_positive(
-            self.monitoring.cpu_interval_seconds, "monitoring.cpu_interval_seconds"
-        )
+        _require_positive(self.monitoring.cpu_interval_seconds, "monitoring.cpu_interval_seconds")
         _require_positive_int(
             self.monitoring.watchdog_interval_seconds,
             "monitoring.watchdog_interval_seconds",
@@ -360,17 +339,11 @@ class Config:
             if value < 0 or value > 100:
                 raise ConfigError(f"{name} must be between 0 and 100.")
 
-        _require_positive_int(
-            self.docker.client_timeout_seconds, "docker.client_timeout_seconds"
-        )
-        _require_positive_int(
-            self.docker.restart_timeout_seconds, "docker.restart_timeout_seconds"
-        )
+        _require_positive_int(self.docker.client_timeout_seconds, "docker.client_timeout_seconds")
+        _require_positive_int(self.docker.restart_timeout_seconds, "docker.restart_timeout_seconds")
         if self.guardian.restart_cooldown_seconds < 0:
             raise ConfigError("guardian.restart_cooldown_seconds cannot be negative.")
-        _require_positive_int(
-            self.guardian.max_restart_attempts, "guardian.max_restart_attempts"
-        )
+        _require_positive_int(self.guardian.max_restart_attempts, "guardian.max_restart_attempts")
         if not self.guardian.restart_history_path.strip():
             raise ConfigError("guardian.restart_history_path cannot be empty.")
         if not self.incidents.history_path.strip():
@@ -416,9 +389,7 @@ class Config:
                     )
         for name, target in self.health_checks.tcp.targets.items():
             if not name.strip() or not target.strip() or ":" not in target:
-                raise ConfigError(
-                    "health_checks.tcp.targets values must use host:port format."
-                )
+                raise ConfigError("health_checks.tcp.targets values must use host:port format.")
             try:
                 int(target.rsplit(":", 1)[1])
             except ValueError as exc:
@@ -445,8 +416,7 @@ class Config:
             ]
             if missing:
                 raise ConfigError(
-                    "SMTP is enabled but required values are missing: "
-                    + ", ".join(missing)
+                    "SMTP is enabled but required values are missing: " + ", ".join(missing)
                 )
 
     def _validate_notifications(self) -> None:
@@ -475,14 +445,15 @@ class Config:
                 if not str(value).strip()
             ]
             if missing:
-                raise ConfigError(
-                    "notifications.email enabled but missing: " + ", ".join(missing)
-                )
+                raise ConfigError("notifications.email enabled but missing: " + ", ".join(missing))
             if self.notifications.email.port < 1 or self.notifications.email.port > 65535:
                 raise ConfigError("notifications.email.port must be between 1 and 65535.")
         if self.notifications.slack.enabled and not self.notifications.slack.webhook_url.strip():
             raise ConfigError("notifications.slack.webhook_url cannot be empty when enabled.")
-        if self.notifications.discord.enabled and not self.notifications.discord.webhook_url.strip():
+        if (
+            self.notifications.discord.enabled
+            and not self.notifications.discord.webhook_url.strip()
+        ):
             raise ConfigError("notifications.discord.webhook_url cannot be empty when enabled.")
 
 
@@ -540,9 +511,8 @@ def _parse_simple_yaml(content: str) -> dict[str, Any]:
 def _parse_scalar(value: str) -> Any:
     if value in {'""', "''"}:
         return ""
-    if (
-        (value.startswith('"') and value.endswith('"'))
-        or (value.startswith("'") and value.endswith("'"))
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
     ):
         return value[1:-1]
 
