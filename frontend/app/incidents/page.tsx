@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { RouteScaffold } from "@/components/pages/RouteScaffold";
-import { getIncidents, getIncidentDetail, acknowledgeIncident, resolveIncident, reopenIncident, deleteIncident, type IncidentRow, type IncidentsResponse, type IncidentDetailResponse, type IncidentTransitionRow } from "@/lib/api";
+import { getIncidents, acknowledgeIncident, resolveIncident, reopenIncident, deleteIncident, getClientOrganizations, type IncidentRow, type IncidentsResponse, type ClientOrganization } from "@/lib/api";
 import { useWebSocket } from "@/lib/ws";
 import { toast } from "sonner";
 import { publish } from "@/lib/workflow";
@@ -41,12 +41,19 @@ export default function IncidentsPage() {
   const [resolveDialog, setResolveDialog] = useState<IncidentRow | null>(null);
   const [resolveNotes, setResolveNotes] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState<IncidentRow | null>(null);
+  const [clients, setClients] = useState<ClientOrganization[]>([]);
+  const [clientFilter, setClientFilter] = useState("");
 
   const load = useCallback(() => {
-    getIncidents(50).then(setData).catch(() => setData(null)).finally(() => setLoading(false));
-  }, []);
+    const orgId = clientFilter ? Number(clientFilter) : undefined;
+    getIncidents(50, undefined, orgId).then(setData).catch(() => setData(null)).finally(() => setLoading(false));
+  }, [clientFilter]);
 
   useEffect(load, [load]);
+
+  useEffect(() => {
+    getClientOrganizations().then((result) => setClients(result.organizations ?? [])).catch(() => setClients([]));
+  }, []);
 
   useWebSocket("/ws/incidents", (msg: unknown) => {
     const event = msg as { type?: string; payload?: unknown };
@@ -214,7 +221,21 @@ export default function IncidentsPage() {
               <CardTitle>Recent Incidents</CardTitle>
               <p className="mt-0.5 text-xs text-text-secondary">Latest security and service incidents</p>
             </div>
-            <Button variant="outline" size="sm" onClick={load}>Refresh</Button>
+            <div className="flex items-center gap-2">
+              <select
+                className="h-8 rounded-lg border border-border bg-surface px-2 text-xs text-text-primary outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+                value={clientFilter}
+                onChange={(event) => setClientFilter(event.target.value)}
+              >
+                <option value="">All clients</option>
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name}
+                  </option>
+                ))}
+              </select>
+              <Button variant="outline" size="sm" onClick={load}>Refresh</Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="pt-0">
@@ -227,6 +248,9 @@ export default function IncidentsPage() {
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-medium text-text-primary">{incident.service_name}</p>
                     <Badge variant="secondary" size="sm">{displayId(incident)}</Badge>
+                    <Badge variant={incident.org_id ? "info-subtle" : "secondary"} size="sm">
+                      {incident.org_name || "Unassigned"}
+                    </Badge>
                   </div>
                   <p className="mt-0.5 text-xs text-text-secondary">{incident.description}</p>
                   <p className="mt-0.5 text-[11px] text-text-tertiary">{formatTimestamp(incident.timestamp)}</p>
@@ -312,14 +336,14 @@ export default function IncidentsPage() {
 
 function MetricCardValue({ icon: Icon, label, value, detail, color }: { icon: any; label: string; value: string; detail?: string; color?: string }) {
   return (
-    <div className="rounded-xl border border-border/60 bg-surface-elevated/70 p-4 shadow-sm transition-all duration-200 hover:border-border hover:shadow-md">
+    <div className="rounded-xl border border-border/40 bg-surface-elevated/40 p-4 transition-all duration-200 hover:border-border/60 hover:bg-surface-elevated/55">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-text-tertiary">{label}</p>
-          <p className={`mt-1 text-2xl font-semibold tracking-tight ${color ?? "text-text-primary"}`}>{value}</p>
+          <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-text-tertiary">{label}</p>
+          <p className={`mt-1 text-2xl font-bold tracking-tight ${color ?? "text-text-primary"}`}>{value}</p>
         </div>
-        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/8 text-primary ring-1 ring-primary/15">
-          <Icon className="size-4" />
+        <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface-elevated/80 ring-1 ring-border/50">
+          <Icon className="size-3.5 text-text-secondary" />
         </div>
       </div>
       {detail && <p className="mt-2 text-xs text-text-secondary">{detail}</p>}

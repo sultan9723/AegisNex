@@ -7,19 +7,24 @@ import { useAuth } from "@/lib/auth";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 
+const PUBLIC_ROUTES = ["/", "/login", "/login/"];
+
 function LoadingScreen() {
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-background">
       <div className="flex flex-col items-center gap-4">
-        <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-[#00E5FF] to-[#8B5CF6] shadow-lg shadow-[#00E5FF]/20">
-          <Shield className="size-7 text-white" />
+        <div className="relative">
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 to-blue-600 shadow-lg shadow-blue-500/20">
+            <Shield className="size-7 text-white" />
+          </div>
+          <div className="absolute inset-0 animate-ping rounded-2xl bg-blue-500/20" />
         </div>
-        <div className="flex items-center gap-2 text-sm text-text-secondary">
-          <span className="relative flex size-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-70" />
-            <span className="relative inline-flex size-2 rounded-full bg-primary" />
+        <div className="flex items-center gap-2 text-sm text-muted">
+          <span className="relative flex size-1.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-500 opacity-70" />
+            <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
           </span>
-          Loading AegisNex…
+          Loading AegisNex...
         </div>
       </div>
     </div>
@@ -45,38 +50,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
+  const isPublic = PUBLIC_ROUTES.includes(pathname);
   const isLoginPage = pathname === "/login";
 
   useEffect(() => {
     if (loading) return;
     if (isAuthenticated && isLoginPage) {
-      router.replace("/");
-    } else if (!isAuthenticated && !isLoginPage) {
+      router.replace("/dashboard");
+    } else if (!isAuthenticated && !isPublic) {
       router.replace("/login");
     }
-  }, [isAuthenticated, loading, isLoginPage, router]);
+  }, [isAuthenticated, loading, isLoginPage, isPublic, router]);
+
+  if (isPublic) {
+    return <>{children}</>;
+  }
 
   if (loading) return <LoadingScreen />;
-
-  if (!isAuthenticated && isLoginPage) {
-    return (
-      <div className="relative min-h-screen bg-background text-text-primary bg-noise">
-        {children}
-      </div>
-    );
-  }
 
   if (!isAuthenticated) return null;
 
   return (
-    <div className="relative min-h-screen bg-background text-text-primary bg-noise">
+    <div className="relative min-h-screen bg-background text-text-primary">
       {isOffline && (
         <div className="fixed inset-x-0 top-0 z-[100] flex items-center justify-center gap-2 bg-gradient-to-r from-rose-600/90 to-rose-500/90 px-4 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-sm">
           <WifiOff className="size-3.5" />
           You are offline. Some features may be unavailable.
         </div>
       )}
-      <div className="fixed inset-0 bg-grid pointer-events-none" />
+      <div className="fixed inset-0 bg-grid pointer-events-none opacity-50" />
       <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((value) => !value)} />
       <div className={`transition-all duration-300 ease-out-expo ${collapsed ? "lg:pl-16" : "lg:pl-60"}`}>
         <Header />

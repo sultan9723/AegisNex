@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Settings, Shield, Palette, Globe, Bell, Key, AlertTriangle, Copy, Check, Loader2, Trash2 } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -378,19 +378,17 @@ export default function SettingsPage() {
 
 function SettingCard({ icon: Icon, title, description, children }: { icon: any; title: string; description: string; children: React.ReactNode }) {
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <div className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/8 text-primary ring-1 ring-primary/15">
-            <Icon className="size-3.5" />
-          </div>
-          <div>
-            <CardTitle>{title}</CardTitle>
-            <CardDescription>{description}</CardDescription>
-          </div>
+    <div className="rounded-xl border border-border/40 bg-surface-elevated/40 p-5 transition-all duration-200 hover:border-border/60">
+      <div className="flex items-center gap-2.5 mb-4">
+        <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface-elevated/80 ring-1 ring-border/50">
+          <Icon className="size-3.5 text-text-secondary" />
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">{children}</CardContent>
-    </Card>
+        <div>
+          <h3 className="text-sm font-semibold text-text-primary">{title}</h3>
+          <p className="text-[11px] text-text-tertiary">{description}</p>
+        </div>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </div>
   );
 }

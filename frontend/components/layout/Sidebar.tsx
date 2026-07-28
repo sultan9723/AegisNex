@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ChevronLeft, LogOut, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { navItems } from "./navigation";
+import { navSections } from "./navigation";
 import { useAuth } from "@/lib/auth";
 
 export function Sidebar({
@@ -30,14 +30,15 @@ export function Sidebar({
         collapsed ? "w-16" : "w-60",
       )}
     >
+      {/* Logo */}
       <div className="flex h-14 items-center justify-between border-b border-border/40 px-3">
-        <Link href="/" className="flex items-center gap-2.5 transition-opacity hover:opacity-85">
-          <div className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-[#00E5FF] to-[#8B5CF6] shadow-lg shadow-[#00E5FF]/20">
+        <Link href="/dashboard" className="flex items-center gap-2.5 transition-opacity hover:opacity-85">
+          <div className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-cyan-500 to-violet-500 shadow-lg shadow-cyan-500/20">
             <Shield className="size-[18px] text-white" aria-hidden="true" />
           </div>
           {!collapsed && (
             <span className="text-sm font-bold tracking-tight text-text-primary">
-              AegisNex
+              CommandMesh
             </span>
           )}
         </Link>
@@ -51,55 +52,72 @@ export function Sidebar({
         </button>
       </div>
 
+      {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-2 py-3 custom-scrollbar">
-        <div className="space-y-0.5">
-          {navItems.map((item) => {
-            const active = pathname === item.href || (item.href !== "/" && pathname.startsWith(`${item.href}/`));
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                title={collapsed ? item.label : undefined}
-                className={cn(
-                  "group flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-all duration-200",
-                  collapsed && "justify-center px-0",
-                  active
-                    ? "bg-primary/10 text-primary shadow-sm"
-                    : "text-text-secondary hover:bg-surface-elevated hover:text-text-primary",
-                )}
-              >
-                <Icon
-                  className={cn(
-                    "size-4 shrink-0 transition-all duration-200",
-                    active ? "text-primary" : "text-text-tertiary group-hover:text-text-secondary"
-                  )}
-                  aria-hidden="true"
-                />
-                {!collapsed && <span className="truncate">{item.label}</span>}
-                {!collapsed && active && (
-                  <span className="ml-auto block size-1.5 rounded-full bg-primary shadow-sm shadow-primary/50" />
-                )}
-              </Link>
-            );
-          })}
+        <div className="space-y-4">
+          {navSections.map((section) => (
+            <div key={section.label}>
+              {!collapsed && (
+                <p className="mb-1.5 px-2.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-text-tertiary/60">
+                  {section.label}
+                </p>
+              )}
+              <div className="space-y-0.5">
+                {section.items.map((item) => {
+                  const active =
+                    pathname === item.href ||
+                    (item.href !== "/" && item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      title={collapsed ? item.label : undefined}
+                      className={cn(
+                        "group flex h-9 items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-all duration-200",
+                        collapsed && "justify-center px-0",
+                        active
+                          ? "bg-primary/10 text-primary shadow-sm"
+                          : "text-text-secondary hover:bg-surface-elevated hover:text-text-primary",
+                      )}
+                    >
+                      <Icon
+                        className={cn(
+                          "size-4 shrink-0 transition-all duration-200",
+                          active ? "text-primary" : "text-text-tertiary group-hover:text-text-secondary",
+                        )}
+                        aria-hidden="true"
+                      />
+                      {!collapsed && <span className="truncate">{item.label}</span>}
+                      {!collapsed && active && (
+                        <span className="ml-auto block size-1.5 rounded-full bg-primary shadow-sm shadow-primary/50" />
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </nav>
 
+      {/* User section */}
       <div className="border-t border-border/40 p-2">
-        <div className={cn(
-          "rounded-lg border border-border/50 bg-surface-elevated/40",
-          collapsed ? "p-2" : "p-3"
-        )}>
+        <div
+          className={cn(
+            "rounded-lg border border-border/50 bg-surface-elevated/40",
+            collapsed ? "p-2" : "p-3",
+          )}
+        >
           {!collapsed ? (
             <>
               <div className="mb-2 flex items-center gap-2.5">
-                <div className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-[#00E5FF] to-[#8B5CF6] text-[11px] font-bold text-white shadow-sm">
+                <div className="flex size-7 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-violet-500 text-[11px] font-bold text-white shadow-sm">
                   A
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[12px] font-semibold text-text-primary">Operations</p>
-                  <p className="truncate text-[10px] text-text-tertiary">Control Plane</p>
+                  <p className="truncate text-[12px] font-semibold text-text-primary">MSP Operations</p>
+                  <p className="truncate text-[10px] text-text-tertiary">AI Control Plane</p>
                 </div>
               </div>
               <button
@@ -112,7 +130,7 @@ export function Sidebar({
               </button>
             </>
           ) : (
-            <div className="flex size-9 items-center justify-center rounded-lg bg-gradient-to-br from-[#00E5FF] to-[#8B5CF6] text-sm font-bold text-white shadow-sm">
+            <div className="flex size-9 items-center justify-center rounded-lg bg-gradient-to-br from-cyan-500 to-violet-500 text-sm font-bold text-white shadow-sm">
               A
             </div>
           )}
