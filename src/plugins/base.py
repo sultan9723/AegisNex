@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class PluginType(str, Enum):
@@ -34,11 +34,11 @@ class PluginManifest:
     description: str = ""
     author: str = ""
     license: str = ""
-    dependencies: List[str] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
     min_platform_version: str = "3.0.0"
-    config_schema: Dict[str, Any] = field(default_factory=dict)
+    config_schema: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -56,7 +56,7 @@ class Plugin(ABC):
     def __init__(self, manifest: PluginManifest) -> None:
         self._manifest = manifest
         self._status = PluginStatus.LOADED
-        self._config: Dict[str, Any] = {}
+        self._config: dict[str, Any] = {}
 
     @property
     def manifest(self) -> PluginManifest:
@@ -66,10 +66,10 @@ class Plugin(ABC):
     def status(self) -> PluginStatus:
         return self._status
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> dict[str, Any]:
         return dict(self._config)
 
-    def set_config(self, config: Dict[str, Any]) -> None:
+    def set_config(self, config: dict[str, Any]) -> None:
         self._config = dict(config)
 
     async def on_load(self) -> None:
@@ -84,7 +84,7 @@ class Plugin(ABC):
     async def on_unload(self) -> None:
         self._status = PluginStatus.LOADED
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **self._manifest.to_dict(),
             "status": self._status.value,
@@ -98,8 +98,7 @@ class ToolPlugin(Plugin):
         self._manifest.plugin_type = PluginType.TOOL
 
     @abstractmethod
-    def register_tools(self) -> List[Dict[str, Any]]:
-        ...
+    def register_tools(self) -> list[dict[str, Any]]: ...
 
 
 class IntegrationPlugin(Plugin):
@@ -108,29 +107,26 @@ class IntegrationPlugin(Plugin):
         self._manifest.plugin_type = PluginType.INTEGRATION
 
     @abstractmethod
-    def get_client(self) -> Any:
-        ...
+    def get_client(self) -> Any: ...
 
     @abstractmethod
-    async def health_check(self) -> Dict[str, Any]:
-        ...
+    async def health_check(self) -> dict[str, Any]: ...
 
 
 class SkillPlugin(Plugin):
     def __init__(self, manifest: PluginManifest) -> None:
         super().__init__(manifest)
         self._manifest.plugin_type = PluginType.SKILL
-        self._required_tools: List[str] = []
-        self._expected_outputs: List[str] = []
+        self._required_tools: list[str] = []
+        self._expected_outputs: list[str] = []
 
     @property
-    def required_tools(self) -> List[str]:
+    def required_tools(self) -> list[str]:
         return list(self._required_tools)
 
     @property
-    def expected_outputs(self) -> List[str]:
+    def expected_outputs(self) -> list[str]:
         return list(self._expected_outputs)
 
     @abstractmethod
-    async def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        ...
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]: ...

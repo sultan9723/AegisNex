@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import builtins
 import json
-import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.workflow_designer.models import WorkflowDefinition
 
@@ -23,9 +23,7 @@ class WorkflowStorage:
         return self._storage_dir / f"{workflow_id}.json"
 
     def save(self, workflow: WorkflowDefinition) -> str:
-        workflow.updated_at = (
-            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        )
+        workflow.updated_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         if not workflow.id:
             workflow.id = uuid.uuid4().hex
         file_path = self._path_for(workflow.id)
@@ -35,7 +33,7 @@ class WorkflowStorage:
         )
         return workflow.id
 
-    def load(self, workflow_id: str) -> Optional[WorkflowDefinition]:
+    def load(self, workflow_id: str) -> WorkflowDefinition | None:
         file_path = self._path_for(workflow_id)
         if not file_path.exists():
             return None
@@ -43,9 +41,7 @@ class WorkflowStorage:
             data = json.loads(file_path.read_text(encoding="utf-8"))
             return WorkflowDefinition.from_dict(data)
         except (json.JSONDecodeError, KeyError, ValueError) as exc:
-            raise RuntimeError(
-                f"Failed to load workflow '{workflow_id}': {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to load workflow '{workflow_id}': {exc}") from exc
 
     def delete(self, workflow_id: str) -> bool:
         file_path = self._path_for(workflow_id)
@@ -54,8 +50,8 @@ class WorkflowStorage:
         file_path.unlink()
         return True
 
-    def list(self) -> List[Dict[str, Any]]:
-        summaries: List[Dict[str, Any]] = []
+    def list(self) -> builtins.list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
         for entry in sorted(self._storage_dir.iterdir()):
             if entry.suffix != ".json":
                 continue
@@ -79,7 +75,7 @@ class WorkflowStorage:
                 continue
         return summaries
 
-    def get(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+    def get(self, workflow_id: str) -> dict[str, Any] | None:
         file_path = self._path_for(workflow_id)
         if not file_path.exists():
             return None
@@ -87,9 +83,7 @@ class WorkflowStorage:
             data = json.loads(file_path.read_text(encoding="utf-8"))
             return dict(data)
         except (json.JSONDecodeError, OSError) as exc:
-            raise RuntimeError(
-                f"Failed to read workflow '{workflow_id}': {exc}"
-            ) from exc
+            raise RuntimeError(f"Failed to read workflow '{workflow_id}': {exc}") from exc
 
     def exists(self, workflow_id: str) -> bool:
         return self._path_for(workflow_id).exists()

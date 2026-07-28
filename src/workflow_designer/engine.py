@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 import time
 import traceback
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 from src.workflow_designer.models import (
     WorkflowDefinition,
@@ -17,15 +17,15 @@ from src.workflow_designer.models import (
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _evaluate_condition(expression: str, context: Dict[str, Any]) -> bool:
+def _evaluate_condition(expression: str, context: dict[str, Any]) -> bool:
     """Safely evaluate a condition expression against context data."""
     if not expression:
         return True
 
-    safe_globals: Dict[str, Any] = {
+    safe_globals: dict[str, Any] = {
         "True": True,
         "False": False,
         "None": None,
@@ -57,24 +57,20 @@ def _evaluate_condition(expression: str, context: Dict[str, Any]) -> bool:
 
 def _get_next_node(
     current_node_id: str,
-    edges: List[WorkflowEdge],
-    context: Dict[str, Any],
-    nodes: List[WorkflowNode],
-) -> Optional[WorkflowNode]:
+    edges: list[WorkflowEdge],
+    context: dict[str, Any],
+    nodes: list[WorkflowNode],
+) -> WorkflowNode | None:
     """Determine the next node based on edges and context."""
     outgoing = [e for e in edges if e.source == current_node_id]
     if not outgoing:
         return None
 
-    current_node = next(
-        (n for n in nodes if n.id == current_node_id), None
-    )
+    current_node = next((n for n in nodes if n.id == current_node_id), None)
     if current_node and current_node.type == WorkflowNodeType.CONDITION:
         for edge in outgoing:
             if _evaluate_condition(edge.condition, context):
-                target = next(
-                    (n for n in nodes if n.id == edge.target), None
-                )
+                target = next((n for n in nodes if n.id == edge.target), None)
                 context["_last_matched_condition"] = edge.condition
                 return target
         return None
@@ -89,11 +85,11 @@ class WorkflowEngine:
     def execute(
         self,
         workflow: WorkflowDefinition,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         start_time = time.time()
-        ctx: Dict[str, Any] = copy.deepcopy(context) if context else {}
-        trace: List[Dict[str, Any]] = []
+        ctx: dict[str, Any] = copy.deepcopy(context) if context else {}
+        trace: list[dict[str, Any]] = []
         overall_status = "completed"
 
         if not workflow.nodes or not workflow.edges:
@@ -106,9 +102,7 @@ class WorkflowEngine:
             }
 
         node_map = {n.id: n for n in workflow.nodes}
-        trigger = next(
-            (n for n in workflow.nodes if n.type == WorkflowNodeType.TRIGGER), None
-        )
+        trigger = next((n for n in workflow.nodes if n.type == WorkflowNodeType.TRIGGER), None)
         if trigger is None:
             return {
                 "status": "error",
@@ -139,7 +133,7 @@ class WorkflowEngine:
 
             step_count += 1
             node_start = time.time()
-            step_entry: Dict[str, Any] = {
+            step_entry: dict[str, Any] = {
                 "node_id": current_node.id,
                 "node_label": current_node.label,
                 "node_type": current_node.type.value,
@@ -195,28 +189,27 @@ class WorkflowEngine:
     def execute_node(
         self,
         node: WorkflowNode,
-        context: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
         if node.type == WorkflowNodeType.TRIGGER:
             return self._handle_trigger(node, context)
-        elif node.type == WorkflowNodeType.AI_PLANNING:
+        if node.type == WorkflowNodeType.AI_PLANNING:
             return self._handle_ai_planning(node, context)
-        elif node.type == WorkflowNodeType.TOOL_EXECUTION:
+        if node.type == WorkflowNodeType.TOOL_EXECUTION:
             return self._handle_tool_execution(node, context)
-        elif node.type == WorkflowNodeType.APPROVAL:
+        if node.type == WorkflowNodeType.APPROVAL:
             return self._handle_approval(node, context)
-        elif node.type == WorkflowNodeType.RUNBOOK:
+        if node.type == WorkflowNodeType.RUNBOOK:
             return self._handle_runbook(node, context)
-        elif node.type == WorkflowNodeType.NOTIFICATION:
+        if node.type == WorkflowNodeType.NOTIFICATION:
             return self._handle_notification(node, context)
-        elif node.type == WorkflowNodeType.CONDITION:
+        if node.type == WorkflowNodeType.CONDITION:
             return self._handle_condition(node, context)
-        elif node.type == WorkflowNodeType.END:
+        if node.type == WorkflowNodeType.END:
             return {"status": "completed", "output": {}}
-        else:
-            return {"status": "error", "error": f"Unknown node type: {node.type}"}
+        return {"status": "error", "error": f"Unknown node type: {node.type}"}
 
-    def _handle_trigger(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_trigger(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         trigger_type = node.config.get("trigger_type", "manual")
         if trigger_type == "webhook":
             payload = node.config.get("payload", {})
@@ -231,13 +224,13 @@ class WorkflowEngine:
                 "output": {"trigger_type": trigger_type, "validated": validated},
                 "error": "" if validated else "Required fields missing",
             }
-        elif trigger_type == "cron":
+        if trigger_type == "cron":
             schedule = node.config.get("schedule", "")
             return {
                 "status": "completed",
                 "output": {"trigger_type": trigger_type, "schedule": schedule},
             }
-        elif trigger_type == "incident":
+        if trigger_type == "incident":
             incident_id = node.config.get("incident_id", "")
             severity = node.config.get("severity", "")
             context["incident_id"] = incident_id
@@ -250,13 +243,12 @@ class WorkflowEngine:
                     "severity": severity,
                 },
             }
-        else:
-            return {
-                "status": "completed",
-                "output": {"trigger_type": "manual", "triggered_at": _utc_now()},
-            }
+        return {
+            "status": "completed",
+            "output": {"trigger_type": "manual", "triggered_at": _utc_now()},
+        }
 
-    def _handle_ai_planning(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_ai_planning(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         from src.intelligence.graph import run_plan, run_workflow
 
         user_request = (
@@ -282,7 +274,7 @@ class WorkflowEngine:
             "error": "; ".join(result.get("errors", [])),
         }
 
-    def _handle_tool_execution(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_tool_execution(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         from src.intelligence.tools import execute_tool
 
         tool_name = node.config.get("tool_name") or context.get("_tool_name", "")
@@ -296,7 +288,7 @@ class WorkflowEngine:
             "error": result.get("error", ""),
         }
 
-    def _handle_approval(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_approval(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         approval_id = node.config.get("approval_id", f"approval_{node.id}")
         approvers = node.config.get("approvers", [])
         timeout_minutes = node.config.get("timeout_minutes", 60)
@@ -338,7 +330,7 @@ class WorkflowEngine:
             "pending": pending,
         }
 
-    def _handle_runbook(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_runbook(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         from src.intelligence.runbooks.engine import RunbookEngine
         from src.intelligence.runbooks.parser import RunbookParser
 
@@ -350,6 +342,7 @@ class WorkflowEngine:
             try:
                 path = node.config.get("base_path", ".")
                 from pathlib import Path
+
                 content = Path(path, runbook_source).read_text(encoding="utf-8")
                 parser = RunbookParser()
                 runbook = parser.parse(content)
@@ -370,15 +363,17 @@ class WorkflowEngine:
                 "runbook_name": getattr(runbook, "name", ""),
                 "status": result.status,
                 "step_count": len(result.step_results),
-                "results": [s.to_dict() if hasattr(s, "to_dict") else str(s) for s in result.step_results],
+                "results": [
+                    s.to_dict() if hasattr(s, "to_dict") else str(s) for s in result.step_results
+                ],
             },
             "error": "" if result.status == "completed" else result.status,
         }
 
-    def _handle_notification(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_notification(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
+        from src.config import Config
         from src.notifications.base import NotificationResult
         from src.notifications.factory import build_notification_providers
-        from src.config import Config
 
         channel = node.config.get("channel", "email")
         subject = node.config.get("subject", "AegisNex Workflow Notification")
@@ -397,11 +392,15 @@ class WorkflowEngine:
             config = Config() if hasattr(Config, "__init__") else Config
             providers = build_notification_providers(config)
 
-            results: List[Dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
             matched = False
             for provider in providers:
                 provider_channel = getattr(provider, "channel", channel)
-                if channel != "all" and provider_channel != channel and channel not in str(type(provider).__name__).lower():
+                if (
+                    channel != "all"
+                    and provider_channel != channel
+                    and channel not in str(type(provider).__name__).lower()
+                ):
                     continue
                 if not getattr(provider, "enabled", True):
                     continue
@@ -423,7 +422,11 @@ class WorkflowEngine:
             if not matched:
                 return {
                     "status": "completed",
-                    "output": {"channel": channel, "sent": False, "note": "No matching provider found"},
+                    "output": {
+                        "channel": channel,
+                        "sent": False,
+                        "note": "No matching provider found",
+                    },
                 }
 
             all_ok = all(r["success"] for r in results)
@@ -439,7 +442,7 @@ class WorkflowEngine:
                 "output": {"channel": channel, "sent": False},
             }
 
-    def _handle_condition(self, node: WorkflowNode, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _handle_condition(self, node: WorkflowNode, context: dict[str, Any]) -> dict[str, Any]:
         expression = node.config.get("expression", "")
         if not expression:
             return {"status": "completed", "output": {"matched": True, "expression": ""}}
@@ -454,12 +457,12 @@ class WorkflowEngine:
         }
 
 
-def validate_workflow(definition: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def validate_workflow(definition: dict[str, Any]) -> tuple[bool, list[str]]:
     """Validate a workflow definition dictionary.
 
     Returns (is_valid, list_of_error_messages).
     """
-    errors: List[str] = []
+    errors: list[str] = []
 
     if not isinstance(definition, dict):
         return False, ["Definition must be a dictionary"]
@@ -519,9 +522,7 @@ def validate_workflow(definition: Dict[str, Any]) -> Tuple[bool, List[str]]:
             errors.append(f"Edge '{eid}' references unknown target node '{target}'")
 
     # Must have exactly one TRIGGER
-    trigger_count = sum(
-        1 for n in nodes if isinstance(n, dict) and n.get("type") == "TRIGGER"
-    )
+    trigger_count = sum(1 for n in nodes if isinstance(n, dict) and n.get("type") == "TRIGGER")
     if trigger_count != 1:
         errors.append(f"Workflow must have exactly 1 TRIGGER node, found {trigger_count}")
 

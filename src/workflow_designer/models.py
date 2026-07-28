@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
 
 
 class WorkflowNodeType(str, enum.Enum):
@@ -24,11 +24,11 @@ class WorkflowNode:
     id: str
     type: WorkflowNodeType
     label: str
-    config: Dict[str, Any] = field(default_factory=dict)
-    position: Dict[str, float] = field(default_factory=lambda: {"x": 0.0, "y": 0.0})
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
+    position: dict[str, float] = field(default_factory=lambda: {"x": 0.0, "y": 0.0})
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "type": self.type.value,
@@ -39,7 +39,7 @@ class WorkflowNode:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> WorkflowNode:
+    def from_dict(cls, data: dict[str, Any]) -> WorkflowNode:
         return cls(
             id=data["id"],
             type=WorkflowNodeType(data["type"]),
@@ -58,7 +58,7 @@ class WorkflowEdge:
     label: str = ""
     condition: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "source": self.source,
@@ -68,7 +68,7 @@ class WorkflowEdge:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> WorkflowEdge:
+    def from_dict(cls, data: dict[str, Any]) -> WorkflowEdge:
         return cls(
             id=data["id"],
             source=data["source"],
@@ -84,21 +84,21 @@ class WorkflowDefinition:
     name: str
     description: str = ""
     version: str = "1.0.0"
-    nodes: List[WorkflowNode] = field(default_factory=list)
-    edges: List[WorkflowEdge] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
+    nodes: list[WorkflowNode] = field(default_factory=list)
+    edges: list[WorkflowEdge] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
     enabled: bool = True
 
     def __post_init__(self) -> None:
-        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         if not self.created_at:
             self.created_at = now
         if not self.updated_at:
             self.updated_at = now
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
@@ -113,7 +113,7 @@ class WorkflowDefinition:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> WorkflowDefinition:
+    def from_dict(cls, data: dict[str, Any]) -> WorkflowDefinition:
         return cls(
             id=data["id"],
             name=data.get("name", ""),
@@ -127,8 +127,8 @@ class WorkflowDefinition:
             enabled=data.get("enabled", True),
         )
 
-    def validate(self) -> Tuple[bool, List[str]]:
-        errors: List[str] = []
+    def validate(self) -> tuple[bool, list[str]]:
+        errors: list[str] = []
 
         if not self.id:
             errors.append("Workflow ID is required")
@@ -143,7 +143,7 @@ class WorkflowDefinition:
 
         # Check for duplicate node IDs
         if len(node_ids) != len(self.nodes):
-            seen: List[str] = []
+            seen: list[str] = []
             for n in self.nodes:
                 if n.id in seen:
                     errors.append(f"Duplicate node id: {n.id}")
@@ -184,17 +184,17 @@ class WorkflowDefinition:
 
         return (len(errors) == 0, errors)
 
-    def to_execution_graph(self) -> List[Dict[str, Any]]:
+    def to_execution_graph(self) -> list[dict[str, Any]]:
         _, errors = self.validate()
         if errors:
             raise ValueError(f"Invalid workflow: {'; '.join(errors)}")
 
-        adjacency: Dict[str, List[Tuple[str, str]]] = {}
+        adjacency: dict[str, list[tuple[str, str]]] = {}
         for edge in self.edges:
             adjacency.setdefault(edge.source, []).append((edge.target, edge.condition))
 
         trigger = next(n for n in self.nodes if n.type == WorkflowNodeType.TRIGGER)
-        ordered: List[Dict[str, Any]] = []
+        ordered: list[dict[str, Any]] = []
         visited: set = set()
 
         def _traverse(node_id: str) -> None:
@@ -212,9 +212,7 @@ class WorkflowDefinition:
             }
             if node.type == WorkflowNodeType.CONDITION:
                 outgoing = adjacency.get(node_id, [])
-                entry["branches"] = [
-                    {"target": t, "condition": c} for t, c in outgoing
-                ]
+                entry["branches"] = [{"target": t, "condition": c} for t, c in outgoing]
             ordered.append(entry)
             if node.type == WorkflowNodeType.END:
                 return

@@ -1,14 +1,22 @@
-from src.plugins.base import Plugin, PluginManifest, PluginStatus, PluginType, ToolPlugin, IntegrationPlugin, SkillPlugin
+from src.plugins.base import (
+    IntegrationPlugin,
+    Plugin,
+    PluginManifest,
+    PluginStatus,
+    PluginType,
+    SkillPlugin,
+    ToolPlugin,
+)
 from src.plugins.registry import PluginRegistry, get_plugin_registry
 
 __all__ = [
+    "IntegrationPlugin",
     "Plugin",
     "PluginManifest",
+    "PluginRegistry",
     "PluginStatus",
     "PluginType",
-    "ToolPlugin",
-    "IntegrationPlugin",
     "SkillPlugin",
-    "PluginRegistry",
+    "ToolPlugin",
     "get_plugin_registry",
 ]

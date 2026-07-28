@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +153,9 @@ class ComplianceEngine:
             "total_controls": total,
             "compliant": compliant,
             "non_compliant": non_compliant,
-            "not_applicable": sum(1 for r in results if r.status == ComplianceStatus.NOT_APPLICABLE),
+            "not_applicable": sum(
+                1 for r in results if r.status == ComplianceStatus.NOT_APPLICABLE
+            ),
             "not_checked": sum(1 for r in results if r.status == ComplianceStatus.NOT_CHECKED),
             "in_progress": sum(1 for r in results if r.status == ComplianceStatus.IN_PROGRESS),
             "score": score,
@@ -213,13 +212,9 @@ class ComplianceEngine:
             dashboard["frameworks"].append(fw_data)
             total_controls += summary["total_controls"]
             total_compliant += summary["compliant"]
-            total_applicable += (
-                summary["total_controls"] - summary["not_applicable"]
-            )
+            total_applicable += summary["total_controls"] - summary["not_applicable"]
         if total_applicable > 0:
-            dashboard["overall_score"] = round(
-                (total_compliant / total_applicable) * 100, 2
-            )
+            dashboard["overall_score"] = round((total_compliant / total_applicable) * 100, 2)
         dashboard["overall_status"] = (
             "healthy"
             if dashboard["overall_score"] >= 90
@@ -322,9 +317,7 @@ class ComplianceEngine:
             return ([], ComplianceStatus.NOT_CHECKED, "Repository not available")
         try:
             targets = self._repo.list_monitoring_targets()
-            has_network = any(
-                t.get("target_type") in ("http", "tcp") for t in targets
-            )
+            has_network = any(t.get("target_type") in ("http", "tcp") for t in targets)
             if has_network:
                 return (
                     [{"type": "network_targets", "found": True}],
@@ -367,9 +360,7 @@ class ComplianceEngine:
         try:
             audit_logs = self._repo.fetch_all("audit_logs", limit=10)
             provisioning_events = [
-                l
-                for l in audit_logs
-                if "provision" in str(l.get("action", "")).lower()
+                l for l in audit_logs if "provision" in str(l.get("action", "")).lower()
             ]
             if provisioning_events:
                 return (
@@ -472,9 +463,7 @@ class ComplianceEngine:
             return ([], ComplianceStatus.NOT_CHECKED, "Repository not available")
         try:
             settings = self._repo.get_settings()
-            has_tls = bool(
-                settings.get("grafana_url", "").startswith("https")
-            )
+            has_tls = bool(settings.get("grafana_url", "").startswith("https"))
             return (
                 [
                     {
@@ -483,7 +472,9 @@ class ComplianceEngine:
                     }
                 ],
                 ComplianceStatus.COMPLIANT if has_tls else ComplianceStatus.NON_COMPLIANT,
-                "TLS encryption detected." if has_tls else "No TLS encryption detected in configuration.",
+                "TLS encryption detected."
+                if has_tls
+                else "No TLS encryption detected in configuration.",
             )
         except Exception as exc:
             return ([{"error": str(exc)}], ComplianceStatus.IN_PROGRESS, f"Error: {exc}")
@@ -556,7 +547,11 @@ class ComplianceEngine:
         has_backups = bool(backups)
         if has_backups:
             evidence.append(
-                {"type": "backup_files", "count": len(backups), "files": [str(b) for b in backups[:5]]}
+                {
+                    "type": "backup_files",
+                    "count": len(backups),
+                    "files": [str(b) for b in backups[:5]],
+                }
             )
         compliant = has_backups or has_wal
         if compliant:
@@ -611,9 +606,7 @@ class ComplianceEngine:
         try:
             audit_logs = self._repo.fetch_all("audit_logs", limit=50)
             admin_actions = [
-                l
-                for l in audit_logs
-                if str(l.get("actor", "")).lower() in ("admin", "system")
+                l for l in audit_logs if str(l.get("actor", "")).lower() in ("admin", "system")
             ]
             if admin_actions:
                 return (
@@ -705,9 +698,7 @@ class ComplianceEngine:
             incidents = self._repo.fetch_all("incidents", limit=1)
             if incidents:
                 return (
-                    [
-                        {"type": "incidents", "tracked": True, "sample_size": len(incidents)}
-                    ],
+                    [{"type": "incidents", "tracked": True, "sample_size": len(incidents)}],
                     ComplianceStatus.COMPLIANT,
                     "Incidents are being tracked.",
                 )
@@ -940,7 +931,10 @@ class ComplianceEngine:
             ]
             evidence = [
                 {"type": "ssl_targets", "count": len(ssl_targets)},
-                {"type": "settings", "grafana_https": settings.get("grafana_url", "").startswith("https://")},
+                {
+                    "type": "settings",
+                    "grafana_https": settings.get("grafana_url", "").startswith("https://"),
+                },
             ]
             if ssl_targets:
                 return (
@@ -1220,6 +1214,7 @@ class ComplianceEngine:
     def _check_password_storage_check(self) -> tuple[list[dict], ComplianceStatus, str]:
         try:
             from src.auth import hash_api_key
+
             has_hash = callable(hash_api_key)
             return (
                 [{"type": "password_storage", "hashing_available": has_hash}],
@@ -1236,6 +1231,7 @@ class ComplianceEngine:
     def _check_rate_limiting_check(self) -> tuple[list[dict], ComplianceStatus, str]:
         try:
             from slowapi import Limiter
+
             has_rate_limiting = True
         except ImportError:
             has_rate_limiting = False
@@ -1261,6 +1257,7 @@ class ComplianceEngine:
     def _check_session_token_check(self) -> tuple[list[dict], ComplianceStatus, str]:
         try:
             import jwt as pyjwt
+
             has_jwt = True
         except ImportError:
             has_jwt = False
@@ -1330,6 +1327,7 @@ class ComplianceEngine:
     def _check_sqli_prevention_check(self) -> tuple[list[dict], ComplianceStatus, str]:
         try:
             import sqlite3
+
             has_parameterized = True
         except ImportError:
             has_parameterized = False
@@ -1362,6 +1360,7 @@ class ComplianceEngine:
     def _check_rng_security_check(self) -> tuple[list[dict], ComplianceStatus, str]:
         try:
             import secrets
+
             has_secure_rng = True
         except ImportError:
             has_secure_rng = False

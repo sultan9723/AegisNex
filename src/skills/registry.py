@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import builtins
+from typing import Any
 
 from src.plugins.base import PluginStatus, SkillPlugin
 
 
 class SkillRegistry:
     def __init__(self) -> None:
-        self._skills: Dict[str, SkillPlugin] = {}
+        self._skills: dict[str, SkillPlugin] = {}
 
     def register(self, skill: SkillPlugin) -> None:
         self._skills[skill.manifest.id] = skill
@@ -17,25 +18,17 @@ class SkillRegistry:
     def unregister(self, skill_id: str) -> bool:
         return self._skills.pop(skill_id, None) is not None
 
-    def get(self, skill_id: str) -> Optional[SkillPlugin]:
+    def get(self, skill_id: str) -> SkillPlugin | None:
         return self._skills.get(skill_id)
 
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self) -> builtins.list[dict[str, Any]]:
         return [skill.to_dict() for skill in self._skills.values()]
 
-    def find_by_tool(self, tool_name: str) -> List[SkillPlugin]:
-        return [
-            skill
-            for skill in self._skills.values()
-            if tool_name in skill.required_tools
-        ]
+    def find_by_tool(self, tool_name: str) -> builtins.list[SkillPlugin]:
+        return [skill for skill in self._skills.values() if tool_name in skill.required_tools]
 
-    def get_enabled(self) -> List[SkillPlugin]:
-        return [
-            skill
-            for skill in self._skills.values()
-            if skill.status == PluginStatus.ENABLED
-        ]
+    def get_enabled(self) -> builtins.list[SkillPlugin]:
+        return [skill for skill in self._skills.values() if skill.status == PluginStatus.ENABLED]
 
     def enable(self, skill_id: str) -> bool:
         skill = self._skills.get(skill_id)
