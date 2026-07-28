@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Dict, Mapping
+from collections.abc import Mapping
+from typing import Any
 
+from src.dns_monitor import DnsMonitor
+from src.failsafe import safe_import
 from src.http_monitor import HttpEndpointMonitor
 from src.incidents import IncidentManager
 from src.platform_db import PlatformRepository
 from src.ssl_monitor import SslCertificateMonitor
 from src.tcp_monitor import TcpTargetMonitor
-from src.dns_monitor import DnsMonitor
-from src.failsafe import failsafe, safe_import
 
 
 class MonitoringEngine:
@@ -37,7 +38,7 @@ class MonitoringEngine:
             await asyncio.to_thread(self.run_scheduled)
             await asyncio.sleep(5)
 
-    def run_scheduled(self) -> Dict[str, Any]:
+    def run_scheduled(self) -> dict[str, Any]:
         """Run checks respecting per-target check_interval_seconds."""
         targets = self.platform_repository.list_monitoring_targets()
         results = []
@@ -56,7 +57,7 @@ class MonitoringEngine:
         self._check_system_metrics()
         return {"status": "ok", "checked": len(results), "results": results}
 
-    def run_once(self) -> Dict[str, Any]:
+    def run_once(self) -> dict[str, Any]:
         """Run a full check of all active targets immediately, bypassing per-target intervals."""
         targets = self.platform_repository.list_monitoring_targets()
         results = []
@@ -83,30 +84,52 @@ class MonitoringEngine:
     def _check_system_metrics(self) -> None:
         try:
             import psutil
+
             cpu = psutil.cpu_percent(interval=0.1)
             mem = psutil.virtual_memory().percent
             disk = psutil.disk_usage("/").percent
-            self._sync_system_incident("high_cpu", cpu > 90, "high", f"CPU usage at {cpu:.1f}% exceeds 90% threshold")
-            self._sync_system_incident("high_memory", mem > 90, "high", f"Memory usage at {mem:.1f}% exceeds 90% threshold")
-            self._sync_system_incident("high_disk", disk > 90, "high", f"Disk usage at {disk:.1f}% exceeds 90% threshold")
+            self._sync_system_incident(
+                "high_cpu", cpu > 90, "high", f"CPU usage at {cpu:.1f}% exceeds 90% threshold"
+            )
+            self._sync_system_incident(
+                "high_memory", mem > 90, "high", f"Memory usage at {mem:.1f}% exceeds 90% threshold"
+            )
+            self._sync_system_incident(
+                "high_disk", disk > 90, "high", f"Disk usage at {disk:.1f}% exceeds 90% threshold"
+            )
         except Exception:
             pass
 
-    def _sync_system_incident(self, incident_type: str, is_breached: bool, severity: str, description: str) -> None:
-        active = [i for i in self.incident_manager.get_active_incidents() if i.incident_type == incident_type and i.service_name == "system"]
+    def _sync_system_incident(
+        self, incident_type: str, is_breached: bool, severity: str, description: str
+    ) -> None:
+        active = [
+            i
+            for i in self.incident_manager.get_active_incidents()
+            if i.incident_type == incident_type and i.service_name == "system"
+        ]
         if is_breached and not active:
-            self.incident_manager.create_incident(severity=severity, service_name="system", incident_type=incident_type, description=description)
+            self.incident_manager.create_incident(
+                severity=severity,
+                service_name="system",
+                incident_type=incident_type,
+                description=description,
+            )
         elif not is_breached and active:
             for incident in active:
-                self.incident_manager.resolve_incident(incident.incident_id, actor="system", resolution_notes="System metric recovered.")
+                self.incident_manager.resolve_incident(
+                    incident.incident_id,
+                    actor="system",
+                    resolution_notes="System metric recovered.",
+                )
 
-    def run_target(self, target_id: int, actor: str = "system") -> Dict[str, Any] | None:
+    def run_target(self, target_id: int, actor: str = "system") -> dict[str, Any] | None:
         target = self.platform_repository.get_monitoring_target(target_id)
         if target is None:
             return None
         return self._process_target(target, actor=actor)
 
-    def _process_target(self, target: Mapping[str, Any], actor: str) -> Dict[str, Any]:
+    def _process_target(self, target: Mapping[str, Any], actor: str) -> dict[str, Any]:
         result = self._run_target(target)
         self.platform_repository.save_check_result(target, result)
         self._sync_incident(target, result)
@@ -119,7 +142,9 @@ class MonitoringEngine:
         )
         return result
 
-    def _get_or_create_monitor(self, target_type: str, name: str, address: str, target: Mapping[str, Any]) -> Any:
+    def _get_or_create_monitor(
+        self, target_type: str, name: str, address: str, target: Mapping[str, Any]
+    ) -> Any:
         cache_key = f"{target_type}:{name}:{address}"
         if cache_key in self._monitor_cache:
             return self._monitor_cache[cache_key]
@@ -155,7 +180,9 @@ class MonitoringEngine:
                 storage_repository=self.platform_repository,
             )
         elif target_type == "container":
-            ContainerHealthMonitor = safe_import("src.container_health_monitor", "ContainerHealthMonitor")
+            ContainerHealthMonitor = safe_import(
+                "src.container_health_monitor", "ContainerHealthMonitor"
+            )
             if ContainerHealthMonitor is not None:
                 monitor = ContainerHealthMonitor(
                     {name: address},
@@ -170,7 +197,7 @@ class MonitoringEngine:
         self._monitor_cache[cache_key] = monitor
         return monitor
 
-    def _run_target(self, target: Mapping[str, Any]) -> Dict[str, Any]:
+    def _run_target(self, target: Mapping[str, Any]) -> dict[str, Any]:
         target_type = str(target.get("target_type", "")).lower()
         name = str(target.get("name", ""))
         address = str(target.get("address", ""))
@@ -183,15 +210,13 @@ class MonitoringEngine:
                 "error": f"Unsupported target type: {target_type}",
             }
         payload = monitor.run({})
-        if target_type == "http":
-            result = dict(payload["checks"][0]) if payload.get("checks") else {}
-        elif target_type == "tcp":
-            result = dict(payload["checks"][0]) if payload.get("checks") else {}
-        elif target_type == "ssl":
-            result = dict(payload["checks"][0]) if payload.get("checks") else {}
-        elif target_type == "dns":
-            result = dict(payload["checks"][0]) if payload.get("checks") else {}
-        elif target_type == "container":
+        if (
+            target_type == "http"
+            or target_type == "tcp"
+            or target_type == "ssl"
+            or target_type == "dns"
+            or target_type == "container"
+        ):
             result = dict(payload["checks"][0]) if payload.get("checks") else {}
         else:
             result = {}

@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-import json
-from typing import Any, Dict, Mapping
-
+from typing import Any
 
 PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 
 @dataclass(frozen=True)
 class MetricSnapshot:
-    values: Dict[str, float]
+    values: dict[str, float]
 
 
 class PrometheusExporter:
@@ -52,33 +52,23 @@ class PrometheusExporter:
             gauge.set(value)
         return generate_latest(registry), CONTENT_TYPE_LATEST
 
-    def _collect_system_metrics(self) -> Dict[str, float]:
+    def _collect_system_metrics(self) -> dict[str, float]:
         monitor_payload = self.services.monitor.run({})
         network = self._network_stats()
         return {
-            "aegisnex_system_cpu_usage_percent": _float_value(
-                monitor_payload.get("cpu_percent")
-            ),
+            "aegisnex_system_cpu_usage_percent": _float_value(monitor_payload.get("cpu_percent")),
             "aegisnex_system_memory_usage_percent": _float_value(
                 monitor_payload.get("ram_percent")
             ),
-            "aegisnex_system_disk_usage_percent": _float_value(
-                monitor_payload.get("disk_percent")
-            ),
-            "aegisnex_system_network_bytes_sent": _float_value(
-                network.get("bytes_sent")
-            ),
-            "aegisnex_system_network_bytes_received": _float_value(
-                network.get("bytes_recv")
-            ),
+            "aegisnex_system_disk_usage_percent": _float_value(monitor_payload.get("disk_percent")),
+            "aegisnex_system_network_bytes_sent": _float_value(network.get("bytes_sent")),
+            "aegisnex_system_network_bytes_received": _float_value(network.get("bytes_recv")),
         }
 
-    def _collect_container_metrics(self) -> Dict[str, float]:
+    def _collect_container_metrics(self) -> dict[str, float]:
         docker_payload = self.services.docker_scanner.run({"include_all": True})
         containers = (
-            docker_payload.get("containers", [])
-            if docker_payload.get("status") == "ok"
-            else []
+            docker_payload.get("containers", []) if docker_payload.get("status") == "ok" else []
         )
         running = 0
         stopped = 0
@@ -98,7 +88,7 @@ class PrometheusExporter:
             "aegisnex_containers_unhealthy": float(unhealthy),
         }
 
-    def _collect_incident_metrics(self) -> Dict[str, float]:
+    def _collect_incident_metrics(self) -> dict[str, float]:
         incidents = self.services.incident_manager.list_incidents()
         active = sum(1 for incident in incidents if incident.status == "active")
         resolved = sum(1 for incident in incidents if incident.status == "resolved")
@@ -108,7 +98,7 @@ class PrometheusExporter:
             "aegisnex_incidents_total": float(len(incidents)),
         }
 
-    def _collect_remediation_metrics(self) -> Dict[str, float]:
+    def _collect_remediation_metrics(self) -> dict[str, float]:
         restart_history = load_restart_history(self.services.restart_history_path)
         incidents = self.services.incident_manager.list_incidents()
         restart_attempts = sum(
@@ -130,7 +120,7 @@ class PrometheusExporter:
             "aegisnex_remediation_failed_restarts_total": float(failed),
         }
 
-    def _collect_notification_metrics(self) -> Dict[str, float]:
+    def _collect_notification_metrics(self) -> dict[str, float]:
         events = self.services.incident_manager.list_notification_events()
         sent = sum(1 for event in events if event.get("status") == "ok")
         failed = sum(1 for event in events if event.get("status") == "error")
@@ -139,7 +129,7 @@ class PrometheusExporter:
             "aegisnex_notifications_failed_total": float(failed),
         }
 
-    def _collect_target_metrics(self) -> Dict[str, float]:
+    def _collect_target_metrics(self) -> dict[str, float]:
         """Collect monitoring target health metrics."""
         repository = getattr(self.services, "platform_repository", None)
         if repository is None:
@@ -167,13 +157,11 @@ class PrometheusExporter:
             "aegisnex_targets_unhealthy": float(unhealthy),
         }
 
-    def _collect_container_detail_metrics(self) -> Dict[str, float]:
+    def _collect_container_detail_metrics(self) -> dict[str, float]:
         """Collect per-container CPU/memory metrics."""
         docker_payload = self.services.docker_scanner.run({"include_all": True})
         containers = (
-            docker_payload.get("containers", [])
-            if docker_payload.get("status") == "ok"
-            else []
+            docker_payload.get("containers", []) if docker_payload.get("status") == "ok" else []
         )
         total_cpu = 0.0
         total_mem = 0.0
@@ -193,7 +181,7 @@ class PrometheusExporter:
         }
 
     @staticmethod
-    def _network_stats() -> Dict[str, Any]:
+    def _network_stats() -> dict[str, Any]:
         try:
             import psutil
 
@@ -215,7 +203,7 @@ class PrometheusExporter:
         return ("\n".join(lines) + "\n").encode("utf-8")
 
 
-def load_restart_history(path: str | Path) -> Dict[str, Dict[str, Any]]:
+def load_restart_history(path: str | Path) -> dict[str, dict[str, Any]]:
     history_path = Path(path)
     if not history_path.exists():
         return {}
@@ -225,11 +213,7 @@ def load_restart_history(path: str | Path) -> Dict[str, Dict[str, Any]]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    return {
-        str(name): value
-        for name, value in payload.items()
-        if isinstance(value, dict)
-    }
+    return {str(name): value for name, value in payload.items() if isinstance(value, dict)}
 
 
 def _float_value(value: Any) -> float:

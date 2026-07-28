@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -32,7 +33,8 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             return response
 
         try:
-            self._collector.record_api_latency(
+            await asyncio.to_thread(
+                self._collector.record_api_latency,
                 method=method,
                 path=path,
                 status_code=response.status_code,
