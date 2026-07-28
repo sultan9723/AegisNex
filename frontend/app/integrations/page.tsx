@@ -337,7 +337,7 @@ export default function IntegrationsPage() {
               </div>
               <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
                 {marketplace.map((item) => (
-                  <div key={item.integration_id} className="rounded-xl border border-border/40 bg-surface-elevated/35 p-4 transition-all duration-200 hover:border-border/70 hover:bg-surface-elevated/60">
+                  <div key={item.integration_id} className="rounded-xl border border-border/40 bg-surface-elevated/40 p-4 transition-all duration-200 hover:border-border/60 hover:bg-surface-elevated/55">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <h3 className="text-sm font-semibold text-text-primary">{item.name}</h3>
@@ -424,9 +424,9 @@ function PlatformStatusBadge({ health }: { health: PlatformHealth }) {
 
 function SummaryMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="min-w-24 rounded-xl border border-border/40 bg-background/25 px-4 py-3">
-      <div className="text-lg font-semibold text-text-primary">{value}</div>
-      <div className="text-[10px] font-medium uppercase tracking-[0.14em] text-text-tertiary">{label}</div>
+    <div className="min-w-24 rounded-xl border border-border/40 bg-surface-elevated/40 px-4 py-3">
+      <div className="text-lg font-bold text-text-primary">{value}</div>
+      <div className="text-[10px] font-medium uppercase tracking-[0.06em] text-text-tertiary">{label}</div>
     </div>
   );
 }

@@ -1,13 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Bell, Search, User, Settings, LogOut, Mail, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { Bell, Search, Settings, LogOut, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { CommandPalette } from "./CommandPalette";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { API_BASE_URL, getNotifications, type NotificationsResponse } from "@/lib/api";
+import { getNotifications, type NotificationsResponse } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 function formatTimestamp(value: unknown): string {
@@ -72,33 +71,33 @@ export function Header() {
   return (
     <>
       <header className="sticky top-0 z-30 border-b border-border/40 bg-background/80 backdrop-blur-2xl">
-        <div className="flex h-14 items-center gap-3 px-4 sm:px-6 lg:px-8">
+        <div className="flex h-12 items-center gap-3 px-4 sm:px-6 lg:px-8">
           <button
             type="button"
             onClick={() => setPaletteOpen(true)}
-            className="group flex h-9 min-w-0 flex-1 items-center gap-3 rounded-lg border border-border bg-surface-elevated/60 px-3 text-sm text-text-secondary transition-all hover:border-border-strong hover:bg-surface-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 max-w-lg"
+            className="group flex h-8 min-w-0 flex-1 items-center gap-2.5 rounded-lg border border-border/60 bg-surface-elevated/40 px-3 text-[13px] text-text-tertiary transition-all hover:border-border-strong hover:bg-surface-elevated/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 max-w-md"
           >
-            <Search className="size-3.5 shrink-0 text-text-tertiary" />
-            <span className="truncate text-[13px]">Search targets, incidents, containers...</span>
-            <kbd className="ml-auto hidden rounded-md border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] font-medium text-text-tertiary sm:inline-flex items-center gap-0.5">
+            <Search className="size-3.5 shrink-0 text-text-tertiary/60" />
+            <span className="truncate">Search targets, incidents, containers...</span>
+            <kbd className="ml-auto hidden rounded-md border border-border/60 bg-surface/80 px-1.5 py-0.5 font-mono text-[10px] font-medium text-text-tertiary/60 sm:inline-flex items-center gap-0.5">
               <span className="text-[9px]">&#8984;</span>K
             </kbd>
           </button>
 
-          <div className="hidden items-center gap-2 rounded-full border border-success/20 bg-success/8 px-3 py-1 text-[11px] font-medium text-success md:flex">
+          <div className="hidden items-center gap-1.5 rounded-full border border-success/20 bg-success/5 px-2.5 py-1 text-[10px] font-semibold text-success md:flex">
             <span className="relative flex size-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-70" />
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
               <span className="relative inline-flex size-1.5 rounded-full bg-success" />
             </span>
-            All systems nominal
+            Online
           </div>
 
           <DropdownMenu open={notifOpen} onOpenChange={(open) => { setNotifOpen(open); if (open) loadNotifications(); }}>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" className="relative" aria-label="Notifications">
+              <Button variant="ghost" size="icon-sm" className="relative h-8 w-8" aria-label="Notifications">
                 <Bell className="size-3.5" />
                 {unreadCount > 0 && (
-                  <span className="absolute -right-0.5 -top-0.5 flex size-4 items-center justify-center rounded-full bg-danger text-[9px] font-bold text-white shadow-sm shadow-danger/50">
+                  <span className="absolute -right-0.5 -top-0.5 flex size-3.5 items-center justify-center rounded-full bg-danger text-[8px] font-bold text-white shadow-sm shadow-danger/50">
                     {unreadCount > 9 ? "9+" : unreadCount}
                   </span>
                 )}
@@ -137,8 +136,8 @@ export function Header() {
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="User menu">
-                <div className="flex size-6 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-chart-2/20 text-[11px] font-semibold text-primary ring-1 ring-primary/20">
+              <Button variant="ghost" size="icon-sm" className="h-8 w-8" aria-label="User menu">
+                <div className="flex size-6 items-center justify-center rounded-full bg-gradient-to-br from-cyan-500/20 to-violet-500/20 text-[10px] font-bold text-primary ring-1 ring-primary/20">
                   {user?.email?.charAt(0).toUpperCase() ?? "A"}
                 </div>
               </Button>
