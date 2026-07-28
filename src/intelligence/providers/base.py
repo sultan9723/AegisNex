@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class ToolCall:
     name: str
-    args: Dict[str, Any]
+    args: dict[str, Any]
     id: str = ""
 
 
@@ -16,8 +16,8 @@ class ToolCall:
 class Message:
     role: str
     content: str
-    tool_calls: List[ToolCall] = field(default_factory=list)
-    name: Optional[str] = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    name: str | None = None
 
 
 @dataclass
@@ -25,41 +25,38 @@ class ProviderConfig:
     model: str = "gpt-4o"
     temperature: float = 0.3
     max_tokens: int = 2048
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    organization: Optional[str] = None
-    deployment_name: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
+    api_key: str | None = None
+    base_url: str | None = None
+    organization: str | None = None
+    deployment_name: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelProvider(ABC):
     config: ProviderConfig
 
-    def __init__(self, config: Optional[ProviderConfig] = None) -> None:
+    def __init__(self, config: ProviderConfig | None = None) -> None:
         self.config = config or ProviderConfig()
 
     @abstractmethod
-    def chat(self, messages: List[Message], **kwargs: Any) -> Message:
-        ...
+    def chat(self, messages: list[Message], **kwargs: Any) -> Message: ...
 
     @abstractmethod
     def chat_with_tools(
         self,
-        messages: List[Message],
-        tools: List[Dict[str, Any]],
+        messages: list[Message],
+        tools: list[dict[str, Any]],
         **kwargs: Any,
-    ) -> Message:
-        ...
+    ) -> Message: ...
 
     @abstractmethod
-    def embed(self, text: str, **kwargs: Any) -> List[float]:
-        ...
+    def embed(self, text: str, **kwargs: Any) -> list[float]: ...
 
     def count_tokens(self, text: str) -> int:
         import re
+
         return len(re.findall(r"\w+|[^\w\s]", text, re.UNICODE))
 
     @property
     @abstractmethod
-    def provider_name(self) -> str:
-        ...
+    def provider_name(self) -> str: ...

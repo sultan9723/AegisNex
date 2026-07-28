@@ -6,17 +6,16 @@ Stores and retrieves past AI queries, results, and approval actions.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from src.platform_db import PlatformRepository
-
 
 TABLE_NAME = "ai_history"
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _ensure_columns(repo: PlatformRepository) -> None:
@@ -109,18 +108,18 @@ def save_workflow(
     result_text: str,
     confidence: float,
     goal_achieved: bool,
-    steps: List[Dict[str, Any]],
-    observations: List[str],
-    corrections: List[str],
-    errors: List[str],
-    evidence: Optional[List[str]] = None,
+    steps: list[dict[str, Any]],
+    observations: list[str],
+    corrections: list[str],
+    errors: list[str],
+    evidence: list[str] | None = None,
     reasoning_summary: str = "",
     remaining_uncertainty: str = "",
     provider_used: str = "",
     model_used: str = "",
     execution_duration_ms: float = 0.0,
     token_usage: int = 0,
-    tools_used: Optional[List[str]] = None,
+    tools_used: list[str] | None = None,
     plan_text: str = "",
 ) -> int:
     ensure_table(repo)
@@ -160,7 +159,7 @@ def save_workflow(
             now,
         ),
     )
-    rows = repo._fetch_all(f"SELECT last_insert_rowid() as id")
+    rows = repo._fetch_all("SELECT last_insert_rowid() as id")
     return int(rows[0]["id"]) if rows else 0
 
 
@@ -168,7 +167,7 @@ def list_history(
     repo: PlatformRepository,
     limit: int = 20,
     offset: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     ensure_table(repo)
     rows = repo._fetch_all(
         f"SELECT * FROM {TABLE_NAME} ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -190,14 +189,18 @@ def get_history_count(repo: PlatformRepository) -> int:
     return int(rows[0]["cnt"]) if rows else 0
 
 
-def get_history_stats(repo: PlatformRepository) -> Dict[str, Any]:
+def get_history_stats(repo: PlatformRepository) -> dict[str, Any]:
     ensure_table(repo)
     try:
-        rows = repo._fetch_all(f"SELECT confidence, goal_achieved, execution_duration_ms FROM {TABLE_NAME}")
+        rows = repo._fetch_all(
+            f"SELECT confidence, goal_achieved, execution_duration_ms FROM {TABLE_NAME}"
+        )
         if not rows:
             return {"total": 0}
         confidences = [float(r.get("confidence", 0)) for r in rows]
-        durations = [float(r.get("execution_duration_ms", 0)) for r in rows if r.get("execution_duration_ms")]
+        durations = [
+            float(r.get("execution_duration_ms", 0)) for r in rows if r.get("execution_duration_ms")
+        ]
         succeeded = sum(1 for r in rows if int(r.get("goal_achieved", 0)) == 1)
         return {
             "total": len(rows),
@@ -205,7 +208,9 @@ def get_history_stats(repo: PlatformRepository) -> Dict[str, Any]:
             "failed": len(rows) - succeeded,
             "success_rate": round(succeeded / max(len(rows), 1), 4),
             "avg_confidence": round(sum(confidences) / max(len(confidences), 1), 4),
-            "avg_execution_duration_ms": round(sum(durations) / max(len(durations), 1), 2) if durations else 0.0,
+            "avg_execution_duration_ms": round(sum(durations) / max(len(durations), 1), 2)
+            if durations
+            else 0.0,
         }
     except Exception:
         return {"total": 0}

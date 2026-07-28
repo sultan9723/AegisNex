@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import google.generativeai as genai
 
@@ -13,7 +13,7 @@ from src.intelligence.providers.base import (
 
 
 class GeminiProvider(ModelProvider):
-    def __init__(self, config: Optional[ProviderConfig] = None) -> None:
+    def __init__(self, config: ProviderConfig | None = None) -> None:
         super().__init__(config)
         genai.configure(api_key=self.config.api_key)
 
@@ -21,7 +21,7 @@ class GeminiProvider(ModelProvider):
     def provider_name(self) -> str:
         return "gemini"
 
-    def _to_gemini_history(self, messages: List[Message]) -> List[Dict[str, Any]]:
+    def _to_gemini_history(self, messages: list[Message]) -> list[dict[str, Any]]:
         history = []
         for m in messages:
             if m.role == "system":
@@ -30,7 +30,7 @@ class GeminiProvider(ModelProvider):
             history.append({"role": role, "parts": [m.content]})
         return history
 
-    def chat(self, messages: List[Message], **kwargs: Any) -> Message:
+    def chat(self, messages: list[Message], **kwargs: Any) -> Message:
         model_name = kwargs.get("model", self.config.model)
         system_instruction = None
         for m in messages:
@@ -44,8 +44,8 @@ class GeminiProvider(ModelProvider):
 
     def chat_with_tools(
         self,
-        messages: List[Message],
-        tools: List[Dict[str, Any]],
+        messages: list[Message],
+        tools: list[dict[str, Any]],
         **kwargs: Any,
     ) -> Message:
         model_name = kwargs.get("model", self.config.model)
@@ -56,8 +56,22 @@ class GeminiProvider(ModelProvider):
         gemini_tools = []
         for t in tools:
             fn = t.get("function", t)
-            gemini_tools.append({"function_declarations": [{"name": fn.get("name", ""), "description": fn.get("description", ""), "parameters": fn.get("parameters", {"type": "object", "properties": {}})}]})
-        model = genai.GenerativeModel(model_name=model_name, system_instruction=system_instruction, tools=gemini_tools)
+            gemini_tools.append(
+                {
+                    "function_declarations": [
+                        {
+                            "name": fn.get("name", ""),
+                            "description": fn.get("description", ""),
+                            "parameters": fn.get(
+                                "parameters", {"type": "object", "properties": {}}
+                            ),
+                        }
+                    ]
+                }
+            )
+        model = genai.GenerativeModel(
+            model_name=model_name, system_instruction=system_instruction, tools=gemini_tools
+        )
         history = self._to_gemini_history(messages)
         chat = model.start_chat(history=history[:-1] if history else [])
         resp = chat.send_message(history[-1]["parts"][0] if history else "")
@@ -70,7 +84,7 @@ class GeminiProvider(ModelProvider):
                     tool_calls.append(ToolCall(name=tc.name, args=dict(tc.args), id=""))
         return Message(role="assistant", content=text, tool_calls=tool_calls)
 
-    def embed(self, text: str, **kwargs: Any) -> List[float]:
+    def embed(self, text: str, **kwargs: Any) -> list[float]:
         model_name = kwargs.get("model", "text-embedding-004")
         result = genai.embed_content(model=model_name, content=text)
         return result.get("embedding", [])

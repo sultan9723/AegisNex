@@ -9,36 +9,31 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
-from src.intelligence.state import AgentState, AgentStep
-from src.intelligence.tools import (
-    TOOL_REGISTRY,
-    DESTRUCTIVE_TOOLS,
-    execute_tool,
-    list_tools,
-    get_tool,
-    requires_human_approval,
-    get_tool_risk_level,
-)
-from src.intelligence.risk import RiskEngine
-from src.intelligence.policy import PolicyEngine
-from src.intelligence.runbooks.engine import RunbookEngine
-from src.intelligence.runbooks.registry import RunbookRegistry, get_registry as get_runbook_registry
-from src.intelligence.tool_router import ToolRouter, ToolRouterConfig
 from src.intelligence.execution_logger import (
-    ExecutionLogger,
-    create_logger_for_state,
     add_execution_log_to_state,
+    create_logger_for_state,
 )
-from src.intelligence.workflows.common import WorkflowLibrary, get_workflow_library
+from src.intelligence.policy import PolicyEngine
 from src.intelligence.providers.base import Message
+from src.intelligence.risk import RiskEngine
+from src.intelligence.runbooks.engine import RunbookEngine
+from src.intelligence.runbooks.registry import get_registry as get_runbook_registry
+from src.intelligence.state import AgentState, AgentStep
+from src.intelligence.tool_router import ToolRouter, ToolRouterConfig
+from src.intelligence.tools import (
+    execute_tool,
+    get_tool,
+    list_tools,
+)
+from src.intelligence.workflows.common import get_workflow_library
 from src.platform_db import PlatformRepository
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _make_step(node: str, status: str, detail: str, data: Any = None) -> AgentStep:
@@ -47,6 +42,7 @@ def _make_step(node: str, status: str, detail: str, data: Any = None) -> AgentSt
 
 def _get_provider():
     from src.intelligence.providers.factory import create_provider
+
     provider_name = os.getenv("AEGIS_AI_PROVIDER", "openai")
     try:
         return create_provider(provider_name)
@@ -56,13 +52,15 @@ def _get_provider():
 
 def _get_rag_engine(repo):
     from src.intelligence.retrieval.rag import RAGEngine
+
     provider = _get_provider()
     return RAGEngine(provider=provider, repo=repo)
 
 
 def _get_memory_store():
     from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
-    db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+    db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
     return SQLiteMemoryStore(db_path=db_path)
 
 
@@ -76,6 +74,7 @@ def _requires_manual_investigation(confidence: float) -> bool:
 
 def _get_skill_engine() -> Any:
     from src.skills.engine import create_default_engine
+
     return create_default_engine()
 
 
@@ -105,12 +104,14 @@ def tool_router_node(state: AgentState) -> AgentState:
     """
     logger = create_logger_for_state("tool_router", state)
     plan = state.get("current_plan", [])
-    
-    logger.add_input({
-        "current_plan": plan,
-        "parallel_batches": state.get("parallel_batches", []),
-    })
-    
+
+    logger.add_input(
+        {
+            "current_plan": plan,
+            "parallel_batches": state.get("parallel_batches", []),
+        }
+    )
+
     try:
         if not plan:
             logger.add_warning("No plan to route (current_plan is empty)")
@@ -150,19 +151,21 @@ def tool_router_node(state: AgentState) -> AgentState:
                 logger.add_warning(f"Task '{decision.get('tool_name')}' not found in registry")
 
         # Enrich tool metadata for routed tools
-        tool_metadata: Dict[str, Any] = {}
+        tool_metadata: dict[str, Any] = {}
         for tool_name in routed_tools:
             metadata = router.get_tool_metadata(tool_name)
             if metadata:
                 tool_metadata[tool_name] = metadata
 
         # Add output
-        logger.add_output({
-            "routed_tools": routed_tools,
-            "invalid_tasks": invalid_tasks,
-            "tool_count": len(routed_tools),
-            "tool_metadata": tool_metadata,
-        })
+        logger.add_output(
+            {
+                "routed_tools": routed_tools,
+                "invalid_tasks": invalid_tasks,
+                "tool_count": len(routed_tools),
+                "tool_metadata": tool_metadata,
+            }
+        )
 
         # Record errors in logger
         for task in invalid_tasks:
@@ -183,7 +186,7 @@ def tool_router_node(state: AgentState) -> AgentState:
 
         # Update parallel_batches to only include routed tools
         parallel_batches = state.get("parallel_batches", [])
-        filtered_batches: List[List[str]] = []
+        filtered_batches: list[list[str]] = []
         for batch in parallel_batches:
             filtered_batch = [t for t in batch if t in routed_tools]
             if filtered_batch:
@@ -205,7 +208,7 @@ def tool_router_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Tool router error: {str(exc)}"]
+        state["errors"] = list(state.get("errors", [])) + [f"Tool router error: {exc!s}"]
 
     return state
 
@@ -220,7 +223,9 @@ def skill_executor_node(state: AgentState) -> AgentState:
     request = state.get("user_request", "")
     if not request:
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("skill_executor", "skipped", "No user request to match skills"))
+        executed_steps.append(
+            _make_step("skill_executor", "skipped", "No user request to match skills")
+        )
         state["executed_steps"] = executed_steps
         return state
 
@@ -229,42 +234,59 @@ def skill_executor_node(state: AgentState) -> AgentState:
         matched = asyncio.get_event_loop().run_until_complete(engine.auto_select_skills(request))
     except Exception:
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("skill_executor", "error", "Failed to initialize skill engine"))
+        executed_steps.append(
+            _make_step("skill_executor", "error", "Failed to initialize skill engine")
+        )
         state["executed_steps"] = executed_steps
         return state
 
     if not matched:
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("skill_executor", "skipped", "No skills matched the request"))
+        executed_steps.append(
+            _make_step("skill_executor", "skipped", "No skills matched the request")
+        )
         state["executed_steps"] = executed_steps
         return state
 
     active_skills = [s.manifest.id for s in matched]
     state["active_skills"] = active_skills
-    skill_results: List[Dict[str, Any]] = list(state.get("skill_results", []))
+    skill_results: list[dict[str, Any]] = list(state.get("skill_results", []))
     executed_steps = list(state.get("executed_steps", []))
     errors = list(state.get("errors", []))
 
     for skill in matched:
-        context: Dict[str, Any] = {
+        context: dict[str, Any] = {
             "repo": None,
             "user_request": request,
         }
         try:
-            result = asyncio.get_event_loop().run_until_complete(engine.execute_skill(skill.manifest.id, context))
+            result = asyncio.get_event_loop().run_until_complete(
+                engine.execute_skill(skill.manifest.id, context)
+            )
             skill_results.append(result)
             status = "ok" if result.get("status") == "ok" else "error"
             if status == "error":
-                errors.append(f"Skill '{skill.manifest.name}': {result.get('error', 'Unknown error')}")
-            executed_steps.append(_make_step(
-                "skill_executor", status,
-                f"Executed skill '{skill.manifest.name}': {result.get('status', 'completed')}",
-                {"skill_id": skill.manifest.id, "result": result},
-            ))
+                errors.append(
+                    f"Skill '{skill.manifest.name}': {result.get('error', 'Unknown error')}"
+                )
+            executed_steps.append(
+                _make_step(
+                    "skill_executor",
+                    status,
+                    f"Executed skill '{skill.manifest.name}': {result.get('status', 'completed')}",
+                    {"skill_id": skill.manifest.id, "result": result},
+                )
+            )
         except Exception as exc:
-            errors.append(f"Skill '{skill.manifest.name}': {str(exc)}")
-            skill_results.append({"status": "error", "skill_id": skill.manifest.id, "error": str(exc)})
-            executed_steps.append(_make_step("skill_executor", "error", f"Skill '{skill.manifest.name}' failed: {exc}"))
+            errors.append(f"Skill '{skill.manifest.name}': {exc!s}")
+            skill_results.append(
+                {"status": "error", "skill_id": skill.manifest.id, "error": str(exc)}
+            )
+            executed_steps.append(
+                _make_step(
+                    "skill_executor", "error", f"Skill '{skill.manifest.name}' failed: {exc}"
+                )
+            )
 
     state["skill_results"] = skill_results
     state["errors"] = errors
@@ -273,9 +295,9 @@ def skill_executor_node(state: AgentState) -> AgentState:
     return state
 
 
-def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Analyze the user request, retrieve context, and build a plan.
-    
+
     Produces structured execution log with:
     - Input: user_request
     - Output: plan, objective, steps
@@ -284,24 +306,28 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
     """
     logger = create_logger_for_state("planner", state)
     logger.add_input({"user_request": state.get("user_request", "")})
-    
+
     try:
         request = state["user_request"].lower()
-        steps: List[str] = []
+        steps: list[str] = []
         objective = ""
-        parallel_batches: List[List[str]] = []
-        missing_info: List[str] = []
+        parallel_batches: list[list[str]] = []
+        missing_info: list[str] = []
         retrieved_context = ""
-        evidence: List[str] = []
+        evidence: list[str] = []
 
         rag = _get_rag_engine(repo)
         try:
             retrieval = rag.retrieve(state["user_request"], limit=5)
             retrieved_context = retrieval.context_text
-            evidence = [f"[{d.source_type}] {d.source}" for d in retrieval.documents if d.relevance_score > 0]
+            evidence = [
+                f"[{d.source_type}] {d.source}"
+                for d in retrieval.documents
+                if d.relevance_score > 0
+            ]
             logger.add_decision("rag_retrieval", "success", f"Retrieved {len(evidence)} documents")
         except Exception as e:
-            logger.add_warning(f"RAG retrieval failed: {str(e)}")
+            logger.add_warning(f"RAG retrieval failed: {e!s}")
             retrieved_context = ""
 
         provider = state.get("provider")
@@ -310,15 +336,16 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
                 available_tools = list_tools()
                 tool_names = [t["name"] for t in available_tools]
                 planning_prompt = (
-                    f"Given the user request: \"{state['user_request']}\"\n\n"
+                    f'Given the user request: "{state["user_request"]}"\n\n'
                     f"Relevant context:\n{retrieved_context[:2000] if retrieved_context else 'None'}\n\n"
                     f"Available tools: {', '.join(tool_names)}\n\n"
                     "Select the most relevant tools for this request. "
                     f"Return ONLY a JSON array of tool names, nothing else. "
-                    "Example: [\"metrics\", \"docker\"]"
+                    'Example: ["metrics", "docker"]'
                 )
                 msg = provider.chat([Message(role="user", content=planning_prompt)])
                 import json as _json
+
                 llm_steps = _json.loads(msg.content.strip())
                 if isinstance(llm_steps, list) and all(s in tool_names for s in llm_steps):
                     steps = llm_steps
@@ -334,7 +361,9 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
                 if "analyze" in request or "why" in request or "what happened" in request:
                     steps = ["audit", "incident", "health"]
                     parallel_batches = [["audit", "health"], ["incident"]]
-                    logger.add_decision("planning", "incident_analysis", "Pattern: analyze incident")
+                    logger.add_decision(
+                        "planning", "incident_analysis", "Pattern: analyze incident"
+                    )
                 elif "active" in request:
                     steps = ["incident"]
                     objective = "List active incidents"
@@ -342,8 +371,16 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
                 else:
                     steps = ["incident"]
                     parallel_batches = [["incident"]]
-                    logger.add_decision("planning", "list_incidents", "Pattern: generic incident query")
-            elif "cpu" in request or "memory" in request or "disk" in request or "metric" in request or "performance" in request:
+                    logger.add_decision(
+                        "planning", "list_incidents", "Pattern: generic incident query"
+                    )
+            elif (
+                "cpu" in request
+                or "memory" in request
+                or "disk" in request
+                or "metric" in request
+                or "performance" in request
+            ):
                 objective = "Investigate system metrics"
                 steps = ["metrics", "docker", "health"]
                 parallel_batches = [["metrics", "health"], ["docker"]]
@@ -353,7 +390,13 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
                 steps = ["docker", "health"]
                 parallel_batches = [["docker", "health"]]
                 logger.add_decision("planning", "docker_inspection", "Pattern: container query")
-            elif "target" in request or "monitor" in request or "http" in request or "ssl" in request or "tcp" in request:
+            elif (
+                "target" in request
+                or "monitor" in request
+                or "http" in request
+                or "ssl" in request
+                or "tcp" in request
+            ):
                 objective = "Check monitoring targets"
                 steps = ["target", "incident"]
                 parallel_batches = [["target", "incident"]]
@@ -388,16 +431,20 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
                 steps = ["metrics", "docker", "incident", "target", "health"]
                 parallel_batches = [["metrics", "health"], ["docker", "target"], ["incident"]]
                 missing_info.append("Specific request type not identified; running full analysis")
-                logger.add_decision("planning", "full_analysis", "Pattern: no specific match, default comprehensive")
+                logger.add_decision(
+                    "planning", "full_analysis", "Pattern: no specific match, default comprehensive"
+                )
 
         if not parallel_batches:
             parallel_batches = [[s] for s in steps]
 
-        tool_permission_levels: Dict[str, str] = {}
+        tool_permission_levels: dict[str, str] = {}
         for s in steps:
             tool = get_tool(s)
             if tool:
-                tool_permission_levels[s] = tool.risk_level.value if hasattr(tool, "risk_level") else "none"
+                tool_permission_levels[s] = (
+                    tool.risk_level.value if hasattr(tool, "risk_level") else "none"
+                )
 
         plan = {
             "objective": objective,
@@ -419,14 +466,16 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
         state["evidence"] = evidence
 
         # Record output
-        logger.add_output({
-            "objective": objective,
-            "steps": steps,
-            "parallel_batches": state["parallel_batches"],
-            "tool_count": len(steps),
-            "missing_info": missing_info,
-            "evidence_count": len(evidence),
-        })
+        logger.add_output(
+            {
+                "objective": objective,
+                "steps": steps,
+                "parallel_batches": state["parallel_batches"],
+                "tool_count": len(steps),
+                "missing_info": missing_info,
+                "evidence_count": len(evidence),
+            }
+        )
 
         # Finalize and log
         log = logger.finalize("success")
@@ -436,12 +485,12 @@ def plan_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> A
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Planner node error: {str(exc)}"]
+        state["errors"] = list(state.get("errors", [])) + [f"Planner node error: {exc!s}"]
 
     return state
 
 
-def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def tool_executor_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Execute each tool in the plan and collect results.
 
     Produces structured execution log with:
@@ -456,12 +505,14 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
     logger = create_logger_for_state("tool_executor", state)
     steps = state.get("current_plan", [])
     parallel_batches = state.get("parallel_batches", [])
-    
-    logger.add_input({
-        "current_plan": steps,
-        "parallel_batches": parallel_batches,
-    })
-    
+
+    logger.add_input(
+        {
+            "current_plan": steps,
+            "parallel_batches": parallel_batches,
+        }
+    )
+
     try:
         tool_results = dict(state.get("tool_results", {}))
         errors = list(state.get("errors", []))
@@ -471,7 +522,7 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
             parallel_batches = [[s] for s in steps]
 
         for batch in parallel_batches:
-            batch_results: Dict[str, Any] = {}
+            batch_results: dict[str, Any] = {}
             for tool_name in batch:
                 if tool_name not in steps:
                     continue
@@ -486,15 +537,21 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
                     approval_id = f"approval_{utc_now()}_{tool_name}"
                     state["approval_required"] = True
                     state["approval_id"] = approval_id
-                    pending_approvals.append({
-                        "id": approval_id,
-                        "step": tool_name,
-                        "action": tool_name,
-                        "target": "",
-                        "reason": f"Destructive action: {tool.description}",
-                        "status": "pending",
-                    })
-                    logger.add_decision("approval_required", tool_name, f"Tool requires approval: {tool.description}")
+                    pending_approvals.append(
+                        {
+                            "id": approval_id,
+                            "step": tool_name,
+                            "action": tool_name,
+                            "target": "",
+                            "reason": f"Destructive action: {tool.description}",
+                            "status": "pending",
+                        }
+                    )
+                    logger.add_decision(
+                        "approval_required",
+                        tool_name,
+                        f"Tool requires approval: {tool.description}",
+                    )
                     continue
 
                 start_time = time.time()
@@ -503,7 +560,7 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
                     duration_ms = (time.time() - start_time) * 1000
                     status = "ok" if result.get("status") == "ok" else "error"
                     batch_results[tool_name] = result
-                    
+
                     # Record tool execution
                     logger.add_tool_call(
                         tool_name,
@@ -512,15 +569,15 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
                         output=result,
                         error=None if status == "ok" else result.get("error"),
                     )
-                    
+
                     if status == "error":
                         error_msg = f"{tool_name}: {result.get('error', 'Unknown error')}"
                         errors.append(error_msg)
                         logger.add_error(error_msg)
-                        
+
                 except Exception as exc:
                     duration_ms = (time.time() - start_time) * 1000
-                    error_msg = f"{tool_name}: {str(exc)}"
+                    error_msg = f"{tool_name}: {exc!s}"
                     errors.append(error_msg)
                     batch_results[tool_name] = {"status": "error", "error": str(exc)}
                     logger.add_tool_call(
@@ -535,11 +592,13 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
             tool_results.update(batch_results)
 
         # Add output
-        logger.add_output({
-            "tool_results": {k: {"status": v.get("status")} for k, v in tool_results.items()},
-            "tools_executed": len(tool_results),
-            "pending_approvals": len(pending_approvals),
-        })
+        logger.add_output(
+            {
+                "tool_results": {k: {"status": v.get("status")} for k, v in tool_results.items()},
+                "tools_executed": len(tool_results),
+                "pending_approvals": len(pending_approvals),
+            }
+        )
 
         # Finalize and log
         status = "success" if not errors else "warning"
@@ -554,7 +613,7 @@ def tool_executor_node(state: AgentState, repo: Optional[PlatformRepository] = N
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Tool executor error: {str(exc)}"]
+        state["errors"] = list(state.get("errors", [])) + [f"Tool executor error: {exc!s}"]
 
     return state
 
@@ -574,12 +633,14 @@ def verifier_node(state: AgentState) -> AgentState:
     logger = create_logger_for_state("verifier", state)
     tool_results = state.get("tool_results", {})
     errors = list(state.get("errors", []))
-    
-    logger.add_input({
-        "tool_results": {k: {"status": v.get("status")} for k, v in tool_results.items()},
-        "errors": errors,
-    })
-    
+
+    logger.add_input(
+        {
+            "tool_results": {k: {"status": v.get("status")} for k, v in tool_results.items()},
+            "errors": errors,
+        }
+    )
+
     try:
         observations = list(state.get("observations", []))
         evidence = list(state.get("evidence", []))
@@ -590,10 +651,12 @@ def verifier_node(state: AgentState) -> AgentState:
 
         if total_tools == 0:
             logger.add_warning("No tools were planned")
-            logger.add_output({
-                "confidence": 0.0,
-                "reasoning": "No tools were planned — unable to gather data.",
-            })
+            logger.add_output(
+                {
+                    "confidence": 0.0,
+                    "reasoning": "No tools were planned — unable to gather data.",
+                }
+            )
             log = logger.finalize("warning")
             add_execution_log_to_state(state, log)
             state["confidence"] = 0.0
@@ -616,15 +679,21 @@ def verifier_node(state: AgentState) -> AgentState:
 
         if confidence >= 0.8:
             confidence_verdict = "High confidence: most tools completed successfully"
-            logger.add_decision("verification", "confidence_level", "high", f"Confidence: {confidence:.0%}")
+            logger.add_decision(
+                "verification", "confidence_level", "high", f"Confidence: {confidence:.0%}"
+            )
             observations.append(confidence_verdict)
         elif confidence >= 0.5:
             confidence_verdict = "Moderate confidence: some tools failed"
-            logger.add_decision("verification", "confidence_level", "moderate", f"Confidence: {confidence:.0%}")
+            logger.add_decision(
+                "verification", "confidence_level", "moderate", f"Confidence: {confidence:.0%}"
+            )
             observations.append(confidence_verdict)
         else:
             confidence_verdict = "Low confidence: significant tool failures detected"
-            logger.add_decision("verification", "confidence_level", "low", f"Confidence: {confidence:.0%}")
+            logger.add_decision(
+                "verification", "confidence_level", "low", f"Confidence: {confidence:.0%}"
+            )
             observations.append(confidence_verdict)
 
         for tool_name, result in tool_results.items():
@@ -651,13 +720,15 @@ def verifier_node(state: AgentState) -> AgentState:
             uncertainty.append("Low remaining uncertainty — sufficient data collected")
 
         # Add output
-        logger.add_output({
-            "confidence": min(confidence, 1.0),
-            "successful_tools": successful_tools,
-            "failed_tools": failed_tools,
-            "observations_count": len(observations),
-            "evidence_count": len(evidence),
-        })
+        logger.add_output(
+            {
+                "confidence": min(confidence, 1.0),
+                "successful_tools": successful_tools,
+                "failed_tools": failed_tools,
+                "observations_count": len(observations),
+                "evidence_count": len(evidence),
+            }
+        )
 
         # Finalize and log
         status = "success" if confidence >= 0.5 else "warning"
@@ -674,12 +745,12 @@ def verifier_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Verifier error: {str(exc)}"]
+        state["errors"] = list(state.get("errors", [])) + [f"Verifier error: {exc!s}"]
 
     return state
 
 
-def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def self_corrector_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Handle failures by retrying or adjusting the plan."""
     retries = state.get("retries", 0)
     max_retries = state.get("max_retries", 3)
@@ -696,8 +767,13 @@ def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = 
 
     if retries >= max_retries:
         corrections.append(f"Max retries ({max_retries}) reached. Producing best-effort answer.")
-        executed_steps.append(_make_step("self_corrector", "warning",
-            f"Max retries reached ({max_retries}), using partial results"))
+        executed_steps.append(
+            _make_step(
+                "self_corrector",
+                "warning",
+                f"Max retries reached ({max_retries}), using partial results",
+            )
+        )
         state["corrections"] = corrections
         state["executed_steps"] = executed_steps
         return state
@@ -712,8 +788,7 @@ def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = 
             corrections.append("Docker unavailable — substituting metrics + health check")
             if "docker" in current_plan:
                 current_plan.remove("docker")
-            if "docker" in tool_results:
-                del tool_results["docker"]
+            tool_results.pop("docker", None)
             if "health" not in current_plan:
                 current_plan.append("health")
         elif "http" in error_lower or "ssl" in error_lower or "tcp" in error_lower:
@@ -725,7 +800,7 @@ def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = 
             if "metrics" in current_plan:
                 current_plan.remove("metrics")
         elif "not found" in error_lower:
-            corrections.append(f"Tool or resource not found — adjusting plan")
+            corrections.append("Tool or resource not found — adjusting plan")
         else:
             remaining_errors.append(error)
             corrections.append(f"Unresolved error: {error[:60]} — producing partial results")
@@ -734,14 +809,19 @@ def self_corrector_node(state: AgentState, repo: Optional[PlatformRepository] = 
     state["tool_results"] = tool_results
     state["errors"] = remaining_errors
     state["corrections"] = corrections
-    executed_steps.append(_make_step("self_corrector", "completed",
-        f"Applied {len(state['corrections'])} corrections, retry {retries}/{max_retries}"))
+    executed_steps.append(
+        _make_step(
+            "self_corrector",
+            "completed",
+            f"Applied {len(state['corrections'])} corrections, retry {retries}/{max_retries}",
+        )
+    )
     state["executed_steps"] = executed_steps
 
     return state
 
 
-def rag_generator_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def rag_generator_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Generate an LLM-powered final answer using retrieved context and tool results.
 
     Calls RAGEngine.generate_with_context() if a provider is available
@@ -763,11 +843,17 @@ def rag_generator_node(state: AgentState, repo: Optional[PlatformRepository] = N
         state["final_answer"] = answer
         state["reasoning_summary"] = answer[:500]
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("rag_generator", "completed", "LLM-generated answer from context + tool results"))
+        executed_steps.append(
+            _make_step(
+                "rag_generator", "completed", "LLM-generated answer from context + tool results"
+            )
+        )
         state["executed_steps"] = executed_steps
     except Exception as exc:
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("rag_generator", "error", f"LLM answer generation failed: {str(exc)}"))
+        executed_steps.append(
+            _make_step("rag_generator", "error", f"LLM answer generation failed: {exc!s}")
+        )
         state["executed_steps"] = executed_steps
 
     return state
@@ -787,14 +873,16 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
     Checks confidence threshold for manual investigation recommendation.
     """
     logger = create_logger_for_state("goal_evaluator", state)
-    
-    logger.add_input({
-        "tool_results_count": len(state.get("tool_results", {})),
-        "confidence": state.get("confidence", 0.0),
-        "objective": state.get("objective", ""),
-        "errors_count": len(state.get("errors", [])),
-    })
-    
+
+    logger.add_input(
+        {
+            "tool_results_count": len(state.get("tool_results", {})),
+            "confidence": state.get("confidence", 0.0),
+            "objective": state.get("objective", ""),
+            "errors_count": len(state.get("errors", [])),
+        }
+    )
+
     try:
         goal_achieved = False
         confidence = state.get("confidence", 0.0)
@@ -814,16 +902,30 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
 
         if has_data and not has_critical_errors and confidence >= 0.6:
             goal_achieved = True
-            logger.add_decision("goal_achievement", "achieved", "Data available, no critical errors, confidence >= 60%")
+            logger.add_decision(
+                "goal_achievement",
+                "achieved",
+                "Data available, no critical errors, confidence >= 60%",
+            )
         elif has_data and not has_critical_errors and confidence >= 0.3:
             goal_achieved = True
-            logger.add_decision("goal_achievement", "achieved", "Data available, no critical errors, confidence >= 30%")
+            logger.add_decision(
+                "goal_achievement",
+                "achieved",
+                "Data available, no critical errors, confidence >= 30%",
+            )
         elif retries >= max_retries:
             goal_achieved = True
-            logger.add_decision("goal_achievement", "achieved", f"Max retries reached ({retries}/{max_retries})")
+            logger.add_decision(
+                "goal_achievement", "achieved", f"Max retries reached ({retries}/{max_retries})"
+            )
         else:
             goal_achieved = False
-            logger.add_decision("goal_achievement", "incomplete", f"Insufficient data or confidence (confidence={confidence:.0%})")
+            logger.add_decision(
+                "goal_achievement",
+                "incomplete",
+                f"Insufficient data or confidence (confidence={confidence:.0%})",
+            )
 
         summary_parts = []
         for tool_name, result in tool_results.items():
@@ -886,7 +988,9 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
         if _requires_manual_investigation(confidence):
             final_answer += "**⚠ Manual investigation recommended** — confidence is below the configured threshold.\n"
             final_answer += "**Do not take destructive actions based on this analysis alone.**\n\n"
-            logger.add_warning(f"Manual investigation recommended (confidence below threshold: {confidence:.0%})")
+            logger.add_warning(
+                f"Manual investigation recommended (confidence below threshold: {confidence:.0%})"
+            )
 
         if not existing_answer:
             if confidence >= 0.8:
@@ -897,13 +1001,15 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
                 final_answer += "**Status:** Limited — unable to gather sufficient data."
 
         # Add output
-        logger.add_output({
-            "goal_achieved": goal_achieved,
-            "confidence": confidence,
-            "has_data": has_data,
-            "has_critical_errors": has_critical_errors,
-            "final_answer_length": len(final_answer),
-        })
+        logger.add_output(
+            {
+                "goal_achieved": goal_achieved,
+                "confidence": confidence,
+                "has_data": has_data,
+                "has_critical_errors": has_critical_errors,
+                "final_answer_length": len(final_answer),
+            }
+        )
 
         # Finalize and log
         status = "success" if goal_achieved else "warning"
@@ -917,7 +1023,7 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Goal evaluator error: {str(exc)}"]
+        state["errors"] = list(state.get("errors", [])) + [f"Goal evaluator error: {exc!s}"]
 
     return state
 
@@ -935,19 +1041,26 @@ def risk_assessor_node(state: AgentState) -> AgentState:
         state["approval_required"] = True
         state["approval_id"] = approval_id
         pending = list(state.get("pending_approvals", []))
-        pending.append({
-            "id": approval_id,
-            "step": "risk_assessor",
-            "action": tool_name,
-            "target": "",
-            "reason": f"Risk score {assessment.score}: {assessment.impact_estimate}",
-            "status": "pending",
-        })
+        pending.append(
+            {
+                "id": approval_id,
+                "step": "risk_assessor",
+                "action": tool_name,
+                "target": "",
+                "reason": f"Risk score {assessment.score}: {assessment.impact_estimate}",
+                "status": "pending",
+            }
+        )
         state["pending_approvals"] = pending
 
     executed_steps = list(state.get("executed_steps", []))
-    executed_steps.append(_make_step("risk_assessor", "completed" if not assessment.requires_approval else "pending_approval",
-        f"Risk: {assessment.level.value} ({assessment.score}), approval={'yes' if assessment.requires_approval else 'no'}"))
+    executed_steps.append(
+        _make_step(
+            "risk_assessor",
+            "completed" if not assessment.requires_approval else "pending_approval",
+            f"Risk: {assessment.level.value} ({assessment.score}), approval={'yes' if assessment.requires_approval else 'no'}",
+        )
+    )
     state["executed_steps"] = executed_steps
     return state
 
@@ -960,7 +1073,9 @@ def policy_checker_node(state: AgentState) -> AgentState:
         "environment": os.getenv("AEGISNEX_ENV", "development"),
         "restart_count": state.get("retries", 0),
         "retry_count": state.get("retries", 0),
-        "destructive": any(get_tool(a) and get_tool(a).destructive for a in state.get("current_plan", [])),
+        "destructive": any(
+            get_tool(a) and get_tool(a).destructive for a in state.get("current_plan", [])
+        ),
     }
     result = engine.check_action(action, context)
     results = list(state.get("policy_results", []))
@@ -972,24 +1087,31 @@ def policy_checker_node(state: AgentState) -> AgentState:
         state["approval_required"] = True
         state["approval_id"] = approval_id
         pending = list(state.get("pending_approvals", []))
-        pending.append({
-            "id": approval_id,
-            "step": "policy_checker",
-            "action": action,
-            "target": "",
-            "reason": f"Policy '{result.policy_name}': {result.reason}",
-            "status": "pending",
-        })
+        pending.append(
+            {
+                "id": approval_id,
+                "step": "policy_checker",
+                "action": action,
+                "target": "",
+                "reason": f"Policy '{result.policy_name}': {result.reason}",
+                "status": "pending",
+            }
+        )
         state["pending_approvals"] = pending
 
     executed_steps = list(state.get("executed_steps", []))
-    executed_steps.append(_make_step("policy_checker", "approved" if result.allowed else "denied",
-        f"Policy '{result.policy_name}': {'allowed' if result.allowed else 'denied'}, approval={'yes' if result.requires_approval else 'no'}"))
+    executed_steps.append(
+        _make_step(
+            "policy_checker",
+            "approved" if result.allowed else "denied",
+            f"Policy '{result.policy_name}': {'allowed' if result.allowed else 'denied'}, approval={'yes' if result.requires_approval else 'no'}",
+        )
+    )
     state["executed_steps"] = executed_steps
     return state
 
 
-def runbook_executor_node(state: AgentState, repo: Optional[PlatformRepository] = None) -> AgentState:
+def runbook_executor_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Execute a runbook selected by the planner."""
     runbook_name = state.get("current_runbook", "")
     if not runbook_name:
@@ -1013,7 +1135,9 @@ def runbook_executor_node(state: AgentState, repo: Optional[PlatformRepository] 
     runbook = registry.get(runbook_name)
     if not runbook:
         executed_steps = list(state.get("executed_steps", []))
-        executed_steps.append(_make_step("runbook_executor", "error", f"Runbook '{runbook_name}' not found"))
+        executed_steps.append(
+            _make_step("runbook_executor", "error", f"Runbook '{runbook_name}' not found")
+        )
         state["executed_steps"] = executed_steps
         return state
 
@@ -1032,14 +1156,16 @@ def runbook_executor_node(state: AgentState, repo: Optional[PlatformRepository] 
             state["approval_required"] = True
             state["approval_id"] = approval_id
             pending = list(state.get("pending_approvals", []))
-            pending.append({
-                "id": approval_id,
-                "step": step_model.name,
-                "action": step_model.tool or step_model.action,
-                "target": runbook_name,
-                "reason": f"Runbook step '{step_model.name}' requires approval",
-                "status": "pending",
-            })
+            pending.append(
+                {
+                    "id": approval_id,
+                    "step": step_model.name,
+                    "action": step_model.tool or step_model.action,
+                    "target": runbook_name,
+                    "reason": f"Runbook step '{step_model.name}' requires approval",
+                    "status": "pending",
+                }
+            )
             state["pending_approvals"] = pending
 
     results = engine.execute(runbook_name)
@@ -1047,8 +1173,13 @@ def runbook_executor_node(state: AgentState, repo: Optional[PlatformRepository] 
 
     executed_steps = list(state.get("executed_steps", []))
     status = results.get("runbook_status", "completed")
-    executed_steps.append(_make_step("runbook_executor", status,
-        f"Runbook '{runbook_name}': {len(runbook.steps)} steps, status={status}"))
+    executed_steps.append(
+        _make_step(
+            "runbook_executor",
+            status,
+            f"Runbook '{runbook_name}': {len(runbook.steps)} steps, status={status}",
+        )
+    )
     state["executed_steps"] = executed_steps
 
     for sr in results.get("step_results", []):
@@ -1067,9 +1198,9 @@ def parallel_supervisor_node(state: AgentState) -> AgentState:
         state["executed_steps"] = executed_steps
         return state
 
-    all_results: Dict[str, Any] = {}
+    all_results: dict[str, Any] = {}
     for batch in parallel_batches:
-        batch_result: Dict[str, Any] = {}
+        batch_result: dict[str, Any] = {}
         for tool_name in batch:
             if get_tool(tool_name) is None:
                 continue
@@ -1086,8 +1217,13 @@ def parallel_supervisor_node(state: AgentState) -> AgentState:
     state["tool_results"] = existing_results
 
     executed_steps = list(state.get("executed_steps", []))
-    executed_steps.append(_make_step("parallel_supervisor", "completed",
-        f"Executed {len(all_results)} parallel tools across {len(parallel_batches)} batches"))
+    executed_steps.append(
+        _make_step(
+            "parallel_supervisor",
+            "completed",
+            f"Executed {len(all_results)} parallel tools across {len(parallel_batches)} batches",
+        )
+    )
     state["executed_steps"] = executed_steps
     return state
 
@@ -1095,14 +1231,24 @@ def parallel_supervisor_node(state: AgentState) -> AgentState:
 def scheduler_node(state: AgentState) -> AgentState:
     """Check for pending scheduled tasks."""
     import os
+
     from src.intelligence.scheduler import Scheduler
-    db_path = os.getenv("AEGIS_AI_SCHEDULER_DB", "ai_scheduler.db")
-    scheduler = Scheduler(db_path=db_path)
-    tasks = scheduler.list_tasks()
-    state["scheduler_tasks"] = tasks
 
     executed_steps = list(state.get("executed_steps", []))
-    executed_steps.append(_make_step("scheduler", "completed", f"Checked {len(tasks)} scheduled tasks"))
+    try:
+        db_path = os.getenv("AEGIS_AI_SCHEDULER_DB", "aegisnex.db")
+        scheduler = Scheduler(db_path=db_path)
+        tasks = scheduler.list_tasks()
+        state["scheduler_tasks"] = tasks
+        executed_steps.append(
+            _make_step("scheduler", "completed", f"Checked {len(tasks)} scheduled tasks")
+        )
+    except Exception as exc:
+        state["scheduler_tasks"] = []
+        state["errors"] = list(state.get("errors", [])) + [f"Scheduler unavailable: {exc}"]
+        executed_steps.append(
+            _make_step("scheduler", "warning", f"Scheduler unavailable: {exc}")
+        )
     state["executed_steps"] = executed_steps
     return state
 
@@ -1110,13 +1256,14 @@ def scheduler_node(state: AgentState) -> AgentState:
 def learning_node(state: AgentState) -> AgentState:
     """Store learnings from the current execution cycle."""
     from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
-    db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+    db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
     store = SQLiteMemoryStore(db_path=db_path)
     errors = state.get("errors", [])
     corrections = state.get("corrections", [])
     goal_achieved = state.get("goal_achieved", False)
 
-    learnings: List[Dict[str, Any]] = []
+    learnings: list[dict[str, Any]] = []
     if errors:
         root_cause = "; ".join(errors[:3])
         resolution = "; ".join(corrections[:3]) if corrections else "No automatic resolution"

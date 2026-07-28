@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import os
+import builtins
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.intelligence.runbooks.parser import RunbookDef, RunbookParser
 
 
 class RunbookRegistry:
     def __init__(self) -> None:
-        self._runbooks: Dict[str, RunbookDef] = {}
+        self._runbooks: dict[str, RunbookDef] = {}
 
     def register(self, runbook: RunbookDef) -> None:
         self._runbooks[runbook.name] = runbook
@@ -20,17 +20,17 @@ class RunbookRegistry:
         rb = RunbookParser.from_file(path)
         self.register(rb)
 
-    def register_from_dict(self, data: Dict[str, Any]) -> None:
+    def register_from_dict(self, data: dict[str, Any]) -> None:
         rb = RunbookParser.from_dict(data)
         self.register(rb)
 
-    def get(self, name: str) -> Optional[RunbookDef]:
+    def get(self, name: str) -> RunbookDef | None:
         return self._runbooks.get(name)
 
-    def list_all(self) -> List[RunbookDef]:
+    def list_all(self) -> builtins.list[RunbookDef]:
         return list(self._runbooks.values())
 
-    def list(self, category: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list(self, category: str | None = None) -> builtins.list[dict[str, Any]]:
         result = []
         for rb in self._runbooks.values():
             if category and rb.category != category:
@@ -38,7 +38,7 @@ class RunbookRegistry:
             result.append(rb.to_dict())
         return result
 
-    def list_categories(self) -> List[str]:
+    def list_categories(self) -> builtins.list[str]:
         return list({rb.category for rb in self._runbooks.values()})
 
     def count(self) -> int:
@@ -58,10 +58,10 @@ class RunbookRegistry:
                     continue
         return loaded
 
-    def find_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+    def find_by_tag(self, tag: str) -> builtins.list[dict[str, Any]]:
         return [rb.to_dict() for rb in self._runbooks.values() if tag in rb.tags]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "runbooks": [rb.to_dict() for rb in self._runbooks.values()],
             "count": self.count(),
@@ -69,7 +69,7 @@ class RunbookRegistry:
         }
 
 
-_GLOBAL_REGISTRY: Optional[RunbookRegistry] = None
+_GLOBAL_REGISTRY: RunbookRegistry | None = None
 
 
 def get_registry() -> RunbookRegistry:

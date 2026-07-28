@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from openai import AzureOpenAI
 
@@ -13,9 +13,11 @@ from src.intelligence.providers.base import (
 
 
 class AzureProvider(ModelProvider):
-    def __init__(self, config: Optional[ProviderConfig] = None) -> None:
+    def __init__(self, config: ProviderConfig | None = None) -> None:
         super().__init__(config)
-        kwargs: Dict[str, Any] = {"api_version": self.config.extra.get("api_version", "2024-08-01-preview")}
+        kwargs: dict[str, Any] = {
+            "api_version": self.config.extra.get("api_version", "2024-08-01-preview")
+        }
         if self.config.api_key:
             kwargs["api_key"] = self.config.api_key
         if self.config.base_url:
@@ -28,7 +30,7 @@ class AzureProvider(ModelProvider):
     def provider_name(self) -> str:
         return "azure"
 
-    def chat(self, messages: List[Message], **kwargs: Any) -> Message:
+    def chat(self, messages: list[Message], **kwargs: Any) -> Message:
         deployment = kwargs.get("model", self.config.deployment_name or self.config.model)
         resp = self._client.chat.completions.create(
             model=deployment,
@@ -37,12 +39,14 @@ class AzureProvider(ModelProvider):
             max_tokens=kwargs.get("max_tokens", self.config.max_tokens),
         )
         choice = resp.choices[0]
-        return Message(role=choice.message.role or "assistant", content=choice.message.content or "")
+        return Message(
+            role=choice.message.role or "assistant", content=choice.message.content or ""
+        )
 
     def chat_with_tools(
         self,
-        messages: List[Message],
-        tools: List[Dict[str, Any]],
+        messages: list[Message],
+        tools: list[dict[str, Any]],
         **kwargs: Any,
     ) -> Message:
         deployment = kwargs.get("model", self.config.deployment_name or self.config.model)
@@ -57,10 +61,18 @@ class AzureProvider(ModelProvider):
         tool_calls = []
         if choice.message.tool_calls:
             for tc in choice.message.tool_calls:
-                tool_calls.append(ToolCall(name=tc.function.name, args=tc.function.arguments, id=tc.id))
-        return Message(role=choice.message.role or "assistant", content=choice.message.content or "", tool_calls=tool_calls)
+                tool_calls.append(
+                    ToolCall(name=tc.function.name, args=tc.function.arguments, id=tc.id)
+                )
+        return Message(
+            role=choice.message.role or "assistant",
+            content=choice.message.content or "",
+            tool_calls=tool_calls,
+        )
 
-    def embed(self, text: str, **kwargs: Any) -> List[float]:
-        deployment = kwargs.get("model", self.config.extra.get("embedding_deployment", "text-embedding-3-small"))
+    def embed(self, text: str, **kwargs: Any) -> list[float]:
+        deployment = kwargs.get(
+            "model", self.config.extra.get("embedding_deployment", "text-embedding-3-small")
+        )
         resp = self._client.embeddings.create(model=deployment, input=text)
         return resp.data[0].embedding
