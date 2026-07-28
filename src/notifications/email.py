@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import smtplib
 from email.mime.text import MIMEText
-from typing import Optional
 
 from src.notifications.base import NotificationProvider
 
@@ -19,7 +18,7 @@ class EmailProvider(NotificationProvider):
         username: str,
         password: str,
         recipient: str,
-        sender: Optional[str] = None,
+        sender: str | None = None,
         subject: str = "AegisNex Incident",
         starttls: bool = True,
         **kwargs,

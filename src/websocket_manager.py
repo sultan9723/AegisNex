@@ -8,8 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from threading import Lock
-from typing import Any, Dict, Set
-
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +17,7 @@ class WebSocketManager:
     """Track active WebSocket clients per channel and broadcast JSON events with error isolation."""
 
     def __init__(self) -> None:
-        self._channels: Dict[str, Set[Any]] = {}
+        self._channels: dict[str, set[Any]] = {}
         self._lock = Lock()
         self._consecutive_failures = 0
         self._max_backoff_seconds = 60
@@ -27,7 +26,7 @@ class WebSocketManager:
     def connection_count(self) -> int:
         return sum(len(ws) for ws in self._channels.values())
 
-    def _channel(self, name: str) -> Set[Any]:
+    def _channel(self, name: str) -> set[Any]:
         if name not in self._channels:
             self._channels[name] = set()
         return self._channels[name]
@@ -42,7 +41,7 @@ class WebSocketManager:
         with self._lock:
             self._channel(channel).discard(websocket)
 
-    async def broadcast(self, event: Dict[str, Any], channel: str = "dashboard") -> None:
+    async def broadcast(self, event: dict[str, Any], channel: str = "dashboard") -> None:
         stale_connections = []
         with self._lock:
             connections = list(self._channel(channel))
@@ -60,13 +59,17 @@ class WebSocketManager:
         else:
             self._consecutive_failures = 0
 
-    async def broadcast_with_backoff(self, event: Dict[str, Any], channel: str = "dashboard") -> None:
+    async def broadcast_with_backoff(
+        self, event: dict[str, Any], channel: str = "dashboard"
+    ) -> None:
         try:
             await self.broadcast(event, channel=channel)
         except Exception as exc:
-            logger.error("WebSocket broadcast error on channel '%s': %s", channel, exc, exc_info=True)
+            logger.error(
+                "WebSocket broadcast error on channel '%s': %s", channel, exc, exc_info=True
+            )
             self._consecutive_failures += 1
-            backoff = min(2 ** self._consecutive_failures, self._max_backoff_seconds)
+            backoff = min(2**self._consecutive_failures, self._max_backoff_seconds)
             await asyncio.sleep(backoff)
 
     @property

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import csv
 import json
 import logging
-from pathlib import Path
 import sqlite3
-from typing import Any, Iterable, Literal
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, Literal
 
 _logger = logging.getLogger(__name__)
 
@@ -151,7 +152,9 @@ class OperationalReporter:
                 recovery_rows = []
 
         recovery_seconds = [
-            (_parse_timestamp(r["resolved_timestamp"]) - _parse_timestamp(r["timestamp"])).total_seconds()
+            (
+                _parse_timestamp(r["resolved_timestamp"]) - _parse_timestamp(r["timestamp"])
+            ).total_seconds()
             for r in recovery_rows
             if r["resolved_timestamp"]
         ]
@@ -172,13 +175,17 @@ class OperationalReporter:
             "average_recovery_seconds": round(average_recovery_seconds, 2),
         }
 
-    def _safe_report_query(self, connection: sqlite3.Connection, query: str, params: tuple = ()) -> Any:
+    def _safe_report_query(
+        self, connection: sqlite3.Connection, query: str, params: tuple = ()
+    ) -> Any:
         try:
             return connection.execute(query, params).fetchone()
         except sqlite3.OperationalError:
             return None
 
-    def _safe_report_query_all(self, connection: sqlite3.Connection, query: str, params: tuple = ()) -> list[Any]:
+    def _safe_report_query_all(
+        self, connection: sqlite3.Connection, query: str, params: tuple = ()
+    ) -> list[Any]:
         try:
             return connection.execute(query, params).fetchall()
         except sqlite3.OperationalError:
@@ -192,7 +199,7 @@ class OperationalReporter:
                 SELECT
                     COUNT(*) AS total,
                     SUM(CASE WHEN successful = 1 THEN 1 ELSE 0 END) AS successful
-                FROM remediations
+                FROM remediation_actions
                 WHERE timestamp >= ?
                 """,
                 _window_start_param(window),
@@ -230,9 +237,7 @@ class OperationalReporter:
             "notification_success_rate": _percentage(successful, total),
         }
 
-    def _top_failing_services(
-        self, window: ReportWindow, limit: int = 5
-    ) -> list[dict[str, Any]]:
+    def _top_failing_services(self, window: ReportWindow, limit: int = 5) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = self._safe_report_query_all(
                 connection,
@@ -375,7 +380,11 @@ def _render_pdf(lines: list[str]) -> bytes:
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Length "
+        + str(len(stream)).encode("ascii")
+        + b" >>\nstream\n"
+        + stream
+        + b"\nendstream",
     ]
     output = bytearray(b"%PDF-1.4\n")
     offsets = [0]
@@ -411,10 +420,10 @@ def _format_from_path(path: Path) -> ReportFormat:
 
 def _normalize_datetime(value: datetime | None = None) -> datetime:
     if value is None:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _format_timestamp(value: datetime) -> str:
@@ -422,7 +431,7 @@ def _format_timestamp(value: datetime) -> str:
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _window_params(window: ReportWindow) -> tuple[str, str]:

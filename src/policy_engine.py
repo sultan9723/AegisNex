@@ -7,12 +7,12 @@ persistence, categorization, and a clean API for the autonomous pipeline.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from src.intelligence.policy import PolicyEngine as _InnerPolicyEngine, Policy
+from src.intelligence.policy import Policy
+from src.intelligence.policy import PolicyEngine as _InnerPolicyEngine
 from src.intelligence.risk import RiskEngine, RiskLevel
 
 _logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class ActionVerdict(str, Enum):
     FORBIDDEN = "forbidden"
 
 
-AUTONOMOUS_ACTIONS_SAFE: List[str] = [
+AUTONOMOUS_ACTIONS_SAFE: list[str] = [
     "restart_container",
     "retry_notification",
     "re_run_health_check",
@@ -35,7 +35,7 @@ AUTONOMOUS_ACTIONS_SAFE: List[str] = [
     "rotate_logs",
 ]
 
-AUTONOMOUS_ACTIONS_APPROVAL: List[str] = [
+AUTONOMOUS_ACTIONS_APPROVAL: list[str] = [
     "delete_container",
     "stop_container",
     "delete_target",
@@ -45,7 +45,7 @@ AUTONOMOUS_ACTIONS_APPROVAL: List[str] = [
     "rollback_deployment",
 ]
 
-AUTONOMOUS_ACTIONS_FORBIDDEN: List[str] = [
+AUTONOMOUS_ACTIONS_FORBIDDEN: list[str] = [
     "delete_database",
     "delete_volume",
     "delete_cluster",
@@ -62,11 +62,11 @@ class PolicyEvaluation:
     verdict: ActionVerdict
     reason: str
     confidence: float = 1.0
-    policy_name: Optional[str] = None
-    risk_level: Optional[str] = None
+    policy_name: str | None = None
+    risk_level: str | None = None
     risk_score: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
             "verdict": self.verdict.value,
@@ -101,19 +101,21 @@ class AppPolicyEngine:
         try:
             if hasattr(self._repository, "list_policies"):
                 for row in self._repository.list_policies():
-                    self._inner.add_policy(Policy(
-                        name=row.get("name", "custom"),
-                        description=row.get("description", ""),
-                        action_pattern=row.get("action_pattern", "*"),
-                        condition=row.get("condition", "always"),
-                        effect=row.get("effect", "deny"),
-                        priority=int(row.get("priority", 0)),
-                        enabled=bool(row.get("enabled", True)),
-                    ))
+                    self._inner.add_policy(
+                        Policy(
+                            name=row.get("name", "custom"),
+                            description=row.get("description", ""),
+                            action_pattern=row.get("action_pattern", "*"),
+                            condition=row.get("condition", "always"),
+                            effect=row.get("effect", "deny"),
+                            priority=int(row.get("priority", 0)),
+                            enabled=bool(row.get("enabled", True)),
+                        )
+                    )
         except Exception:
             _logger.exception("Failed to load persisted policies")
 
-    def evaluate(self, action: str, context: Optional[Dict[str, Any]] = None) -> PolicyEvaluation:
+    def evaluate(self, action: str, context: dict[str, Any] | None = None) -> PolicyEvaluation:
         ctx = context or {}
         action_lower = action.strip().lower()
 
@@ -184,14 +186,14 @@ class AppPolicyEngine:
             risk_score=risk.score,
         )
 
-    def get_safe_actions(self) -> List[str]:
+    def get_safe_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_SAFE)
 
-    def get_approval_actions(self) -> List[str]:
+    def get_approval_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_APPROVAL)
 
-    def get_forbidden_actions(self) -> List[str]:
+    def get_forbidden_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_FORBIDDEN)
 
-    def list_policies(self) -> List[Dict[str, Any]]:
+    def list_policies(self) -> list[dict[str, Any]]:
         return self._inner.list_policies()
