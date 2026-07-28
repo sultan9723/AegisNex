@@ -14,11 +14,11 @@ def test_password_hashing_verifies_and_does_not_store_plaintext() -> None:
 def test_user_store_creates_and_authenticates_user(tmp_path: Path) -> None:
     store = UserStore(tmp_path / "users.db")
 
-    user = store.create_user("Admin@Example.com", "password123")
+    user = store.create_user("Admin@Example.com", "password12345")
 
     assert user.email == "admin@example.com"
     assert user.hashed_password.startswith("pbkdf2_sha256$")
-    assert store.authenticate("admin@example.com", "password123") == user
+    assert store.authenticate("admin@example.com", "password12345") == user
     assert store.authenticate("admin@example.com", "bad-password") is None
 
 
@@ -28,7 +28,7 @@ def test_auth_manager_issues_and_reads_jwt(tmp_path: Path) -> None:
         jwt_secret="test-secret",
     )
 
-    user, token, refresh = manager.register("ops@example.com", "password123")
+    user, token, refresh = manager.register("ops@example.com", "password12345")
     decoded = manager.get_user_from_token(token)
 
     assert decoded is not None
@@ -44,7 +44,7 @@ def test_auth_manager_login_returns_none_for_invalid_credentials(tmp_path: Path)
         user_store=UserStore(tmp_path / "users.db"),
         jwt_secret="test-secret",
     )
-    manager.register("ops@example.com", "password123")
+    manager.register("ops@example.com", "password12345")
 
     assert manager.login("ops@example.com", "wrong-password") is None
 
@@ -54,7 +54,7 @@ def test_auth_manager_logout_revokes_token(tmp_path: Path) -> None:
         user_store=UserStore(tmp_path / "users.db"),
         jwt_secret="test-secret",
     )
-    user, token, refresh = manager.register("ops@example.com", "password123")
+    user, token, refresh = manager.register("ops@example.com", "password12345")
 
     assert manager.get_user_from_token(token) is not None
     assert manager.logout(token) is True
@@ -86,7 +86,7 @@ def test_auth_manager_hardcoded_secret_raises_error(tmp_path: Path) -> None:
 
 def test_auth_manager_normalizes_legacy_viewer_role_on_read(tmp_path: Path) -> None:
     store = UserStore(tmp_path / "users.db")
-    user, token, _ = AuthManager(store, jwt_secret="test-secret").register("viewer@example.com", "password123")
+    user, token, _ = AuthManager(store, jwt_secret="test-secret").register("viewer@example.com", "password12345")
 
     with store._connect() as connection:
         connection.execute("UPDATE users SET role = 'viewer' WHERE id = ?", (user.id,))

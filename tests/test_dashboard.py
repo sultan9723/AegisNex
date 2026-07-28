@@ -65,11 +65,11 @@ class FakeDockerScanner:
 
 class FakeRepository:
     def __init__(self, database_path: Path) -> None:
-        from src.storage import AegisNexRepository
+        from src.platform_db import PlatformRepository
 
         self.database_path = database_path
         self._sqlite_path = str(database_path)
-        AegisNexRepository(database_path)
+        PlatformRepository(str(database_path))
         now = datetime.now(timezone.utc)
         self.rows = {
             "metrics_snapshots": [
@@ -436,7 +436,7 @@ def test_dashboard_routes_render_pages(tmp_path: Path) -> None:
         UserStore(tmp_path / "users.db"),
         jwt_secret="test-secret-32chars-long-please!",
     )
-    user, _, _ = auth_manager.register("ops@example.com", "password123")
+    user, _, _ = auth_manager.register("ops@example.com", "password12345")
     app = create_app(services, auth_manager=auth_manager)
 
     # Obtain a session cookie via the framework
@@ -513,7 +513,7 @@ def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> Non
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
 
-    user, access_token, _ = auth_manager.register("viewer@example.com", "password123")
+    user, access_token, _ = auth_manager.register("viewer@example.com", "password12345")
     with auth_manager.user_store._connect() as connection:
         connection.execute("UPDATE users SET role = 'viewer' WHERE id = ?", (user.id,))
     legacy_token = auth_manager.create_access_token(auth_manager.user_store.get_user_by_id(user.id))
@@ -528,7 +528,7 @@ def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> Non
     assert auth_manager.get_user_from_token(legacy_token) is not None
 
 
-def test_websocket_endpoints_accept_authenticated_query_token(tmp_path: Path) -> None:
+def test_websocket_endpoints_accept_authenticated_cookie_token(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
 
@@ -538,7 +538,7 @@ def test_websocket_endpoints_accept_authenticated_query_token(tmp_path: Path) ->
     )
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
-    user, token, _ = auth_manager.register("ops@example.com", "password123")
+    user, token, _ = auth_manager.register("ops@example.com", "password12345")
     assert auth_manager.get_user_from_token(token) is not None
 
     for path in ("/ws/dashboard", "/ws/targets", "/ws/incidents", "/ws/containers"):
@@ -546,10 +546,32 @@ def test_websocket_endpoints_accept_authenticated_query_token(tmp_path: Path) ->
         assert any(message["type"] == "websocket.accept" for message in messages)
 
 
-async def asgi_websocket_handshake(app, path: str, token: str | None = None) -> list[dict]:
+def test_websocket_endpoints_reject_query_token_auth(tmp_path: Path) -> None:
+    """Query string tokens should be rejected for security (logged in server logs)."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
+
+    auth_manager = AuthManager(
+        UserStore(tmp_path / "users.db"),
+        jwt_secret="test-secret-32chars-long-please!",
+    )
+    services = build_services(tmp_path)
+    app = create_app(services, auth_manager=auth_manager)
+    user, token, _ = auth_manager.register("ops@example.com", "password12345")
+
+    messages = asyncio.run(asgi_websocket_handshake(app, "/ws/dashboard", token=token, use_query=True))
+    assert any(message.get("code") == 4001 for message in messages)
+
+
+async def asgi_websocket_handshake(app, path: str, token: str | None = None, use_query: bool = False) -> list[dict]:
     messages: list[dict] = []
     request_sent = False
-    query_string = f"token={token}".encode("utf-8") if token else b""
+    query_string = b""
+    headers = [(b"host", b"testserver"), (b"origin", b"http://localhost:3000")]
+    if token and not use_query:
+        headers.append((b"cookie", f"aegisnex_session={token}".encode("utf-8")))
+    elif token and use_query:
+        query_string = f"token={token}".encode("utf-8")
     scope = {
         "type": "websocket",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -557,7 +579,7 @@ async def asgi_websocket_handshake(app, path: str, token: str | None = None) -> 
         "path": path,
         "raw_path": path.encode("ascii"),
         "query_string": query_string,
-        "headers": [(b"host", b"testserver"), (b"origin", b"http://localhost:3000")],
+        "headers": headers,
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
         "subprotocols": [],
@@ -592,7 +614,7 @@ def test_dashboard_api_routes_return_live_context(tmp_path: Path) -> None:
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
 
-    _, _, token = auth_manager.register("test@example.com", "password123")
+    _, _, token = auth_manager.register("test@example.com", "password12345")
 
     expected_shapes = {
         "/api/system-health": ["health_score", "metrics", "active_incident_count", "running_container_count"],
@@ -636,7 +658,7 @@ def test_dashboard_api_routes_include_cors_headers(tmp_path: Path) -> None:
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
 
-    _, _, token = auth_manager.register("test@example.com", "password123")
+    _, _, token = auth_manager.register("test@example.com", "password12345")
 
     api_paths = [
         "/api/system-health",
@@ -671,7 +693,7 @@ def test_dashboard_incident_lifecycle_api_persists_actions(tmp_path: Path) -> No
     )
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
-    _, _, token = auth_manager.register("ops@example.com", "password123")
+    _, _, token = auth_manager.register("ops@example.com", "password12345")
     repository = PlatformRepository(f"sqlite:///{tmp_path / 'platform.db'}")
     app.state.services.platform_repository = repository
     app.state.services.incident_manager.storage_repository = repository
