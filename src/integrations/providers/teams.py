@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -14,7 +13,7 @@ class TeamsProvider(IntegrationProvider):
     description = "Microsoft Teams messaging and channel management"
     icon = "teams"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.webhook_url = config.get("settings", {}).get("webhook_url", "")
         self.tenant_id = config.get("settings", {}).get("tenant_id", "")
@@ -22,9 +21,11 @@ class TeamsProvider(IntegrationProvider):
         self.client_secret = self._credentials.get("client_secret", "")
         self.graph_token: str = ""
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "AegisNex-Integration/1.0",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": "AegisNex-Integration/1.0",
+            }
+        )
 
     def _ensure_graph_token(self) -> None:
         if not self.tenant_id or not self.client_id or not self.client_secret:
@@ -45,7 +46,7 @@ class TeamsProvider(IntegrationProvider):
         resp.raise_for_status()
         self.graph_token = resp.json().get("access_token", "")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         if self.webhook_url:
             return {"status": "ok", "note": "webhook configured"}
         try:
@@ -56,7 +57,7 @@ class TeamsProvider(IntegrationProvider):
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult:
         handler = getattr(self, f"_action_{action}", None)
         if handler is None:
             return IntegrationResult(success=False, error=f"Unknown action: {action}")
@@ -73,7 +74,7 @@ class TeamsProvider(IntegrationProvider):
         resp = self.session.post(self.webhook_url, json=payload, timeout=30)
         resp.raise_for_status()
 
-    def _action_send_message(self, params: Dict[str, Any]) -> Any:
+    def _action_send_message(self, params: dict[str, Any]) -> Any:
         channel = params.get("channel", "")
         message = params.get("text", "") or params.get("message", "")
         if not message:
@@ -101,7 +102,7 @@ class TeamsProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_list_channels(self, params: Dict[str, Any]) -> Any:
+    def _action_list_channels(self, params: dict[str, Any]) -> Any:
         self._ensure_graph_token()
         if not self.graph_token:
             raise ValueError("graph credentials required to list channels")
@@ -117,7 +118,7 @@ class TeamsProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_create_channel(self, params: Dict[str, Any]) -> Any:
+    def _action_create_channel(self, params: dict[str, Any]) -> Any:
         self._ensure_graph_token()
         if not self.graph_token:
             raise ValueError("graph credentials required to create channels")
@@ -125,7 +126,10 @@ class TeamsProvider(IntegrationProvider):
         channel_name = params.get("name")
         if not team_id or not channel_name:
             raise ValueError("team_id and name are required")
-        headers = {"Authorization": f"Bearer {self.graph_token}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.graph_token}",
+            "Content-Type": "application/json",
+        }
         data = {
             "displayName": channel_name,
             "description": params.get("description", ""),

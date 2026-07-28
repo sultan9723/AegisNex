@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -13,36 +13,40 @@ class PrometheusIntegration(IntegrationProvider):
     description = "Prometheus metrics querying and alert management"
     icon = "prometheus"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.base_url = config.get("settings", {}).get("base_url", "http://localhost:9090").rstrip("/")
+        self.base_url = (
+            config.get("settings", {}).get("base_url", "http://localhost:9090").rstrip("/")
+        )
         self.api_url = f"{self.base_url}/api/v1"
         token = self._credentials.get("token") or self._credentials.get("bearer_token")
         username = self._credentials.get("username")
         password = self._credentials.get("password")
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "AegisNex-Integration/1.0",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": "AegisNex-Integration/1.0",
+            }
+        )
         if token:
             self.session.headers["Authorization"] = f"Bearer {token}"
         if username and password:
             self.session.auth = (username, password)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         try:
             resp = self.session.get(f"{self.base_url}/-/ready", timeout=10)
             return {"status": "ok" if resp.ok else "error", "status_code": resp.status_code}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult:
         handler = getattr(self, f"_action_{action}", None)
         if handler is None:
             return IntegrationResult(success=False, error=f"Unknown action: {action}")
         return self._timed(handler, params)
 
-    def _action_query(self, params: Dict[str, Any]) -> Any:
+    def _action_query(self, params: dict[str, Any]) -> Any:
         query = params.get("query", "")
         if not query:
             raise ValueError("query is required")
@@ -56,7 +60,7 @@ class PrometheusIntegration(IntegrationProvider):
             raise ValueError(data.get("error", "prometheus query failed"))
         return data["data"]
 
-    def _action_query_range(self, params: Dict[str, Any]) -> Any:
+    def _action_query_range(self, params: dict[str, Any]) -> Any:
         query = params.get("query", "")
         start = params.get("start")
         end = params.get("end")
@@ -76,7 +80,7 @@ class PrometheusIntegration(IntegrationProvider):
             raise ValueError(data.get("error", "prometheus query_range failed"))
         return data["data"]
 
-    def _action_list_targets(self, params: Dict[str, Any]) -> Any:
+    def _action_list_targets(self, params: dict[str, Any]) -> Any:
         state = params.get("state", "")  # active, dropped, any
         query_params = {}
         if state and state != "any":
@@ -88,7 +92,7 @@ class PrometheusIntegration(IntegrationProvider):
             raise ValueError(data.get("error", "prometheus targets failed"))
         return data["data"]
 
-    def _action_get_alerts(self, params: Dict[str, Any]) -> Any:
+    def _action_get_alerts(self, params: dict[str, Any]) -> Any:
         resp = self.session.get(f"{self.api_url}/alerts", timeout=30)
         resp.raise_for_status()
         data = resp.json()
