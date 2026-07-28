@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 from importlib import import_module
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class AgentX:
-    def __init__(self, logger: Optional[logging.Logger] = None) -> None:
+    def __init__(self, logger: logging.Logger | None = None) -> None:
         self.logger = logger or logging.getLogger("agentx")
-        self.commands: Dict[str, Any] = {}
+        self.commands: dict[str, Any] = {}
 
     def register_command(self, name: str, instance: Any) -> None:
         if not isinstance(name, str) or not name.strip():

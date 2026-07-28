@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 
 class SystemHealthChecker:
@@ -12,19 +12,19 @@ class SystemHealthChecker:
         self,
         monitor: Any,
         docker_scanner: Any,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self.monitor = monitor
         self.docker_scanner = docker_scanner
         self.logger = logger or logging.getLogger("agentx.health")
 
-    def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         monitor_params = params.get("monitor", {})
         docker_params = params.get("docker", {})
 
-        hardware: Dict[str, Any]
-        docker: Dict[str, Any]
+        hardware: dict[str, Any]
+        docker: dict[str, Any]
 
         try:
             hardware = self.monitor.run(monitor_params)
@@ -38,5 +38,5 @@ class SystemHealthChecker:
             self.logger.exception("Docker scan failed: %s", exc)
             docker = {"status": "failed", "error": str(exc)}
 
-        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         return {"timestamp": timestamp, "hardware": hardware, "docker": docker}
