@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import src.integrations.providers  # noqa: F401 — ensures all integrations are registered
-
 from src.integrations.base import (
     INTEGRATION_REGISTRY,
     IntegrationConfig,
@@ -18,7 +17,7 @@ def _get_store() -> SQLiteMemoryStore:
     return SQLiteMemoryStore(db_path="aegisnex.db")
 
 
-CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
+CATALOG_METADATA: dict[str, dict[str, Any]] = {
     "github": {
         "name": "GitHub",
         "description": "Repository management, issue tracking, PRs, and commit history",
@@ -26,8 +25,17 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
         "category": "source_control",
         "docs_url": "https://docs.github.com/en/rest",
         "config_schema": {
-            "credentials": {"token": {"type": "string", "required": True, "label": "Personal Access Token"}},
-            "settings": {"base_url": {"type": "string", "required": False, "label": "API Base URL", "default": "https://api.github.com"}},
+            "credentials": {
+                "token": {"type": "string", "required": True, "label": "Personal Access Token"}
+            },
+            "settings": {
+                "base_url": {
+                    "type": "string",
+                    "required": False,
+                    "label": "API Base URL",
+                    "default": "https://api.github.com",
+                }
+            },
         },
     },
     "gitlab": {
@@ -37,8 +45,17 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
         "category": "source_control",
         "docs_url": "https://docs.gitlab.com/ee/api/",
         "config_schema": {
-            "credentials": {"token": {"type": "string", "required": True, "label": "Personal Access Token"}},
-            "settings": {"base_url": {"type": "string", "required": False, "label": "API Base URL", "default": "https://gitlab.com/api/v4"}},
+            "credentials": {
+                "token": {"type": "string", "required": True, "label": "Personal Access Token"}
+            },
+            "settings": {
+                "base_url": {
+                    "type": "string",
+                    "required": False,
+                    "label": "API Base URL",
+                    "default": "https://gitlab.com/api/v4",
+                }
+            },
         },
     },
     "jira": {
@@ -53,7 +70,9 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
                 "password": {"type": "string", "required": False, "label": "API Token / Password"},
                 "token": {"type": "string", "required": False, "label": "Bearer Token"},
             },
-            "settings": {"base_url": {"type": "string", "required": True, "label": "Jira Instance URL"}},
+            "settings": {
+                "base_url": {"type": "string", "required": True, "label": "Jira Instance URL"}
+            },
         },
     },
     "servicenow": {
@@ -93,7 +112,11 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
                 "client_secret": {"type": "string", "required": False, "label": "Client Secret"},
             },
             "settings": {
-                "webhook_url": {"type": "string", "required": False, "label": "Incoming Webhook URL"},
+                "webhook_url": {
+                    "type": "string",
+                    "required": False,
+                    "label": "Incoming Webhook URL",
+                },
                 "tenant_id": {"type": "string", "required": False, "label": "Tenant ID"},
             },
         },
@@ -106,7 +129,9 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
         "docs_url": "https://developer.pagerduty.com/api-reference/",
         "config_schema": {
             "credentials": {"token": {"type": "string", "required": True, "label": "API Token"}},
-            "settings": {"routing_key": {"type": "string", "required": False, "label": "Events Routing Key"}},
+            "settings": {
+                "routing_key": {"type": "string", "required": False, "label": "Events Routing Key"}
+            },
         },
     },
     "discord": {
@@ -117,7 +142,9 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
         "docs_url": "https://discord.com/developers/docs/intro",
         "config_schema": {
             "credentials": {"token": {"type": "string", "required": False, "label": "Bot Token"}},
-            "settings": {"webhook_url": {"type": "string", "required": False, "label": "Webhook URL"}},
+            "settings": {
+                "webhook_url": {"type": "string", "required": False, "label": "Webhook URL"}
+            },
         },
     },
     "kubernetes": {
@@ -148,7 +175,14 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
                 "username": {"type": "string", "required": False, "label": "Username"},
                 "password": {"type": "string", "required": False, "label": "Password"},
             },
-            "settings": {"base_url": {"type": "string", "required": False, "label": "Prometheus URL", "default": "http://localhost:9090"}},
+            "settings": {
+                "base_url": {
+                    "type": "string",
+                    "required": False,
+                    "label": "Prometheus URL",
+                    "default": "http://localhost:9090",
+                }
+            },
         },
     },
     "grafana": {
@@ -163,15 +197,22 @@ CATALOG_METADATA: Dict[str, Dict[str, Any]] = {
                 "username": {"type": "string", "required": False, "label": "Username"},
                 "password": {"type": "string", "required": False, "label": "Password"},
             },
-            "settings": {"base_url": {"type": "string", "required": False, "label": "Grafana URL", "default": "http://localhost:3000"}},
+            "settings": {
+                "base_url": {
+                    "type": "string",
+                    "required": False,
+                    "label": "Grafana URL",
+                    "default": "http://localhost:3000",
+                }
+            },
         },
     },
 }
 
 
-def get_marketplace_catalog() -> List[Dict[str, Any]]:
+def get_marketplace_catalog() -> list[dict[str, Any]]:
     """Return all available integrations with full metadata."""
-    catalog: List[Dict[str, Any]] = []
+    catalog: list[dict[str, Any]] = []
     for name in INTEGRATION_REGISTRY:
         entry = dict(CATALOG_METADATA.get(name, {}))
         entry["integration_id"] = name
@@ -194,7 +235,7 @@ def get_marketplace_catalog() -> List[Dict[str, Any]]:
     return sorted(catalog, key=lambda x: x["name"])
 
 
-def install_integration(name: str, config: Dict[str, Any]) -> Optional[IntegrationProvider]:
+def install_integration(name: str, config: dict[str, Any]) -> IntegrationProvider | None:
     """Install (register and persist) an integration by name.
 
     Args:
@@ -226,23 +267,25 @@ def uninstall_integration(name: str) -> bool:
     return store.remove_integration(name)
 
 
-def get_installed_integrations() -> List[Dict[str, Any]]:
+def get_installed_integrations() -> list[dict[str, Any]]:
     """Return list of installed integrations with their stored config."""
     store = _get_store()
     integrations = store.get_integrations()
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for integration in integrations:
         name = integration.get("name", "")
         meta = CATALOG_METADATA.get(name, {})
-        result.append({
-            "integration_id": name,
-            "name": meta.get("name", name.title()),
-            "description": meta.get("description", ""),
-            "icon": meta.get("icon", name),
-            "category": meta.get("category", "general"),
-            "enabled": integration.get("enabled", False),
-            "credentials": integration.get("credentials", {}),
-            "settings": integration.get("settings", {}),
-            "created_at": integration.get("created_at", ""),
-        })
+        result.append(
+            {
+                "integration_id": name,
+                "name": meta.get("name", name.title()),
+                "description": meta.get("description", ""),
+                "icon": meta.get("icon", name),
+                "category": meta.get("category", "general"),
+                "enabled": integration.get("enabled", False),
+                "credentials": integration.get("credentials", {}),
+                "settings": integration.get("settings", {}),
+                "created_at": integration.get("created_at", ""),
+            }
+        )
     return result

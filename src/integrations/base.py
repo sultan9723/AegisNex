@@ -3,15 +3,15 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Type
+from typing import Any
 
 
 @dataclass
 class IntegrationConfig:
     name: str
     enabled: bool = True
-    credentials: Dict[str, str] = field(default_factory=dict)
-    settings: Dict[str, Any] = field(default_factory=dict)
+    credentials: dict[str, str] = field(default_factory=dict)
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -22,24 +22,24 @@ class IntegrationResult:
     duration_ms: float = 0.0
 
 
-INTEGRATION_REGISTRY: Dict[str, Type[IntegrationProvider]] = {}
+INTEGRATION_REGISTRY: dict[str, type[IntegrationProvider]] = {}
 
 
-def register_integration(cls: Type[IntegrationProvider]) -> Type[IntegrationProvider]:
+def register_integration(cls: type[IntegrationProvider]) -> type[IntegrationProvider]:
     name = getattr(cls, "name", cls.__name__.lower())
     INTEGRATION_REGISTRY[name] = cls
     return cls
 
 
-def get_integration(name: str, config: Optional[Dict[str, Any]] = None) -> Optional[IntegrationProvider]:
+def get_integration(name: str, config: dict[str, Any] | None = None) -> IntegrationProvider | None:
     cls = INTEGRATION_REGISTRY.get(name)
     if cls is None:
         return None
     return cls(config=config or {})
 
 
-def list_integrations() -> Dict[str, Dict[str, Any]]:
-    result: Dict[str, Dict[str, Any]] = {}
+def list_integrations() -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
     for name, cls in INTEGRATION_REGISTRY.items():
         try:
             inst = cls(config={})
@@ -62,7 +62,7 @@ class IntegrationProvider(ABC):
     description = ""
     icon = ""
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self._credentials = config.get("credentials", {})
         self._settings = config.get("settings", {})
@@ -80,12 +80,10 @@ class IntegrationProvider(ABC):
         return self.icon
 
     @abstractmethod
-    async def health_check(self) -> Dict[str, Any]:
-        ...
+    async def health_check(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
-        ...
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult: ...
 
     def _timed(self, fn, *args, **kwargs) -> IntegrationResult:
         start = time.perf_counter()

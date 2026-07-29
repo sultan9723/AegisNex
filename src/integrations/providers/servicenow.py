@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -13,7 +13,7 @@ class ServiceNowProvider(IntegrationProvider):
     description = "ServiceNow IT Service Management"
     icon = "servicenow"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.instance = config.get("settings", {}).get("instance", "").rstrip("/")
         if not self.instance:
@@ -25,26 +25,28 @@ class ServiceNowProvider(IntegrationProvider):
             raise ValueError("ServiceNow credentials (username, password) are required")
         self.session = requests.Session()
         self.session.auth = (username, password)
-        self.session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "AegisNex-Integration/1.0",
-        })
+        self.session.headers.update(
+            {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "AegisNex-Integration/1.0",
+            }
+        )
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         try:
             resp = self.session.get(f"{self.api_url}/table/incident?sysparm_limit=1", timeout=10)
             return {"status": "ok" if resp.ok else "error", "status_code": resp.status_code}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult:
         handler = getattr(self, f"_action_{action}", None)
         if handler is None:
             return IntegrationResult(success=False, error=f"Unknown action: {action}")
         return self._timed(handler, params)
 
-    def _action_create_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_create_incident(self, params: dict[str, Any]) -> Any:
         data = {
             "short_description": params.get("short_description", ""),
             "description": params.get("description", ""),
@@ -59,13 +61,22 @@ class ServiceNowProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_update_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_update_incident(self, params: dict[str, Any]) -> Any:
         sys_id = params.get("sys_id")
         if not sys_id:
             raise ValueError("sys_id is required")
         data = {}
-        for field in ("short_description", "description", "urgency", "impact", "state", "category",
-                       "assignment_group", "assigned_to", "work_notes"):
+        for field in (
+            "short_description",
+            "description",
+            "urgency",
+            "impact",
+            "state",
+            "category",
+            "assignment_group",
+            "assigned_to",
+            "work_notes",
+        ):
             if field in params:
                 data[field] = params[field]
         if not data:
@@ -74,7 +85,7 @@ class ServiceNowProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_get_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_get_incident(self, params: dict[str, Any]) -> Any:
         sys_id = params.get("sys_id")
         if not sys_id:
             raise ValueError("sys_id is required")
@@ -82,7 +93,7 @@ class ServiceNowProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_search_incidents(self, params: Dict[str, Any]) -> Any:
+    def _action_search_incidents(self, params: dict[str, Any]) -> Any:
         query_params = {
             "sysparm_query": params.get("query", ""),
             "sysparm_limit": params.get("limit", 50),

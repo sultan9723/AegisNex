@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -13,19 +13,21 @@ class DiscordProvider(IntegrationProvider):
     description = "Discord server messaging and channel management"
     icon = "discord"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = "https://discord.com/api/v10"
         self.webhook_url = config.get("settings", {}).get("webhook_url", "")
         token = self._credentials.get("token") or self._credentials.get("bot_token")
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "DiscordBot (AegisNex, 1.0)",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": "DiscordBot (AegisNex, 1.0)",
+            }
+        )
         if token:
             self.session.headers["Authorization"] = f"Bot {token}"
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         if self.webhook_url:
             return {"status": "ok", "note": "webhook configured"}
         try:
@@ -34,13 +36,13 @@ class DiscordProvider(IntegrationProvider):
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult:
         handler = getattr(self, f"_action_{action}", None)
         if handler is None:
             return IntegrationResult(success=False, error=f"Unknown action: {action}")
         return self._timed(handler, params)
 
-    def _send_via_webhook(self, content: str, params: Dict[str, Any]) -> None:
+    def _send_via_webhook(self, content: str, params: dict[str, Any]) -> None:
         if not self.webhook_url:
             raise ValueError("webhook_url not configured")
         data = {"content": content}
@@ -53,7 +55,7 @@ class DiscordProvider(IntegrationProvider):
         resp = self.session.post(self.webhook_url, json=data, timeout=30)
         resp.raise_for_status()
 
-    def _action_send_message(self, params: Dict[str, Any]) -> Any:
+    def _action_send_message(self, params: dict[str, Any]) -> Any:
         content = params.get("content", "") or params.get("text", "") or params.get("message", "")
         channel_id = params.get("channel_id")
         if not content and not channel_id:
@@ -68,11 +70,13 @@ class DiscordProvider(IntegrationProvider):
             data["embeds"] = params["embeds"]
         if params.get("tts"):
             data["tts"] = True
-        resp = self.session.post(f"{self.base_url}/channels/{channel_id}/messages", json=data, timeout=30)
+        resp = self.session.post(
+            f"{self.base_url}/channels/{channel_id}/messages", json=data, timeout=30
+        )
         resp.raise_for_status()
         return resp.json()
 
-    def _action_list_channels(self, params: Dict[str, Any]) -> Any:
+    def _action_list_channels(self, params: dict[str, Any]) -> Any:
         guild_id = params.get("guild_id")
         if not guild_id:
             raise ValueError("guild_id is required")
@@ -80,7 +84,7 @@ class DiscordProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_create_thread(self, params: Dict[str, Any]) -> Any:
+    def _action_create_thread(self, params: dict[str, Any]) -> Any:
         channel_id = params.get("channel_id")
         name = params.get("name")
         if not channel_id or not name:

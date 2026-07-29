@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import requests
 
@@ -13,35 +13,37 @@ class PagerDutyProvider(IntegrationProvider):
     description = "PagerDuty incident management and on-call coordination"
     icon = "pagerduty"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = "https://api.pagerduty.com"
         token = self._credentials.get("token") or self._credentials.get("api_token")
         if not token:
             raise ValueError("PagerDuty API token is required")
         self.session = requests.Session()
-        self.session.headers.update({
-            "Accept": "application/vnd.pagerduty+json;version=2",
-            "Content-Type": "application/json",
-            "Authorization": f"Token token={token}",
-            "User-Agent": "AegisNex-Integration/1.0",
-        })
+        self.session.headers.update(
+            {
+                "Accept": "application/vnd.pagerduty+json;version=2",
+                "Content-Type": "application/json",
+                "Authorization": f"Token token={token}",
+                "User-Agent": "AegisNex-Integration/1.0",
+            }
+        )
         self.routing_key = config.get("settings", {}).get("routing_key", "")
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         try:
             resp = self.session.get(f"{self.base_url}/abilities", timeout=10)
             return {"status": "ok" if resp.ok else "error", "status_code": resp.status_code}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def execute(self, action: str, params: Dict[str, Any]) -> IntegrationResult:
+    async def execute(self, action: str, params: dict[str, Any]) -> IntegrationResult:
         handler = getattr(self, f"_action_{action}", None)
         if handler is None:
             return IntegrationResult(success=False, error=f"Unknown action: {action}")
         return self._timed(handler, params)
 
-    def _action_trigger_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_trigger_incident(self, params: dict[str, Any]) -> Any:
         routing_key = params.get("routing_key", self.routing_key)
         if not routing_key:
             raise ValueError("routing_key is required")
@@ -60,11 +62,13 @@ class PagerDutyProvider(IntegrationProvider):
             },
             "dedup_key": params.get("dedup_key", ""),
         }
-        resp = self.session.post("https://events.pagerduty.com/v2/enqueue", json=payload, timeout=30)
+        resp = self.session.post(
+            "https://events.pagerduty.com/v2/enqueue", json=payload, timeout=30
+        )
         resp.raise_for_status()
         return resp.json()
 
-    def _action_acknowledge_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_acknowledge_incident(self, params: dict[str, Any]) -> Any:
         incident_id = params.get("incident_id")
         if not incident_id:
             raise ValueError("incident_id is required")
@@ -82,7 +86,7 @@ class PagerDutyProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_resolve_incident(self, params: Dict[str, Any]) -> Any:
+    def _action_resolve_incident(self, params: dict[str, Any]) -> Any:
         incident_id = params.get("incident_id")
         if not incident_id:
             raise ValueError("incident_id is required")
@@ -100,7 +104,7 @@ class PagerDutyProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_list_incidents(self, params: Dict[str, Any]) -> Any:
+    def _action_list_incidents(self, params: dict[str, Any]) -> Any:
         query_params = {
             "statuses[]": params.get("statuses", ["triggered", "acknowledged"]),
             "limit": params.get("limit", 25),
@@ -117,7 +121,7 @@ class PagerDutyProvider(IntegrationProvider):
         resp.raise_for_status()
         return resp.json()
 
-    def _action_list_services(self, params: Dict[str, Any]) -> Any:
+    def _action_list_services(self, params: dict[str, Any]) -> Any:
         query_params = {
             "limit": params.get("limit", 25),
             "offset": params.get("offset", 0),
