@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +46,7 @@ class EvidenceCollector:
                 evidence["data"]["recent_audit_events"] = 0
         try:
             import platform as _platform
+
             evidence["data"]["host_info"] = {
                 "system": _platform.system(),
                 "release": _platform.release(),
@@ -91,9 +91,7 @@ class EvidenceCollector:
                 policy_keys = {
                     k: v
                     for k, v in settings.items()
-                    if "policy" in k.lower()
-                    or "threshold" in k.lower()
-                    or "retention" in k.lower()
+                    if "policy" in k.lower() or "threshold" in k.lower() or "retention" in k.lower()
                 }
                 evidence["data"]["policy_settings"] = policy_keys
             except Exception as exc:
@@ -101,7 +99,9 @@ class EvidenceCollector:
         try:
             policy_dir = Path(__file__).resolve().parents[2] / "policies"
             if policy_dir.exists():
-                policy_files = [str(f.relative_to(policy_dir)) for f in policy_dir.iterdir() if f.is_file()]
+                policy_files = [
+                    str(f.relative_to(policy_dir)) for f in policy_dir.iterdir() if f.is_file()
+                ]
                 evidence["data"]["policy_files"] = policy_files
         except Exception:
             pass
@@ -192,9 +192,9 @@ class EvidenceCollector:
             report_data["controls"].append(control_entry)
         if format == "json":
             return json.dumps(report_data, indent=2, default=str, sort_keys=True)
-        elif format == "html":
+        if format == "html":
             return self._render_html(report_data)
-        elif format == "markdown":
+        if format == "markdown":
             return self._render_markdown(report_data)
         raise ValueError(f"Unsupported report format: {format}")
 
@@ -204,16 +204,16 @@ class EvidenceCollector:
         for ctrl in report["controls"]:
             controls_html += f"""
             <div class="control">
-                <h3>{ctrl['id']}: {ctrl['title']}</h3>
-                <p class="category">{ctrl['category']}</p>
-                <p>{ctrl['description']}</p>
-                <p><strong>Required Evidence:</strong> {', '.join(ctrl['required_evidence']) if ctrl['required_evidence'] else 'None'}</p>
-                <p><strong>Automated Check:</strong> {ctrl['has_automated_check']}</p>
+                <h3>{ctrl["id"]}: {ctrl["title"]}</h3>
+                <p class="category">{ctrl["category"]}</p>
+                <p>{ctrl["description"]}</p>
+                <p><strong>Required Evidence:</strong> {", ".join(ctrl["required_evidence"]) if ctrl["required_evidence"] else "None"}</p>
+                <p><strong>Automated Check:</strong> {ctrl["has_automated_check"]}</p>
             </div>
             """
         return f"""<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><title>Compliance Report - {fw['name']}</title>
+<head><meta charset="UTF-8"><title>Compliance Report - {fw["name"]}</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 1rem; }}
 h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.5rem; }}
@@ -223,13 +223,13 @@ h1 {{ border-bottom: 2px solid #333; padding-bottom: 0.5rem; }}
 </style>
 </head>
 <body>
-<h1>Compliance Report: {fw['name']} v{fw['version']}</h1>
-<p>{fw['description']}</p>
-<p><strong>Level:</strong> {fw['level']} | <strong>Controls:</strong> {fw['total_controls']}</p>
-<p><strong>Generated:</strong> {report['generated_at']}</p>
+<h1>Compliance Report: {fw["name"]} v{fw["version"]}</h1>
+<p>{fw["description"]}</p>
+<p><strong>Level:</strong> {fw["level"]} | <strong>Controls:</strong> {fw["total_controls"]}</p>
+<p><strong>Generated:</strong> {report["generated_at"]}</p>
 <hr>
 {controls_html}
-<div class="footer">AegisNex Compliance Report — {report['generated_at']}</div>
+<div class="footer">AegisNex Compliance Report — {report["generated_at"]}</div>
 </body>
 </html>"""
 
