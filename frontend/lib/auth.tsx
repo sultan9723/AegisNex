@@ -1,13 +1,27 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { buildApiUrl } from "./api";
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
 let currentAccessToken: string | null = null;
+let refreshPromise: Promise<boolean> | null = null;
 
 function setCurrentAccessToken(token: string | null) {
   currentAccessToken = token;
+}
+
+export function getAccessToken(): string | null {
+  return currentAccessToken;
+}
+
+export function setAccessToken(token: string | null) {
+  currentAccessToken = token;
+}
+
+function getCsrfToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/csrf_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 export type User = {
@@ -30,84 +44,162 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function parseJwtPayload(token: string): User | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(atob(parts[1]));
+    return {
+      id: parseInt(payload.sub),
+      email: payload.email,
+      role: payload.role,
+      is_superuser: payload.is_superuser,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const initDone = useRef(false);
 
-  const applyAuthResponse = useCallback(async (response: Response) => {
-    if (!response.ok) throw new Error("Invalid credentials");
-    const data = await response.json();
-    if (!data.access_token) throw new Error("Authentication failed: no access token received");
-    setCurrentAccessToken(data.access_token);
-    const parts = data.access_token.split(".");
-    try {
-      const payload = JSON.parse(atob(parts[1]));
-      const userInfo: User = {
-        id: parseInt(payload.sub),
-        email: payload.email,
-        role: payload.role,
-        is_superuser: payload.is_superuser,
-      };
-      setUser(userInfo);
-      return;
-    } catch {
-      setCurrentAccessToken(null);
-      setUser(null);
-      setError("Authentication failed: malformed token");
-      throw new Error("Authentication failed: malformed token");
+  const applyToken = useCallback((token: string): User | null => {
+    const parsed = parseJwtPayload(token);
+    if (parsed) {
+      currentAccessToken = token;
+      setUser(parsed);
+      setError(null);
     }
+    return parsed;
   }, []);
 
-  const checkAuth = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(buildApiUrl("/auth/verify"), {
-        credentials: "include",
-        cache: "no-store",
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setUser(data.user);
-        setCurrentAccessToken(data.access_token ?? currentAccessToken);
-        setError(null);
-      } else {
-        const refresh = await fetch(buildApiUrl("/auth/refresh"), {
+  const clearAuth = useCallback(() => {
+    currentAccessToken = null;
+    setUser(null);
+  }, []);
+
+  const tryRefresh = useCallback(async (): Promise<boolean> => {
+    if (refreshPromise) return refreshPromise;
+    refreshPromise = (async () => {
+      try {
+        const res = await fetch(buildApiUrl("/auth/refresh"), {
           method: "POST",
           credentials: "include",
           cache: "no-store",
         });
-        if (refresh.ok) {
-          await applyAuthResponse(refresh);
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (!data.access_token) return false;
+        const parsed = applyToken(data.access_token);
+        return parsed !== null;
+      } catch {
+        return false;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+    return refreshPromise;
+  }, [applyToken]);
+
+  const checkAuth = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await fetch(buildApiUrl("/auth/verify"), {
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.user) {
+          setUser(data.user);
           setError(null);
-        } else {
-          setUser(null);
-          setCurrentAccessToken(null);
+        }
+      } else {
+        const refreshed = await tryRefresh();
+        if (!refreshed) {
+          clearAuth();
         }
       }
     } catch {
-      setUser(null);
-      setCurrentAccessToken(null);
+      clearAuth();
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [tryRefresh, clearAuth]);
 
   useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
+    if (initDone.current) return;
+    initDone.current = true;
+
+    let cancelled = false;
+
+    const init = async () => {
+      try {
+        setLoading(true);
+        const res = await fetch(buildApiUrl("/auth/verify"), {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (cancelled) return;
+
+        if (res.ok) {
+          const data = await res.json();
+          if (!cancelled && data.user) {
+            setUser(data.user);
+            setError(null);
+          }
+        } else {
+          const refreshed = await tryRefresh();
+          if (cancelled) return;
+          if (!refreshed) {
+            clearAuth();
+          }
+        }
+      } catch {
+        if (!cancelled) clearAuth();
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    init();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const login = useCallback(async (username: string, password: string) => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(buildApiUrl("/login"), {
+      const csrfToken = getCsrfToken();
+      const headers: Record<string, string> = {
+        "Content-Type": "application/x-www-form-urlencoded",
+      };
+      if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+      }
+      const res = await fetch(buildApiUrl("/login"), {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers,
         body: new URLSearchParams({ username, password }),
         credentials: "include",
       });
-      await applyAuthResponse(response);
+      if (!res.ok) {
+        let detail = "Invalid credentials";
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = body.detail;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+      const data = await res.json();
+      if (!data.access_token) throw new Error("no access token received");
+      if (!applyToken(data.access_token)) {
+        clearAuth();
+        throw new Error("malformed token");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Login failed";
       setError(msg);
@@ -115,17 +207,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyToken, clearAuth]);
 
   const demoLogin = useCallback(async () => {
     setError(null);
     setLoading(true);
     try {
-      const response = await fetch(buildApiUrl("/auth/demo-login"), {
+      const csrfToken = getCsrfToken();
+      const headers: Record<string, string> = {};
+      if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+      }
+      const res = await fetch(buildApiUrl("/auth/demo-login"), {
         method: "POST",
+        headers,
         credentials: "include",
       });
-      await applyAuthResponse(response);
+      if (!res.ok) {
+        let detail = "Demo login failed";
+        try {
+          const body = await res.json();
+          if (body?.detail) detail = body.detail;
+        } catch { /* ignore */ }
+        throw new Error(detail);
+      }
+      const data = await res.json();
+      if (!data.access_token) throw new Error("no access token received");
+      if (!applyToken(data.access_token)) {
+        clearAuth();
+        throw new Error("malformed token");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Demo login failed";
       setError(msg);
@@ -133,17 +244,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setLoading(false);
     }
-  }, [applyAuthResponse]);
+  }, [applyToken, clearAuth]);
 
   const logout = useCallback(async () => {
     try {
-      await fetch("/logout", { credentials: "include" });
+      await fetch(buildApiUrl("/logout"), {
+        method: "POST",
+        credentials: "include",
+      });
     } catch {
       // Best-effort
     }
-    setUser(null);
-    setCurrentAccessToken(null);
-  }, []);
+    clearAuth();
+  }, [clearAuth]);
 
   return (
     <AuthContext.Provider
@@ -167,8 +280,4 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
-}
-
-export function getAccessToken(): string | null {
-  return currentAccessToken;
 }

@@ -160,14 +160,14 @@ export default function ContainersPage() {
 
 function MetricCardSmall({ icon: Icon, label, value, detail, color }: { icon: any; label: string; value: string; detail?: string; color?: string }) {
   return (
-    <div className="rounded-xl border border-border/60 bg-surface-elevated/70 p-4 shadow-sm transition-all duration-200 hover:border-border hover:shadow-md">
+    <div className="rounded-xl border border-border/40 bg-surface-elevated/40 p-4 transition-all duration-200 hover:border-border/60 hover:bg-surface-elevated/55">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-text-tertiary">{label}</p>
-          <p className={`mt-1 text-2xl font-semibold tracking-tight ${color ?? "text-text-primary"}`}>{value}</p>
+          <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-text-tertiary">{label}</p>
+          <p className={`mt-1 text-2xl font-bold tracking-tight ${color ?? "text-text-primary"}`}>{value}</p>
         </div>
-        <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/8 text-primary ring-1 ring-primary/15">
-          <Icon className="size-4" />
+        <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-surface-elevated/80 ring-1 ring-border/50">
+          <Icon className="size-3.5 text-text-secondary" />
         </div>
       </div>
       {detail && <p className="mt-2 text-xs text-text-secondary">{detail}</p>}

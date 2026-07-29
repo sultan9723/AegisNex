@@ -8,13 +8,24 @@ function getWebSocketUrl(path: string): string {
   const configured = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/$/, "");
   const token = getAccessToken();
   if (configured) return `${configured}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-  const url = new URL(API_BASE_URL);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = path;
-  url.search = "";
-  url.hash = "";
-  if (token) url.searchParams.set("token", token);
-  return url.toString();
+
+  if (API_BASE_URL.startsWith("http")) {
+    try {
+      const url = new URL(API_BASE_URL);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.pathname = path;
+      url.search = "";
+      url.hash = "";
+      if (token) url.searchParams.set("token", token);
+      return url.toString();
+    } catch {
+      // Fall through
+    }
+  }
+
+  if (typeof window === "undefined") return "";
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 type MessageHandler = (data: unknown) => void;

@@ -28,6 +28,7 @@ type PaletteData = {
 
 const commandItems: PaletteItem[] = [
   { id: "dashboard", kind: "command", label: "Open dashboard", description: "Health score, incidents, and alerts", href: "/dashboard", icon: LayoutDashboard, tags: ["dashboard", "overview", "health"] },
+  { id: "mission-control", kind: "command", label: "Open mission control", description: "AI execution visualization and monitoring", href: "/mission-control", icon: LayoutDashboard, tags: ["mission", "control", "executions", "ai"] },
   { id: "targets", kind: "command", label: "Open targets", description: "HTTP, TCP, and SSL monitors", href: "/targets", icon: ListChecks, tags: ["targets", "monitoring", "checks"] },
   { id: "incidents", kind: "command", label: "Open incidents", description: "Active and resolved incidents", href: "/incidents", icon: ShieldAlert, tags: ["incidents", "alerts", "severity"] },
   { id: "containers", kind: "command", label: "Open containers", description: "Runtime status and health", href: "/containers", icon: Box, tags: ["containers", "runtime", "status"] },

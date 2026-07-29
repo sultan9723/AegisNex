@@ -1,4 +1,4 @@
-import { getAccessToken } from "./auth";
+import { getAccessToken, setAccessToken } from "./auth";
 
 function normalizeApiBaseUrl(value: string | undefined): string {
   const base = (value || "").replace(/\/$/, "");
@@ -28,18 +28,22 @@ export function buildWebSocketUrl(path: string): string {
   if (configured) return `${configured}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 
   if (API_BASE_URL.startsWith("http")) {
-    const url = new URL(API_BASE_URL);
-    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-    url.pathname = path;
-    url.search = "";
-    url.hash = "";
-    if (token) url.searchParams.set("token", token);
-    return url.toString();
+    try {
+      const url = new URL(API_BASE_URL);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.pathname = path;
+      url.search = "";
+      url.hash = "";
+      if (token) url.searchParams.set("token", token);
+      return url.toString();
+    } catch {
+      // Fall through to window.location fallback
+    }
   }
 
-  const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = typeof window !== "undefined" ? window.location.host : "localhost:3000";
-  return `${protocol}//${host}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  if (typeof window === "undefined") return "";
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}${path}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
 }
 
 export const DEFAULT_TIMEOUT_MS = 15_000;
@@ -111,6 +115,8 @@ export type IncidentRow = {
   service_name: string;
   incident_type?: string;
   description?: string;
+  org_id?: number | null;
+  org_name?: string | null;
   status: string;
   incident_status?: string;
   acknowledged_by?: string | null;
@@ -119,6 +125,12 @@ export type IncidentRow = {
   resolved_at?: string | null;
   resolved_timestamp?: string | null;
   resolution_notes?: string | null;
+  proposed_remediation?: Record<string, unknown> | null;
+  remediation_proposed_by?: string | null;
+  remediation_proposed_at?: string | null;
+  remediation_approval_status?: string | null;
+  remediation_plan_confidence?: number | null;
+  remediation_history?: Array<Record<string, unknown>> | null;
 };
 
 export type IncidentTransitionRow = {
@@ -392,6 +404,33 @@ export type MonitoringTargetPayload = {
   is_active: boolean;
 };
 
+export type AgentActivity = {
+  recent_actions: Array<{
+    action_id: string;
+    agent_id: string;
+    action_type: string;
+    action_summary: string;
+    reasoning: string;
+    confidence_score: number;
+    policy_verdict: string;
+    status: string;
+    duration_ms: number;
+    created_at: string;
+  }>;
+  active_agents: Array<{
+    agent_id: string;
+    name: string;
+    status: string;
+    success_rate: number;
+  }>;
+  stats: {
+    total_actions: number;
+    success_rate: number;
+    pending_approvals: number;
+  };
+  timestamp: string;
+};
+
 export type DashboardSnapshot = {
   system: SystemHealthResponse;
   containers: ContainersResponse;
@@ -402,14 +441,17 @@ export type DashboardSnapshot = {
   http_monitoring: HttpMonitoringResponse;
   ssl_monitoring: SslMonitoringResponse;
   tcp_monitoring: TcpMonitoringResponse;
+  agent_activity: AgentActivity;
 };
 
 export type DashboardRealtimeEventType =
   | "metric_update"
   | "incident_created"
   | "incident_resolved"
+  | "incident_explained"
   | "remediation_executed"
-  | "container_status_changed";
+  | "container_status_changed"
+  | "agent_activity";
 
 export type DashboardRealtimeEvent = {
   type: DashboardRealtimeEventType;
@@ -418,7 +460,8 @@ export type DashboardRealtimeEvent = {
     | DashboardSnapshot
     | IncidentRow
     | RemediationRow
-    | ContainerRow;
+    | ContainerRow
+    | AgentActivity;
 };
 
 function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<Response> {
@@ -427,16 +470,59 @@ function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number =
   return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
 }
 
+function authHeaders(): Record<string, string> {
+  const token = getAccessToken();
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
+}
+
+let isRefreshing = false;
+let pendingRefresh: Promise<boolean> | null = null;
+
+async function tryRefreshToken(): Promise<boolean> {
+  if (pendingRefresh) return pendingRefresh;
+  isRefreshing = true;
+  pendingRefresh = (async () => {
+    try {
+      const res = await fetch(buildApiUrl("/auth/refresh"), {
+        method: "POST",
+        credentials: "include",
+        cache: "no-store",
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!data.access_token) return false;
+      setAccessToken(data.access_token);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isRefreshing = false;
+      pendingRefresh = null;
+    }
+  })();
+  return pendingRefresh;
+}
+
 async function fetchJsonWithRetry<T>(path: string, retries: number = MAX_RETRIES): Promise<T> {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await fetchWithTimeout(buildApiUrl(path), {
         cache: "no-store",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
       });
 
       if (response.status === 401) {
+        const refreshed = await tryRefreshToken();
+        if (refreshed) {
+          const retryResponse = await fetchWithTimeout(buildApiUrl(path), {
+            cache: "no-store",
+            credentials: "include",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+          });
+          if (retryResponse.ok) return retryResponse.json() as Promise<T>;
+        }
         if (typeof window !== "undefined") {
           window.location.href = "/login";
         }
@@ -467,16 +553,21 @@ export function getContainers() {
   return fetchJsonWithRetry<ContainersResponse>("/api/containers");
 }
 
-export function getIncidents(limit?: number, offset?: number) {
+export function getIncidents(limit?: number, offset?: number, orgId?: number) {
   const params = new URLSearchParams();
   if (limit !== undefined) params.set("limit", String(limit));
   if (offset !== undefined) params.set("offset", String(offset));
+  if (orgId !== undefined) params.set("org_id", String(orgId));
   const qs = params.toString();
   return fetchJsonWithRetry<IncidentsResponse>(`/api/incidents${qs ? `?${qs}` : ""}`);
 }
 
 export function getIncidentDetail(incidentId: string) {
   return fetchJsonWithRetry<IncidentDetailResponse>(`/api/incidents/${incidentId}`);
+}
+
+export function assignIncidentClient(incidentId: string, orgId: number | null) {
+  return writeJson<IncidentRow>(`/api/incidents/${incidentId}/client`, "POST", { org_id: orgId });
 }
 
 export async function acknowledgeIncident(incidentId: string) {
@@ -487,6 +578,54 @@ export async function resolveIncident(incidentId: string, resolutionNotes: strin
   return writeJson<IncidentRow>(`/api/incidents/${incidentId}/resolve`, "POST", {
     resolution_notes: resolutionNotes,
   });
+}
+
+export interface IncidentExplanation {
+  incident_id: string;
+  analysis: string;
+  similar_incidents: Array<{ source: string; content: string; relevance: number }>;
+  runbooks: Array<{ source: string; title: string; content: string }>;
+  audit_context: Array<{ content: string; timestamp: string }>;
+  confidence: number;
+  timestamp: string;
+}
+
+export function explainIncident(incidentId: string) {
+  return writeJson<IncidentExplanation>(`/api/incidents/${incidentId}/explain`, "POST");
+}
+
+export function proposeIncidentRemediation(incidentId: string, plan: Record<string, unknown>, proposedBy: string = "system", confidence: number = 0.0) {
+  return writeJson<{ incident: IncidentRow; message: string }>(`/api/incidents/${incidentId}/propose-remediation`, "POST", { plan, proposed_by: proposedBy, confidence });
+}
+
+export function approveIncidentRemediation(incidentId: string, actor: string = "system") {
+  return writeJson<{ incident: IncidentRow; message: string }>(`/api/incidents/${incidentId}/approve-remediation`, "POST", { actor });
+}
+
+export function rejectIncidentRemediation(incidentId: string, actor: string = "system", reason: string = "") {
+  return writeJson<{ incident: IncidentRow; message: string }>(`/api/incidents/${incidentId}/reject-remediation`, "POST", { actor, reason });
+}
+
+export function executeIncidentRemediation(incidentId: string, correlationId?: string) {
+  return writeJson<{ incident: IncidentRow; execution_result: Record<string, unknown>; successful: boolean }>(`/api/incidents/${incidentId}/execute-remediation`, "POST", { correlation_id: correlationId });
+}
+
+export interface LearningEntry {
+  service?: string;
+  incident_type?: string;
+  root_cause?: string;
+  remediation?: Record<string, unknown>;
+  verification?: Record<string, unknown>;
+  timestamp?: string;
+  confidence?: number;
+}
+
+export function getLearningEntries() {
+  return fetchJsonWithRetry<{ entries: LearningEntry[]; count: number; timestamp: string }>("/api/learning/entries");
+}
+
+export function getLearningStats() {
+  return fetchJsonWithRetry<{ stats: Record<string, number>; timestamp: string }>("/api/learning/stats");
 }
 
 export function getMetrics() {
@@ -546,9 +685,33 @@ async function writeJson<T>(
     method,
     cache: "no-store",
     credentials: "include",
-    headers: payload ? { "Content-Type": "application/json" } : undefined,
+    headers: {
+      ...(payload ? { "Content-Type": "application/json" } : {}),
+      ...authHeaders(),
+    },
     body: payload ? JSON.stringify(payload) : undefined,
   });
+
+  if (response.status === 401) {
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      const retryResponse = await fetchWithTimeout(buildApiUrl(path), {
+        method,
+        cache: "no-store",
+        credentials: "include",
+        headers: {
+          ...(payload ? { "Content-Type": "application/json" } : {}),
+          ...authHeaders(),
+        },
+        body: payload ? JSON.stringify(payload) : undefined,
+      });
+      if (retryResponse.ok) return retryResponse.json() as Promise<T>;
+    }
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("Authentication required");
+  }
 
   if (!response.ok) {
     throw new Error(`AegisNex API ${path} returned ${response.status}`);
@@ -1056,6 +1219,116 @@ export async function respondApproval(approvalId: string, decision: "approve" | 
   return writeJson<ApprovalRespondResponse>("/api/approval/respond", "POST", { approval_id: approvalId, decision });
 }
 
+// ---- MSP Clients / Tenant Organizations ----
+
+export type ClientOrganization = {
+  id: number;
+  name: string;
+  slug: string;
+  domain: string;
+  settings: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type ClientTeam = {
+  id: number;
+  org_id: number;
+  name: string;
+  slug: string;
+  description: string;
+  settings?: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ClientProject = {
+  id: number;
+  org_id: number;
+  team_id: number;
+  name: string;
+  slug: string;
+  description: string;
+  created_at: string;
+};
+
+export type ClientOrgStats = {
+  user_count: number;
+  team_count: number;
+  project_count: number;
+};
+
+export type ClientOrganizationsResponse = {
+  organizations: ClientOrganization[];
+  count: number;
+  error?: string;
+};
+
+export type ClientTeamsResponse = {
+  teams: ClientTeam[];
+  count: number;
+};
+
+export type ClientProjectsResponse = {
+  projects: ClientProject[];
+  count: number;
+};
+
+export function getClientOrganizations() {
+  return fetchJsonWithRetry<ClientOrganizationsResponse>("/api/orgs");
+}
+
+export function getClientOrganization(orgId: number) {
+  return fetchJsonWithRetry<ClientOrganization>(`/api/orgs/${orgId}`);
+}
+
+export function getClientOrgStats(orgId: number) {
+  return fetchJsonWithRetry<ClientOrgStats>(`/api/orgs/${orgId}/stats`);
+}
+
+export function getClientTeams(orgId: number) {
+  return fetchJsonWithRetry<ClientTeamsResponse>(`/api/orgs/${orgId}/teams`);
+}
+
+export function getClientProjects(orgId: number) {
+  return fetchJsonWithRetry<ClientProjectsResponse>(`/api/orgs/${orgId}/projects`);
+}
+
+export function createClientOrganization(payload: { name: string; domain?: string }) {
+  return writeJson<ClientOrganization>("/api/orgs", "POST", payload);
+}
+
+// ---- Approval Queue ----
+
+export type ApprovalRequest = {
+  approval_id: string;
+  request_type: string;
+  requester: string;
+  summary: string;
+  details: Record<string, unknown> | string;
+  status: string;
+  created_at: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  comment?: string | null;
+};
+
+export type ApprovalsResponse = {
+  approvals: ApprovalRequest[];
+  count: number;
+};
+
+export function getApprovals(params?: { status?: string; limit?: number }) {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return fetchJsonWithRetry<ApprovalsResponse>(`/api/approvals${q ? `?${q}` : ""}`);
+}
+
+export function respondQueuedApproval(approvalId: string, decision: "approved" | "rejected", comment?: string) {
+  return writeJson<ApprovalRequest>(`/api/approvals/${encodeURIComponent(approvalId)}/respond`, "POST", { decision, comment });
+}
+
 // ---- Enterprise Search ----
 
 export type SearchResult = {
@@ -1104,4 +1377,222 @@ export function getSearchStats() {
 
 export async function reindexSearch(domains?: string[]) {
   return writeJson<{ status: string }>("/api/search/reindex", "POST", domains ? { domains } : undefined);
+}
+
+// ---- AI Governance ----
+
+export type GovernanceAgent = {
+  agent_id: string;
+  name: string;
+  agent_type: string;
+  description: string;
+  owner: string;
+  team: string;
+  status: string;
+  risk_level: string;
+  trust_score: number;
+  allowed_tools: string[];
+  allowed_resources: string[];
+  max_actions_per_hour: number;
+  total_actions: number;
+  total_denied: number;
+  total_anomalies: number;
+  created_at: string;
+  updated_at: string;
+  last_active_at: string | null;
+};
+
+export type GovernanceAction = {
+  action_id: string;
+  agent_id: string;
+  action_type: string;
+  action_summary: string;
+  target_resource: string;
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  reasoning: string;
+  confidence_score: number;
+  policy_verdict: string;
+  status: string;
+  duration_ms: number;
+  created_at: string;
+};
+
+export type GovernancePolicy = {
+  policy_id: number;
+  name: string;
+  description: string;
+  policy_type: string;
+  target_agents: string[];
+  conditions: Record<string, unknown>;
+  effect: string;
+  priority: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GovernanceAnomaly = {
+  anomaly_id: number;
+  agent_id: string;
+  anomaly_type: string;
+  description: string;
+  severity: string;
+  evidence: Record<string, unknown>;
+  status: string;
+  detected_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+};
+
+export type GovernanceStats = {
+  total_agents: number;
+  active_agents: number;
+  by_risk: Record<string, number>;
+  by_type: Record<string, number>;
+  total_actions: number;
+  total_denied: number;
+  open_anomalies: number;
+  avg_trust_score: number;
+};
+
+export function getGovernanceStats() {
+  return fetchJsonWithRetry<GovernanceStats>("/api/governance/stats");
+}
+
+export function listGovernanceAgents(params?: { status?: string; risk_level?: string; team?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  if (params?.risk_level) qs.set("risk_level", params.risk_level);
+  if (params?.team) qs.set("team", params.team);
+  const q = qs.toString();
+  return fetchJsonWithRetry<GovernanceAgent[]>(`/api/governance/agents${q ? `?${q}` : ""}`);
+}
+
+export function getGovernanceAgent(agentId: string) {
+  return fetchJsonWithRetry<GovernanceAgent>(`/api/governance/agents/${encodeURIComponent(agentId)}`);
+}
+
+export function listGovernanceActions(params?: { agent_id?: string; action_type?: string; verdict?: string; limit?: number }) {
+  const qs = new URLSearchParams();
+  if (params?.agent_id) qs.set("agent_id", params.agent_id);
+  if (params?.action_type) qs.set("action_type", params.action_type);
+  if (params?.verdict) qs.set("verdict", params.verdict);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  const q = qs.toString();
+  return fetchJsonWithRetry<GovernanceAction[]>(`/api/governance/actions${q ? `?${q}` : ""}`);
+}
+
+export function getGovernanceActionStats(agentId?: string) {
+  const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+  return fetchJsonWithRetry<Record<string, unknown>>(`/api/governance/actions/stats${qs}`);
+}
+
+export function listGovernancePolicies() {
+  return fetchJsonWithRetry<GovernancePolicy[]>("/api/governance/policies");
+}
+
+export function listGovernanceAnomalies(params?: { agent_id?: string; status?: string; severity?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.agent_id) qs.set("agent_id", params.agent_id);
+  if (params?.status) qs.set("status", params.status);
+  if (params?.severity) qs.set("severity", params.severity);
+  const q = qs.toString();
+  return fetchJsonWithRetry<GovernanceAnomaly[]>(`/api/governance/anomalies${q ? `?${q}` : ""}`);
+}
+
+// ── Mission Control Types ──
+
+export type StageResult = {
+  stage_id: string;
+  start_time: string | null;
+  finish_time: string | null;
+  latency_ms: number;
+  status: "queued" | "running" | "completed" | "failed" | "skipped";
+  confidence: number;
+  model: string;
+  provider: string;
+  tokens: number;
+  estimated_cost: number;
+  summary: string;
+  connected_tools: string[];
+  evidence: string[];
+  policy_decisions: Array<{ policy: string; effect: string; reason: string }>;
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+};
+
+export type Execution = {
+  execution_id: string;
+  request: string;
+  user: string;
+  timestamp: string;
+  current_status: "queued" | "running" | "completed" | "failed";
+  total_latency_ms: number;
+  total_cost: number;
+  confidence: number;
+  overall_result: string;
+  stages: StageResult[];
+  error: string;
+  metadata: Record<string, unknown>;
+};
+
+export type ExecutionStats = {
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  queued: number;
+  avg_latency: number;
+  avg_cost: number;
+  avg_confidence: number;
+  total_cost: number;
+};
+
+export type ExecutionsResponse = {
+  executions: Execution[];
+  count: number;
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type ExecutionDetailResponse = {
+  execution: Execution;
+  stats: ExecutionStats;
+};
+
+// ── Mission Control API ──
+
+export function getMissionControlExecutions(params?: {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  search?: string;
+  user?: string;
+}) {
+  const qs = new URLSearchParams();
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  if (params?.status) qs.set("status", params.status);
+  if (params?.search) qs.set("search", params.search);
+  if (params?.user) qs.set("user", params.user);
+  const q = qs.toString();
+  return fetchJsonWithRetry<ExecutionsResponse>(`/api/mission-control/executions${q ? `?${q}` : ""}`);
+}
+
+export function getMissionControlExecution(executionId: string) {
+  return fetchJsonWithRetry<ExecutionDetailResponse>(`/api/mission-control/executions/${encodeURIComponent(executionId)}`);
+}
+
+export function getMissionControlStats() {
+  return fetchJsonWithRetry<ExecutionStats>("/api/mission-control/stats");
+}
+
+export function exportMissionControlExecution(executionId: string) {
+  return fetchJsonWithRetry<Execution>(`/api/mission-control/executions/${encodeURIComponent(executionId)}/export`);
+}
+
+export function getMissionControlWebSocketUrl(): string {
+  return buildWebSocketUrl("/ws/mission-control");
 }
