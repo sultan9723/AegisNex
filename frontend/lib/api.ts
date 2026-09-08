@@ -504,22 +504,30 @@ async function tryRefreshToken(): Promise<boolean> {
   return pendingRefresh;
 }
 
-async function fetchJsonWithRetry<T>(path: string, retries: number = MAX_RETRIES): Promise<T> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
+async function fetchJsonWithRetry<T>(
+  path: string,
+  initOrRetries: RequestInit | number = MAX_RETRIES,
+  retries: number = MAX_RETRIES,
+): Promise<T> {
+  const init = typeof initOrRetries === "number" ? undefined : initOrRetries;
+  const maxRetries = typeof initOrRetries === "number" ? initOrRetries : retries;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetchWithTimeout(buildApiUrl(path), {
+        ...init,
         cache: "no-store",
         credentials: "include",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
+        headers: { "Content-Type": "application/json", ...(init?.headers || {}), ...authHeaders() },
       });
 
       if (response.status === 401) {
         const refreshed = await tryRefreshToken();
         if (refreshed) {
           const retryResponse = await fetchWithTimeout(buildApiUrl(path), {
+            ...init,
             cache: "no-store",
             credentials: "include",
-            headers: { "Content-Type": "application/json", ...authHeaders() },
+            headers: { "Content-Type": "application/json", ...(init?.headers || {}), ...authHeaders() },
           });
           if (retryResponse.ok) return retryResponse.json() as Promise<T>;
         }
@@ -535,14 +543,14 @@ async function fetchJsonWithRetry<T>(path: string, retries: number = MAX_RETRIES
 
       return response.json() as Promise<T>;
     } catch (err) {
-      if (attempt < retries && err instanceof Error && err.name !== "AbortError") {
+      if (attempt < maxRetries && err instanceof Error && err.name !== "AbortError") {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
       throw err;
     }
   }
-  throw new Error(`Failed to fetch ${path} after ${retries + 1} attempts`);
+  throw new Error(`Failed to fetch ${path} after ${maxRetries + 1} attempts`);
 }
 
 export function getSystemHealth() {
@@ -822,7 +830,13 @@ export type AppSettingsResponse = {
 export type ApiKeyRow = {
   id: string;
   name: string;
-  prefix: string;
+  key_prefix?: string;
+  prefix?: string;
+  role?: string;
+  scopes?: string[];
+  org_id?: number | null;
+  expires_at?: string | null;
+  revoked_at?: string | null;
   created_at: string;
   last_used_at: string | null;
   is_active: boolean;
@@ -855,8 +869,8 @@ export function getApiKeys() {
   return fetchJsonWithRetry<ApiKeysResponse>("/api/api-keys");
 }
 
-export async function createApiKey(name: string) {
-  return writeJson<{ key: string; status?: string }>("/api/api-keys", "POST", { name });
+export async function createApiKey(name: string, scopes: string[] = ["commandmesh:chat"]) {
+  return writeJson<{ api_key: string; key_prefix: string; scopes: string[]; status?: string }>("/api/api-keys", "POST", { name, scopes });
 }
 
 export async function revokeApiKey(keyId: string) {
@@ -1535,6 +1549,10 @@ export type Execution = {
   stages: StageResult[];
   error: string;
   metadata: Record<string, unknown>;
+  execution_type: string;
+  organization: string;
+  agents: string[];
+  audit_links: Record<string, string>;
 };
 
 export type ExecutionStats = {
@@ -1547,6 +1565,8 @@ export type ExecutionStats = {
   avg_cost: number;
   avg_confidence: number;
   total_cost: number;
+  type_count: number;
+  user_count: number;
 };
 
 export type ExecutionsResponse = {
@@ -1593,6 +1613,343 @@ export function exportMissionControlExecution(executionId: string) {
   return fetchJsonWithRetry<Execution>(`/api/mission-control/executions/${encodeURIComponent(executionId)}/export`);
 }
 
+export function getMissionControlReplay(executionId: string) {
+  return fetchJsonWithRetry<Execution>(`/api/mission-control/executions/${encodeURIComponent(executionId)}/replay`);
+}
+
+export function getMissionControlHistory(params?: { limit?: number; offset?: number; days?: number; execution_type?: string }) {
+  const qs = new URLSearchParams();
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  if (params?.days) qs.set("days", String(params.days));
+  if (params?.execution_type) qs.set("execution_type", params.execution_type);
+  const q = qs.toString();
+  return fetchJsonWithRetry<ExecutionsResponse>(`/api/mission-control/history${q ? `?${q}` : ""}`);
+}
+
+export function getMissionControlTypeStats() {
+  return fetchJsonWithRetry<Array<{ execution_type: string; count: number; completed: number; avg_latency: number; avg_confidence: number; total_cost: number }>>("/api/mission-control/stats/types");
+}
+
+export function trackMissionControlExecution(data: { execution_id?: string; request: string; execution_type?: string; result?: string; audit_links?: Record<string, string> }) {
+  return fetchJsonWithRetry<{ status: string; execution_id: string }>("/api/mission-control/track", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
 export function getMissionControlWebSocketUrl(): string {
   return buildWebSocketUrl("/ws/mission-control");
+}
+
+// ------------------------------------------------------------------------
+// AI Workforce
+// ------------------------------------------------------------------------
+
+export type WorkforceAgent = {
+  agent_id: string;
+  name: string;
+  description: string;
+  agent_type: string;
+  provider: string;
+  model: string;
+  version: number;
+  lifecycle_status: string;
+  trust_score: number;
+  confidence: number;
+  daily_budget: number;
+  monthly_budget: number;
+  total_cost: number;
+  success_rate: number;
+  average_latency_ms: number;
+  total_executions: number;
+  health_status: string;
+  health_last_checked: string | null;
+  tools: Array<Record<string, unknown>>;
+  permissions: string[];
+  metadata: Record<string, unknown>;
+  tags: string[];
+  owner: string;
+  team: string;
+  org_id: number | null;
+  team_id: number | null;
+  created_at: string;
+  updated_at: string;
+  last_active_at: string | null;
+};
+
+export type AgentVersion = {
+  id: number;
+  agent_id: string;
+  version: number;
+  config_snapshot: Record<string, unknown>;
+  prompt_ids: string[];
+  change_summary: string;
+  created_by: string;
+  created_at: string;
+};
+
+export type PromptVersion = {
+  prompt_id: string;
+  agent_id: string;
+  name: string;
+  content: string;
+  version: number;
+  role: string;
+  variables: string[];
+  hash: string;
+  description: string;
+  created_at: string;
+};
+
+export type ToolPermission = {
+  id: number;
+  agent_id: string;
+  tool_name: string;
+  allowed: boolean;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type KnowledgeAssignment = {
+  id: number;
+  agent_id: string;
+  knowledge_source_id: string;
+  knowledge_source_type: string;
+  access_level: string;
+  priority: number;
+  created_at: string;
+};
+
+export type WorkforceExecution = {
+  execution_id: string;
+  agent_id: string;
+  task: string;
+  response: string;
+  latency_ms: number;
+  cost: number;
+  confidence: number;
+  tools_used: string[];
+  status: string;
+  error: string;
+  prompt_version_id: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type HealthRecord = {
+  id: number;
+  agent_id: string;
+  status: string;
+  check_type: string;
+  metric_value: number;
+  details: Record<string, unknown>;
+  checked_at: string;
+};
+
+export type WorkforceStats = {
+  total_agents: number;
+  active_agents: number;
+  paused_agents: number;
+  draft_agents: number;
+  by_type: Record<string, number>;
+  by_health: Record<string, number>;
+  avg_trust_score: number;
+  total_executions: number;
+  total_successes: number;
+  total_failures: number;
+  total_cost: number;
+  avg_success_rate: number;
+};
+
+export function getWorkforceStats() {
+  return fetchJsonWithRetry<WorkforceStats>("/api/workforce/stats");
+}
+
+export function listWorkforceAgents(params?: { lifecycle_status?: string; agent_type?: string; search?: string; limit?: number; offset?: number }) {
+  const qs = new URLSearchParams();
+  if (params?.lifecycle_status) qs.set("lifecycle_status", params.lifecycle_status);
+  if (params?.agent_type) qs.set("agent_type", params.agent_type);
+  if (params?.search) qs.set("search", params.search);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return fetchJsonWithRetry<{ agents: WorkforceAgent[]; total: number }>(`/api/workforce/agents${q ? `?${q}` : ""}`);
+}
+
+export function getWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}`);
+}
+
+export function createWorkforceAgent(data: Partial<WorkforceAgent>) {
+  return fetchJsonWithRetry<WorkforceAgent>("/api/workforce/agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateWorkforceAgent(agentId: string, data: Partial<WorkforceAgent>) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<{ deleted: boolean }>(`/api/workforce/agents/${agentId}`, { method: "DELETE" });
+}
+
+export function activateWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/activate`, { method: "POST" });
+}
+
+export function pauseWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/pause`, { method: "POST" });
+}
+
+export function resumeWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/resume`, { method: "POST" });
+}
+
+export function archiveWorkforceAgent(agentId: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/archive`, { method: "POST" });
+}
+
+export function cloneWorkforceAgent(agentId: string, name?: string) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function listAgentVersions(agentId: string) {
+  return fetchJsonWithRetry<{ versions: AgentVersion[]; total: number }>(`/api/workforce/agents/${agentId}/versions`);
+}
+
+export function createAgentVersion(agentId: string, data: { change_summary?: string; created_by?: string }) {
+  return fetchJsonWithRetry<AgentVersion>(`/api/workforce/agents/${agentId}/versions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function getAgentVersion(agentId: string, version: number) {
+  return fetchJsonWithRetry<AgentVersion>(`/api/workforce/agents/${agentId}/versions/${version}`);
+}
+
+export function restoreAgentVersion(agentId: string, version: number) {
+  return fetchJsonWithRetry<WorkforceAgent>(`/api/workforce/agents/${agentId}/versions/${version}/restore`, { method: "POST" });
+}
+
+export function listAgentPrompts(agentId: string) {
+  return fetchJsonWithRetry<{ prompts: PromptVersion[]; total: number }>(`/api/workforce/agents/${agentId}/prompts`);
+}
+
+export function saveAgentPrompt(agentId: string, data: { name: string; content: string; role?: string; variables?: string[]; description?: string }) {
+  return fetchJsonWithRetry<PromptVersion>(`/api/workforce/agents/${agentId}/prompts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function listAgentToolPermissions(agentId: string) {
+  return fetchJsonWithRetry<{ tools: ToolPermission[]; total: number }>(`/api/workforce/agents/${agentId}/tools`);
+}
+
+export function setAgentToolPermission(agentId: string, toolName: string, data: { allowed?: boolean; config?: Record<string, unknown> }) {
+  return fetchJsonWithRetry<ToolPermission>(`/api/workforce/agents/${agentId}/tools/${encodeURIComponent(toolName)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteAgentToolPermission(agentId: string, toolName: string) {
+  return fetchJsonWithRetry<{ deleted: boolean }>(`/api/workforce/agents/${agentId}/tools/${encodeURIComponent(toolName)}`, { method: "DELETE" });
+}
+
+export function listAgentKnowledge(agentId: string) {
+  return fetchJsonWithRetry<{ assignments: KnowledgeAssignment[]; total: number }>(`/api/workforce/agents/${agentId}/knowledge`);
+}
+
+export function assignAgentKnowledge(agentId: string, data: { knowledge_source_id: string; source_type?: string; access_level?: string; priority?: number }) {
+  return fetchJsonWithRetry<KnowledgeAssignment>(`/api/workforce/agents/${agentId}/knowledge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function removeAgentKnowledge(agentId: string, sourceId: string) {
+  return fetchJsonWithRetry<{ deleted: boolean }>(`/api/workforce/agents/${agentId}/knowledge/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+}
+
+export function listAgentExecutions(agentId: string, params?: { status?: string; limit?: number; offset?: number }) {
+  const qs = new URLSearchParams();
+  if (params?.status) qs.set("status", params.status);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const q = qs.toString();
+  return fetchJsonWithRetry<{ executions: WorkforceExecution[]; total: number }>(`/api/workforce/agents/${agentId}/executions${q ? `?${q}` : ""}`);
+}
+
+export function getAgentExecutionStats(agentId: string) {
+  return fetchJsonWithRetry<{ total: number; successes: number; failures: number; avg_latency: number; avg_cost: number; avg_confidence: number; total_cost: number }>(`/api/workforce/agents/${agentId}/executions/stats`);
+}
+
+export function getAgentBudget(agentId: string) {
+  return fetchJsonWithRetry<{ daily_used: number; monthly_used: number; daily_budget: number; monthly_budget: number; remaining_daily: number; remaining_monthly: number; daily_exceeded: boolean; monthly_exceeded: boolean }>(`/api/workforce/agents/${agentId}/budget`);
+}
+
+export function getAgentHealthHistory(agentId: string, limit?: number) {
+  const qs = limit ? `?limit=${limit}` : "";
+  return fetchJsonWithRetry<{ records: HealthRecord[]; latest: HealthRecord | null }>(`/api/workforce/agents/${agentId}/health${qs}`);
+}
+
+export function recordAgentHealthCheck(agentId: string, data: { status?: string; check_type?: string; metric_value?: number; details?: Record<string, unknown> }) {
+  return fetchJsonWithRetry<HealthRecord>(`/api/workforce/agents/${agentId}/health`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function playgroundExecute(agentId: string, data: { task: string; prompt_override?: string; simulate?: boolean }) {
+  return fetchJsonWithRetry<WorkforceExecution>(`/api/workforce/agents/${agentId}/playground`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export function createAgentWizard(data: {
+  name: string;
+  agent_type?: string;
+  description?: string;
+  provider?: string;
+  model?: string;
+  tools?: Array<Record<string, unknown>>;
+  permissions?: string[];
+  knowledge_sources?: string[];
+  daily_budget?: number;
+  monthly_budget?: number;
+  owner?: string;
+  team?: string;
+  org_id?: number;
+  team_id?: number;
+  tags?: string[];
+  system_prompt?: string;
+}) {
+  return fetchJsonWithRetry<WorkforceAgent>("/api/workforce/wizard", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 }

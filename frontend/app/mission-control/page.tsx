@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, AlertTriangle, Bot, CheckCircle2, ChevronRight, Clock,
   Download, ExternalLink, Filter, History, Layers, Loader2, Search,
-  Shield, XCircle, Zap, Brain, Play, Pause, RotateCcw,
+  Shield, XCircle, Zap, Brain, Play, Pause, RotateCcw, Repeat,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,9 @@ import {
   getMissionControlExecutions,
   getMissionControlExecution,
   getMissionControlStats,
+  getMissionControlReplay,
+  getMissionControlHistory,
+  getMissionControlTypeStats,
   exportMissionControlExecution,
   getMissionControlWebSocketUrl,
   type Execution,
@@ -45,6 +48,45 @@ const STAGE_LABELS: Record<string, string> = {
   risk: "Risk",
   verifier: "Verifier",
   executor: "Executor",
+};
+
+const EXECUTION_TYPE_ICONS: Record<string, typeof Brain> = {
+  chat: Brain,
+  analyze: Activity,
+  plan: Layers,
+  knowledge_search: Search,
+  docker_action: Bot,
+  governance_approval: Shield,
+  policy_check: AlertTriangle,
+  workflow: History,
+  agent_dispatch: Zap,
+  search: Search,
+};
+
+const EXECUTION_TYPE_LABELS: Record<string, string> = {
+  chat: "Chat",
+  analyze: "Analyze",
+  plan: "Plan",
+  knowledge_search: "Knowledge Search",
+  docker_action: "Docker Action",
+  governance_approval: "Governance",
+  policy_check: "Policy Check",
+  workflow: "Workflow",
+  agent_dispatch: "Agent Dispatch",
+  search: "Search",
+};
+
+const EXECUTION_TYPE_COLORS: Record<string, string> = {
+  chat: "bg-primary/10 text-primary",
+  analyze: "bg-warning/10 text-warning",
+  plan: "bg-info/10 text-info",
+  knowledge_search: "bg-success/10 text-success",
+  docker_action: "bg-[#0891b2]/10 text-[#0891b2]",
+  governance_approval: "bg-purple-500/10 text-purple-500",
+  policy_check: "bg-orange-500/10 text-orange-500",
+  workflow: "bg-blue-500/10 text-blue-500",
+  agent_dispatch: "bg-pink-500/10 text-pink-500",
+  search: "bg-teal-500/10 text-teal-500",
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -335,6 +377,11 @@ function ExecutionRow({ execution, onClick, onExport }: { execution: Execution; 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <p className="text-sm font-semibold text-text-primary truncate max-w-md">{execution.request}</p>
+          {execution.execution_type && (
+            <Badge variant="outline" size="sm" className={cn("text-[10px]", EXECUTION_TYPE_COLORS[execution.execution_type] || "bg-surface/50 text-text-tertiary")}>
+              {EXECUTION_TYPE_LABELS[execution.execution_type] || execution.execution_type}
+            </Badge>
+          )}
           <Badge variant={execution.current_status === "completed" ? "success-subtle" : execution.current_status === "failed" ? "danger-subtle" : "secondary"} size="sm">
             {execution.current_status}
           </Badge>
@@ -377,7 +424,24 @@ function ExecutionRow({ execution, onClick, onExport }: { execution: Execution; 
 
 function ExecutionDetailDrawer({ execution, open, loading, onClose, onExport }: { execution: Execution | null; open: boolean; loading: boolean; onClose: () => void; onExport: (id: string) => void }) {
   const [activeStage, setActiveStage] = useState<string | null>(null);
+  const [replayMode, setReplayMode] = useState(false);
+  const [replayStep, setReplayStep] = useState(0);
+  const [replayData, setReplayData] = useState<any>(null);
   const activeStageData = execution?.stages.find((s) => s.stage_id === activeStage);
+
+  const handleReplay = useCallback(async () => {
+    if (!execution) return;
+    try {
+      const data = await getMissionControlReplay(execution.execution_id);
+      setReplayData(data);
+      setReplayMode(true);
+      setReplayStep(0);
+    } catch {
+      toast.error("Failed to load replay data");
+    }
+  }, [execution]);
+
+  const replayTimeline = replayData?.timeline || [];
 
   return (
     <Sheet open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -393,14 +457,50 @@ function ExecutionDetailDrawer({ execution, open, loading, onClose, onExport }: 
           <div className="space-y-6 mt-4">
             {/* Request */}
             <div className="rounded-lg border border-border/50 bg-surface-elevated/50 p-4 space-y-2">
-              <h3 className="text-xs font-medium text-text-secondary">Request</h3>
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-medium text-text-secondary">Request</h3>
+                {execution.execution_type && (
+                  <Badge variant="outline" size="sm" className={cn("text-[10px]", EXECUTION_TYPE_COLORS[execution.execution_type] || "bg-surface/50 text-text-tertiary")}>
+                    {EXECUTION_TYPE_LABELS[execution.execution_type] || execution.execution_type}
+                  </Badge>
+                )}
+              </div>
               <p className="text-sm text-text-primary">{execution.request}</p>
-              <div className="flex items-center gap-3 text-[10px] text-text-tertiary">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-tertiary">
                 <span>Status: <Badge variant={execution.current_status === "completed" ? "success-subtle" : "danger-subtle"} size="sm">{execution.current_status}</Badge></span>
                 {execution.user && <span>User: {execution.user}</span>}
+                {execution.organization && <span>Org: {execution.organization}</span>}
                 <span>{relative(execution.timestamp)}</span>
               </div>
             </div>
+
+            {/* Organization & Agents */}
+            {(execution.organization || execution.agents.length > 0) && (
+              <div className="rounded-lg border border-border/50 bg-surface-elevated/50 p-4 space-y-2">
+                <h3 className="text-xs font-medium text-text-secondary">Context</h3>
+                <div className="flex flex-wrap gap-3 text-[10px] text-text-tertiary">
+                  {execution.organization && <span>Organization: <span className="text-text-primary">{execution.organization}</span></span>}
+                  {execution.agents.length > 0 && (
+                    <span>Agents: <span className="text-text-primary">{execution.agents.join(", ")}</span></span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Audit Links */}
+            {Object.keys(execution.audit_links).length > 0 && (
+              <div className="rounded-lg border border-border/50 bg-surface-elevated/50 p-4 space-y-2">
+                <h3 className="text-xs font-medium text-text-secondary">Audit Links</h3>
+                <div className="space-y-1">
+                  {Object.entries(execution.audit_links).map(([key, val]) => (
+                    <div key={key} className="flex items-center gap-2 text-[10px]">
+                      <span className="text-text-tertiary">{key}:</span>
+                      <span className="text-text-primary font-mono">{val}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Execution Pipeline */}
             <div>
@@ -544,13 +644,71 @@ function ExecutionDetailDrawer({ execution, open, loading, onClose, onExport }: 
               </div>
             )}
 
-            {/* Actions */}
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => onExport(execution.execution_id)}>
-                <Download className="size-3.5 mr-1.5" />
-                Export JSON
-              </Button>
-            </div>
+            {/* Replay Mode */}
+            {replayMode && replayTimeline.length > 0 ? (
+              <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-text-primary">Replay Mode</h3>
+                  <div className="flex items-center gap-1">
+                    <Button variant="outline" size="icon" className="size-6" disabled={replayStep === 0} onClick={() => setReplayStep(Math.max(0, replayStep - 1))}>
+                      <RotateCcw className="size-3" />
+                    </Button>
+                    <span className="text-[10px] text-text-tertiary min-w-[4rem] text-center">{replayStep + 1} / {replayTimeline.length}</span>
+                    <Button variant="outline" size="icon" className="size-6" disabled={replayStep >= replayTimeline.length - 1} onClick={() => setReplayStep(Math.min(replayTimeline.length - 1, replayStep + 1))}>
+                      <ChevronRight className="size-3" />
+                    </Button>
+                    <Button variant="ghost" size="icon" className="size-6" onClick={() => { setReplayMode(false); setReplayStep(0); }}>
+                      <XCircle className="size-3" />
+                    </Button>
+                  </div>
+                </div>
+                {replayTimeline[replayStep] && (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Badge variant={replayTimeline[replayStep].status === "completed" ? "success-subtle" : replayTimeline[replayStep].status === "failed" ? "danger-subtle" : "secondary"} size="sm">{replayTimeline[replayStep].status}</Badge>
+                      <span className="text-xs font-medium text-text-primary">{STAGE_LABELS[replayTimeline[replayStep].stage_id] || replayTimeline[replayStep].stage_id}</span>
+                      <span className="text-[10px] text-text-tertiary">{replayTimeline[replayStep].latency_ms > 0 ? formatLatency(replayTimeline[replayStep].latency_ms) : ""}</span>
+                      {replayTimeline[replayStep].confidence > 0 && <span className="text-[10px] text-text-tertiary">{(replayTimeline[replayStep].confidence * 100).toFixed(0)}%</span>}
+                    </div>
+                    {replayTimeline[replayStep].summary && <p className="text-[10px] text-text-secondary">{replayTimeline[replayStep].summary}</p>}
+                    {replayTimeline[replayStep].model && <p className="text-[10px] text-text-tertiary">Model: {replayTimeline[replayStep].model}</p>}
+                    {replayTimeline[replayStep].connected_tools?.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {replayTimeline[replayStep].connected_tools.map((t: string) => <Badge key={t} variant="outline" size="sm">{t}</Badge>)}
+                      </div>
+                    )}
+                    {replayTimeline[replayStep].evidence?.length > 0 && (
+                      <div className="space-y-0.5">
+                        {replayTimeline[replayStep].evidence.map((ev: string, i: number) => (
+                          <div key={i} className="text-[10px] text-text-secondary pl-2 border-l border-border/30">{ev}</div>
+                        ))}
+                      </div>
+                    )}
+                    {replayTimeline[replayStep].policy_decisions?.length > 0 && (
+                      <div className="space-y-0.5">
+                        {replayTimeline[replayStep].policy_decisions.map((pd: any, i: number) => (
+                          <div key={i} className="text-[10px] flex items-center gap-1">
+                            <Badge variant={pd.effect === "allow" ? "success-subtle" : "danger-subtle"} size="sm">{pd.effect}</Badge>
+                            <span className="text-text-secondary">{pd.policy}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" onClick={handleReplay}>
+                  <Play className="size-3.5 mr-1.5" />
+                  Replay
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => onExport(execution.execution_id)}>
+                  <Download className="size-3.5 mr-1.5" />
+                  Export JSON
+                </Button>
+              </div>
+            )}
           </div>
         ) : (
           <p className="text-xs text-text-tertiary text-center py-8">No execution selected.</p>

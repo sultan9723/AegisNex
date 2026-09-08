@@ -1,5 +1,4 @@
 from pathlib import Path
-
 from src.auth import AuthManager, UserStore, hash_password, verify_password
 
 
@@ -94,3 +93,45 @@ def test_auth_manager_normalizes_legacy_viewer_role_on_read(tmp_path: Path) -> N
     refreshed = store.get_user_by_id(user.id)
     assert refreshed is not None
     assert refreshed.role == "read_only"
+
+
+def test_external_login_provisions_verified_user_and_links_identity(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    manager = AuthManager(store, jwt_secret="test-secret")
+
+    user, access_token, refresh_token = manager.external_login(
+        provider="https://login.example.com",
+        subject="subject-123",
+        email="Ops@Example.com",
+        display_name="Ops Lead",
+        role="operator",
+        claims={"email": "Ops@Example.com", "sub": "subject-123"},
+    )
+
+    assert user.email == "ops@example.com"
+    assert user.display_name == "Ops Lead"
+    assert user.role == "operator"
+    assert user.is_verified is True
+    assert manager.get_user_from_token(access_token) == user
+    assert manager.refresh_session(refresh_token) is not None
+
+
+def test_external_login_reuses_existing_identity(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    manager = AuthManager(store, jwt_secret="test-secret")
+
+    first, _, _ = manager.external_login(
+        provider="https://login.example.com",
+        subject="subject-123",
+        email="ops@example.com",
+        display_name="Ops",
+    )
+    second, _, _ = manager.external_login(
+        provider="https://login.example.com",
+        subject="subject-123",
+        email="ops@example.com",
+        display_name="Ops Updated",
+    )
+
+    assert second.id == first.id
+    assert store.get_user_by_email("ops@example.com") is not None

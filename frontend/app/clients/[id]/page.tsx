@@ -268,7 +268,7 @@ export default function ClientEvidencePage({ params }: { params: { id: string } 
             <Badge variant="secondary" size="sm">{approvals.length}</Badge>
           </div>
           {approvals.length === 0 ? (
-            <p className="py-8 text-center text-sm text-text-tertiary">No approval requests tied to this client's incidents.</p>
+            <p className="py-8 text-center text-sm text-text-tertiary">No approval requests tied to this client&apos;s incidents.</p>
           ) : (
             <div className="space-y-3">
               {approvals.slice(0, 20).map((approval) => (

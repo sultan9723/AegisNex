@@ -116,6 +116,9 @@ class FakeRepository:
     def fetch_all(self, table_name):
         return self.rows.get(table_name, [])
 
+    def record_audit_log(self, actor, action, resource_type, resource_id, details=None, **kwargs):
+        pass
+
 
 def build_services(tmp_path: Path) -> DashboardServices:
     incident_manager = IncidentManager(tmp_path / "incident_history.json")

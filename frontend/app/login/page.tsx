@@ -10,6 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth";
+import { buildApiUrl } from "@/lib/api";
 
 const TOPOLOGY_NODES = [
   { x: 20, y: 28, label: "API Gateway", status: "healthy" as const },
@@ -30,6 +31,14 @@ const FEATURES = [
   { icon: Activity, label: "Live Monitoring", desc: "Real-time health" },
   { icon: Shield, label: "Enterprise Security", desc: "RBAC + audit log" },
 ];
+
+type AuthConfig = {
+  enabled: boolean;
+  provider: string;
+  local_auth_enabled?: boolean;
+  demo_auth_enabled?: boolean;
+  password_login_enabled?: boolean;
+};
 
 function Spinner({ className = "size-4" }: { className?: string }) {
   return (
@@ -184,6 +193,8 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [demoLoading, setDemoLoading] = useState(false);
+  const [ssoLoading, setSsoLoading] = useState(false);
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const usernameRef = useRef<HTMLInputElement>(null);
@@ -195,6 +206,35 @@ export default function LoginPage() {
   useEffect(() => {
     if (user) router.replace("/dashboard");
   }, [user, router]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSsoConfig = async () => {
+      try {
+        const res = await fetch(buildApiUrl("/auth/sso/config"), {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setAuthConfig({
+            enabled: Boolean(data.enabled),
+            provider: typeof data.provider === "string" ? data.provider : "Enterprise SSO",
+            local_auth_enabled: Boolean(data.local_auth_enabled),
+            demo_auth_enabled: Boolean(data.demo_auth_enabled),
+            password_login_enabled: Boolean(data.password_login_enabled),
+          });
+        }
+      } catch {
+        if (!cancelled) setAuthConfig(null);
+      }
+    };
+    loadSsoConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -221,7 +261,16 @@ export default function LoginPage() {
     }
   }, [demoLogin]);
 
-  const isBusy = loading || demoLoading;
+  const handleSsoLogin = useCallback(() => {
+    setError("");
+    setSsoLoading(true);
+    window.location.href = buildApiUrl("/auth/sso/login");
+  }, []);
+
+  const isBusy = loading || demoLoading || ssoLoading;
+  const ssoEnabled = authConfig?.enabled === true;
+  const demoEnabled = authConfig?.demo_auth_enabled ?? true;
+  const passwordLoginEnabled = authConfig?.password_login_enabled ?? authConfig?.local_auth_enabled ?? true;
 
   return (
     <div className="relative flex min-h-screen bg-background">
@@ -278,116 +327,147 @@ export default function LoginPage() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleDemoLogin}
-            disabled={isBusy}
-            className="group relative mb-7 flex h-[46px] w-full items-center justify-center gap-2.5 overflow-hidden rounded-xl border border-blue-200 bg-blue-50 text-[13px] font-semibold text-blue-600 transition-all duration-300 hover:border-blue-300 hover:bg-blue-100 hover:shadow-md hover:shadow-blue-500/10 disabled:opacity-50"
-          >
-            <div className="absolute inset-0 bg-gradient-to-r from-blue-500/0 via-blue-500/[0.04] to-blue-500/0 opacity-0 transition-opacity group-hover:opacity-100" />
-            {demoLoading ? (
-              <Spinner className="size-4" />
-            ) : (
-              <Zap className="size-4 transition-transform group-hover:scale-110" />
-            )}
-            <span className="relative">{demoLoading ? "Signing in..." : "Try Demo Workspace"}</span>
-            {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
-          </button>
-
-          <div className="relative mb-7">
-            <div className="absolute inset-0 flex items-center">
-              <div className="h-px w-full bg-gradient-to-r from-transparent via-border to-transparent" />
-            </div>
-            <div className="relative flex justify-center text-[11px]">
-              <span className="bg-background px-3 text-text-tertiary">or continue with credentials</span>
-            </div>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-3.5">
-            <div className="space-y-1.5">
-              <label htmlFor="username" className="text-[11px] font-medium text-text-secondary">
-                Username
-              </label>
-              <Input
-                ref={usernameRef}
-                id="username"
-                type="text"
-                placeholder="admin"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                disabled={isBusy}
-                autoComplete="username"
-                className="h-11 border-border bg-surface text-text-primary placeholder:text-text-disabled focus:border-blue-400 focus:ring-blue-500/10"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <label htmlFor="password" className="text-[11px] font-medium text-text-secondary">
-                Password
-              </label>
-              <div className="relative">
-                <Input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Enter your password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  disabled={isBusy}
-                  autoComplete="current-password"
-                  className="h-11 border-border bg-surface pr-10 text-text-primary placeholder:text-text-disabled focus:border-blue-400 focus:ring-blue-500/10"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
-                  tabIndex={-1}
-                  aria-label={showPassword ? "Hide password" : "Show password"}
-                >
-                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between pt-0.5">
-              <label className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={rememberMe}
-                  onChange={(e) => setRememberMe(e.target.checked)}
-                  className="size-3.5 rounded border-border bg-surface accent-blue-500"
-                />
-                Remember me
-              </label>
-              <button type="button" className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary">
-                Forgot password?
-              </button>
-            </div>
-
-            {error && (
-              <div className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-[12px] text-red-600">
-                {error}
-              </div>
-            )}
-
-            <Button
-              type="submit"
-              className="relative h-11 w-full overflow-hidden rounded-xl bg-text-primary text-[13px] font-semibold text-background hover:bg-text-primary/90"
+          {demoEnabled && (
+            <button
+              type="button"
+              onClick={handleDemoLogin}
               disabled={isBusy}
+              className="group relative mb-7 flex h-[46px] w-full items-center justify-center gap-2.5 overflow-hidden rounded-xl border border-blue-200 bg-blue-50 text-[13px] font-semibold text-blue-600 transition-all duration-300 hover:border-blue-300 hover:bg-blue-100 hover:shadow-md hover:shadow-blue-500/10 disabled:opacity-50"
             >
-              {loading ? (
-                <span className="flex items-center gap-2">
-                  <Spinner className="size-4" />
-                  Signing in...
-                </span>
+              <div className="absolute inset-0 bg-gradient-to-r from-blue-500/0 via-blue-500/[0.04] to-blue-500/0 opacity-0 transition-opacity group-hover:opacity-100" />
+              {demoLoading ? (
+                <Spinner className="size-4" />
               ) : (
-                <span className="flex items-center gap-2">
-                  Sign In
-                  <ArrowRight className="size-3.5" />
-                </span>
+                <Zap className="size-4 transition-transform group-hover:scale-110" />
               )}
-            </Button>
-          </form>
+              <span className="relative">{demoLoading ? "Signing in..." : "Try Demo Workspace"}</span>
+              {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
+            </button>
+          )}
+
+          {ssoEnabled && (
+            <button
+              type="button"
+              onClick={handleSsoLogin}
+              disabled={isBusy}
+              className="group relative mb-7 flex h-[46px] w-full items-center justify-center gap-2.5 overflow-hidden rounded-xl border border-border bg-surface text-[13px] font-semibold text-text-primary transition-all duration-300 hover:border-border-strong hover:bg-surface-elevated disabled:opacity-50"
+            >
+              {ssoLoading ? (
+                <Spinner className="size-4" />
+              ) : (
+                <Lock className="size-4 transition-transform group-hover:scale-110" />
+              )}
+              <span className="relative">{ssoLoading ? "Redirecting..." : `Continue with ${authConfig.provider}`}</span>
+              {!ssoLoading && <ChevronRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
+            </button>
+          )}
+
+          {passwordLoginEnabled && (
+            <>
+              {(demoEnabled || ssoEnabled) && (
+                <div className="relative mb-7">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="h-px w-full bg-gradient-to-r from-transparent via-border to-transparent" />
+                  </div>
+                  <div className="relative flex justify-center text-[11px]">
+                    <span className="bg-background px-3 text-text-tertiary">or continue with credentials</span>
+                  </div>
+                </div>
+              )}
+
+              <form onSubmit={handleSubmit} className="space-y-3.5">
+                <div className="space-y-1.5">
+                  <label htmlFor="username" className="text-[11px] font-medium text-text-secondary">
+                    Username
+                  </label>
+                  <Input
+                    ref={usernameRef}
+                    id="username"
+                    type="text"
+                    placeholder="admin"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    required
+                    disabled={isBusy}
+                    autoComplete="username"
+                    className="h-11 border-border bg-surface text-text-primary placeholder:text-text-disabled focus:border-blue-400 focus:ring-blue-500/10"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="password" className="text-[11px] font-medium text-text-secondary">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <Input
+                      id="password"
+                      type={showPassword ? "text" : "password"}
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      disabled={isBusy}
+                      autoComplete="current-password"
+                      className="h-11 border-border bg-surface pr-10 text-text-primary placeholder:text-text-disabled focus:border-blue-400 focus:ring-blue-500/10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary transition-colors hover:text-text-secondary"
+                      tabIndex={-1}
+                      aria-label={showPassword ? "Hide password" : "Show password"}
+                    >
+                      {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-0.5">
+                  <label className="flex items-center gap-2 text-[12px] text-text-secondary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={rememberMe}
+                      onChange={(e) => setRememberMe(e.target.checked)}
+                      className="size-3.5 rounded border-border bg-surface accent-blue-500"
+                    />
+                    Remember me
+                  </label>
+                  <button type="button" className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary">
+                    Forgot password?
+                  </button>
+                </div>
+
+                {error && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-[12px] text-red-600">
+                    {error}
+                  </div>
+                )}
+
+                <Button
+                  type="submit"
+                  className="relative h-11 w-full overflow-hidden rounded-xl bg-text-primary text-[13px] font-semibold text-background hover:bg-text-primary/90"
+                  disabled={isBusy}
+                >
+                  {loading ? (
+                    <span className="flex items-center gap-2">
+                      <Spinner className="size-4" />
+                      Signing in...
+                    </span>
+                  ) : (
+                    <span className="flex items-center gap-2">
+                      Sign In
+                      <ArrowRight className="size-3.5" />
+                    </span>
+                  )}
+                </Button>
+              </form>
+            </>
+          )}
+
+          {!passwordLoginEnabled && error && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5 text-[12px] text-red-600">
+              {error}
+            </div>
+          )}
 
           <div className="mt-10 flex items-center justify-center gap-4 text-[11px] text-text-tertiary">
             <a href="#" className="flex items-center gap-1 transition-colors hover:text-text-secondary">

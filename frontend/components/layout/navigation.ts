@@ -16,6 +16,7 @@ import {
   ShieldAlert,
   Shield,
   Sparkles,
+  Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -34,6 +35,7 @@ export const navSections = [
       { label: "Clients", href: "/clients", icon: Building2 },
       { label: "Incidents", href: "/incidents", icon: ShieldAlert },
       { label: "Approvals", href: "/approvals", icon: ClipboardCheck },
+      { label: "AI Workforce", href: "/workforce", icon: Users },
       { label: "Mission Control", href: "/mission-control", icon: Activity },
     ],
   },
