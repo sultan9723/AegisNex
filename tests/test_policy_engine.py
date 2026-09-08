@@ -77,3 +77,40 @@ def test_policy_engine_to_dict() -> None:
     d = result.to_dict()
     assert isinstance(d, dict)
     assert d["action"] == "restart_container"
+
+
+def test_restart_container_requires_approval_for_critical_target() -> None:
+    engine = AppPolicyEngine()
+    result = engine.evaluate(
+        "restart_container",
+        {"container": {"name": "payments-api", "labels": {"criticality": "critical"}}},
+    )
+    assert result.verdict == ActionVerdict.APPROVAL_REQUIRED
+    assert result.risk_score >= 0.7
+
+
+def test_restart_container_requires_approval_for_production_tag() -> None:
+    engine = AppPolicyEngine()
+    result = engine.evaluate(
+        "restart_container",
+        {"container": {"name": "web", "tags": ["production"]}},
+    )
+    assert result.verdict == ActionVerdict.APPROVAL_REQUIRED
+
+
+def test_restart_container_plain_context_stays_safe() -> None:
+    engine = AppPolicyEngine()
+    result = engine.evaluate(
+        "restart_container",
+        {"container": {"name": "worker", "labels": {"tier": "background"}}},
+    )
+    assert result.verdict == ActionVerdict.SAFE
+
+
+def test_forbidden_action_cannot_be_downgraded_by_context() -> None:
+    engine = AppPolicyEngine()
+    result = engine.evaluate(
+        "delete_database",
+        {"container": {"name": "dev-db", "labels": {"criticality": "low"}}},
+    )
+    assert result.verdict == ActionVerdict.FORBIDDEN

@@ -7,8 +7,7 @@ persistence, categorization, and a clean API for the autonomous pipeline.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +53,84 @@ AUTONOMOUS_ACTIONS_FORBIDDEN: List[str] = [
     "drop_table",
     "shutdown_host",
 ]
+
+SENSITIVE_TARGET_MARKERS = {"critical", "production", "prod"}
+
+
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _context_values(context: Dict[str, Any]) -> List[str]:
+    values: List[str] = []
+    for key in ("environment", "env", "criticality", "service_criticality", "tier"):
+        value = context.get(key)
+        if value is not None:
+            values.append(str(value).strip().lower())
+
+    for key in ("tags", "service_tags"):
+        values.extend(str(value).strip().lower() for value in _as_list(context.get(key)))
+
+    labels = context.get("labels")
+    if isinstance(labels, dict):
+        for key, value in labels.items():
+            values.append(str(key).strip().lower())
+            values.append(str(value).strip().lower())
+    elif labels is not None:
+        values.extend(str(value).strip().lower() for value in _as_list(labels))
+
+    container = context.get("container")
+    if isinstance(container, dict):
+        nested = {
+            "environment": container.get("environment") or container.get("env"),
+            "criticality": container.get("criticality"),
+            "tags": container.get("tags"),
+            "labels": container.get("labels"),
+        }
+        values.extend(_context_values(nested))
+
+    return [value for value in values if value]
+
+
+def _restart_count(context: Dict[str, Any]) -> int:
+    for key in ("restart_count", "recent_restart_count", "restart_attempts"):
+        try:
+            return int(context.get(key, 0))
+        except (TypeError, ValueError):
+            continue
+
+    container = context.get("container")
+    if isinstance(container, dict):
+        name = container.get("name")
+    else:
+        name = container
+
+    history = context.get("restart_history")
+    if isinstance(history, dict):
+        if isinstance(name, str) and isinstance(history.get(name), dict):
+            try:
+                return int(history[name].get("attempts", 0))
+            except (TypeError, ValueError):
+                return 0
+        try:
+            return int(history.get("attempts", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _sensitive_target_reason(context: Dict[str, Any]) -> str:
+    values = set(_context_values(context))
+    matched = sorted(values & SENSITIVE_TARGET_MARKERS)
+    if matched:
+        return f"Target context is tagged {', '.join(matched)}"
+    if _restart_count(context) >= 2:
+        return "Target has repeated recent restart attempts"
+    return ""
 
 
 @dataclass
@@ -154,6 +231,16 @@ class AppPolicyEngine:
                 verdict=ActionVerdict.APPROVAL_REQUIRED,
                 reason=inner_result.reason,
                 policy_name=inner_result.policy_name,
+                risk_level=risk.level.value,
+                risk_score=risk.score,
+            )
+
+        context_reason = _sensitive_target_reason(ctx)
+        if context_reason:
+            return PolicyEvaluation(
+                action=action,
+                verdict=ActionVerdict.APPROVAL_REQUIRED,
+                reason=f"{context_reason}; action '{action}' requires human approval",
                 risk_level=risk.level.value,
                 risk_score=risk.score,
             )
