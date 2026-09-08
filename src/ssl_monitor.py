@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import socket
 import ssl
-from typing import Any, Dict, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
 
 from src.incidents import IncidentManager, utc_timestamp
-
 
 CERT_DATETIME_FORMAT = "%b %d %H:%M:%S %Y %Z"
 
@@ -29,7 +29,7 @@ class SslCertificateCheck:
     warning_days: int
     error: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "target": self.target,
@@ -65,7 +65,7 @@ class SslCertificateMonitor:
         self.storage_repository = storage_repository
         self.certificate_fetcher = certificate_fetcher
 
-    def run(self, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         targets = self._selected_targets(params)
         checks = [self._check_target(name, target) for name, target in targets.items()]
@@ -74,11 +74,7 @@ class SslCertificateMonitor:
             self._sync_incident(check)
 
         warning_count = len(
-            [
-                check
-                for check in checks
-                if check.status in {"warning", "expired", "failed"}
-            ]
+            [check for check in checks if check.status in {"warning", "expired", "failed"}]
         )
         return {
             "status": "ok" if warning_count == 0 else "warning",
@@ -88,7 +84,7 @@ class SslCertificateMonitor:
             "checks": [check.to_dict() for check in checks],
         }
 
-    def _selected_targets(self, params: Dict[str, Any]) -> Dict[str, str]:
+    def _selected_targets(self, params: dict[str, Any]) -> dict[str, str]:
         target_name = str(params.get("target_name", "")).strip()
         if target_name:
             target = self.targets.get(target_name)
@@ -101,7 +97,7 @@ class SslCertificateMonitor:
         try:
             certificate = self._fetch_certificate(host, port)
             expires_at = self._parse_expires_at(str(certificate.get("notAfter", "")))
-            days_remaining = (expires_at - datetime.now(timezone.utc)).days
+            days_remaining = (expires_at - datetime.now(UTC)).days
             issuer = self._parse_issuer(certificate.get("issuer", ()))
             if days_remaining < 0:
                 status = "expired"
@@ -139,7 +135,7 @@ class SslCertificateMonitor:
                 error=str(exc),
             )
 
-    def _fetch_certificate(self, host: str, port: int) -> Dict[str, Any]:
+    def _fetch_certificate(self, host: str, port: int) -> dict[str, Any]:
         if self.certificate_fetcher is not None:
             return dict(self.certificate_fetcher(host, port, self.timeout_seconds))
 
@@ -157,7 +153,7 @@ class SslCertificateMonitor:
 
     @staticmethod
     def _parse_expires_at(value: str) -> datetime:
-        return datetime.strptime(value, CERT_DATETIME_FORMAT).replace(tzinfo=timezone.utc)
+        return datetime.strptime(value, CERT_DATETIME_FORMAT).replace(tzinfo=UTC)
 
     @staticmethod
     def _parse_issuer(raw_issuer: Any) -> str:
@@ -191,10 +187,7 @@ class SslCertificateMonitor:
         elif check.status == "expired":
             description = f"SSL certificate for {check.name} expired {-int(check.days_remaining or 0)} days ago"
         else:
-            description = (
-                f"SSL certificate for {check.name} expires in "
-                f"{check.days_remaining} days"
-            )
+            description = f"SSL certificate for {check.name} expires in {check.days_remaining} days"
         self.incident_manager.create_incident(
             severity=severity,
             service_name=check.name,
@@ -205,9 +198,8 @@ class SslCertificateMonitor:
 
     def _resolve_ssl_incidents(self, service_name: str) -> None:
         for incident in self.incident_manager.get_active_incidents():
-            if (
-                incident.service_name == service_name
-                and incident.incident_type
-                in {"ssl_certificate_expiring", "ssl_certificate_check_failed"}
-            ):
+            if incident.service_name == service_name and incident.incident_type in {
+                "ssl_certificate_expiring",
+                "ssl_certificate_check_failed",
+            }:
                 self.incident_manager.resolve_incident(incident.incident_id)

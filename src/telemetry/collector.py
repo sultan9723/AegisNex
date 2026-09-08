@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List
+from datetime import UTC, datetime
 from threading import Lock
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ class TelemetryCollector:
     Records latency, execution, and failure data for dashboards and alerting.
     """
 
-    def __init__(self, db_path: str = "telemetry.db") -> None:
+    def __init__(self, db_path: str = "aegisnex.db") -> None:
         self._db_path = db_path
         self._lock = Lock()
         self._conn: sqlite3.Connection | None = None
@@ -102,13 +101,13 @@ class TelemetryCollector:
         conn.commit()
 
     def _utc_now(self) -> str:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
     def _execute(self, sql: str, params: tuple = ()) -> None:
         with self._lock:
             self._connect().execute(sql, params)
 
-    def _fetch_all(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+    def _fetch_all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(r) for r in self._connect().execute(sql, params).fetchall()]
 
@@ -138,9 +137,7 @@ class TelemetryCollector:
             (self._utc_now(), agent_id, task, duration_ms, 1 if success else 0),
         )
 
-    def record_tool_failure(
-        self, tool_name: str, error: str, duration_ms: float
-    ) -> None:
+    def record_tool_failure(self, tool_name: str, error: str, duration_ms: float) -> None:
         self._execute(
             "INSERT INTO tool_failures (timestamp, tool_name, error, duration_ms) VALUES (?, ?, ?, ?)",
             (self._utc_now(), tool_name, error, duration_ms),
@@ -156,20 +153,28 @@ class TelemetryCollector:
 
     # ---- Stats queries ----
 
-    def get_api_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_api_stats(self, hours: int = 24) -> dict[str, Any]:
         cutoff = (time.time() - hours * 3600) * 1000
         rows = self._fetch_all(
             "SELECT * FROM api_latency WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),
         )
         if not rows:
-            return {"total_requests": 0, "avg_latency_ms": 0.0, "min_latency_ms": 0.0, "max_latency_ms": 0.0, "error_rate": 0.0, "top_endpoints": []}
+            return {
+                "total_requests": 0,
+                "avg_latency_ms": 0.0,
+                "min_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
+                "error_rate": 0.0,
+                "top_endpoints": [],
+            }
 
         total = len(rows)
         durations = [r["duration_ms"] for r in rows]
         errors = sum(1 for r in rows if r["status_code"] >= 500)
 
         from collections import Counter
+
         endpoint_counter: Counter = Counter()
         for r in rows:
             endpoint_counter[f"{r['method']} {r['path']}"] += 1
@@ -183,19 +188,25 @@ class TelemetryCollector:
             "top_endpoints": endpoint_counter.most_common(10),
         }
 
-    def get_workflow_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_workflow_stats(self, hours: int = 24) -> dict[str, Any]:
         rows = self._fetch_all(
             "SELECT * FROM workflow_executions WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),
         )
         if not rows:
-            return {"total_executions": 0, "avg_duration_ms": 0.0, "success_rate": 0.0, "by_workflow": []}
+            return {
+                "total_executions": 0,
+                "avg_duration_ms": 0.0,
+                "success_rate": 0.0,
+                "by_workflow": [],
+            }
 
         total = len(rows)
         durations = [r["duration_ms"] for r in rows]
         successes = sum(1 for r in rows if r["success"])
 
         from collections import Counter
+
         wf_counter: Counter = Counter()
         for r in rows:
             wf_counter[r["workflow_name"]] += 1
@@ -204,10 +215,12 @@ class TelemetryCollector:
             "total_executions": total,
             "avg_duration_ms": round(sum(durations) / total, 2),
             "success_rate": round(successes / total * 100, 2),
-            "by_workflow": [{"name": name, "count": count} for name, count in wf_counter.most_common()],
+            "by_workflow": [
+                {"name": name, "count": count} for name, count in wf_counter.most_common()
+            ],
         }
 
-    def get_agent_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_agent_stats(self, hours: int = 24) -> dict[str, Any]:
         rows = self._fetch_all(
             "SELECT * FROM agent_executions WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),
@@ -216,6 +229,7 @@ class TelemetryCollector:
             return {"total_executions": 0, "executions_per_agent": [], "avg_duration_ms": 0.0}
 
         from collections import defaultdict
+
         agent_map: dict[str, list[float]] = defaultdict(list)
         for r in rows:
             agent_map[r["agent_id"]].append(r["duration_ms"])
@@ -223,13 +237,19 @@ class TelemetryCollector:
         return {
             "total_executions": len(rows),
             "executions_per_agent": [
-                {"agent_id": agent_id, "count": len(agent_map[agent_id]), "avg_duration_ms": round(sum(agent_map[agent_id]) / len(agent_map[agent_id]), 2)}
+                {
+                    "agent_id": agent_id,
+                    "count": len(agent_map[agent_id]),
+                    "avg_duration_ms": round(
+                        sum(agent_map[agent_id]) / len(agent_map[agent_id]), 2
+                    ),
+                }
                 for agent_id in agent_map
             ],
             "avg_duration_ms": round(sum(r["duration_ms"] for r in rows) / len(rows), 2),
         }
 
-    def get_tool_failure_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_tool_failure_stats(self, hours: int = 24) -> dict[str, Any]:
         rows = self._fetch_all(
             "SELECT * FROM tool_failures WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),
@@ -238,6 +258,7 @@ class TelemetryCollector:
             return {"total_failures": 0, "failures_per_tool": []}
 
         from collections import Counter, defaultdict
+
         tool_counter: Counter = Counter()
         tool_errors: dict[str, list[str]] = defaultdict(list)
         for r in rows:
@@ -247,18 +268,28 @@ class TelemetryCollector:
         return {
             "total_failures": len(rows),
             "failures_per_tool": [
-                {"tool_name": name, "count": count, "common_errors": list(set(tool_errors[name]))[:5]}
+                {
+                    "tool_name": name,
+                    "count": count,
+                    "common_errors": list(set(tool_errors[name]))[:5],
+                }
                 for name, count in tool_counter.most_common()
             ],
         }
 
-    def get_approval_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_approval_stats(self, hours: int = 24) -> dict[str, Any]:
         rows = self._fetch_all(
             "SELECT * FROM approval_times WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),
         )
         if not rows:
-            return {"total_approvals": 0, "avg_approval_time_ms": 0.0, "approve_count": 0, "reject_count": 0, "ratio": 0.0}
+            return {
+                "total_approvals": 0,
+                "avg_approval_time_ms": 0.0,
+                "approve_count": 0,
+                "reject_count": 0,
+                "ratio": 0.0,
+            }
 
         total = len(rows)
         durations = [r["duration_ms"] for r in rows]
@@ -273,7 +304,7 @@ class TelemetryCollector:
             "ratio": round(approves / max(rejects, 1), 2),
         }
 
-    def get_dashboard_performance_stats(self, hours: int = 24) -> Dict[str, Any]:
+    def get_dashboard_performance_stats(self, hours: int = 24) -> dict[str, Any]:
         api_stats = self.get_api_stats(hours=hours)
         return {
             "api_avg_latency_ms": api_stats.get("avg_latency_ms", 0.0),
@@ -281,7 +312,7 @@ class TelemetryCollector:
             "total_api_requests": api_stats.get("total_requests", 0),
         }
 
-    def get_dashboard(self) -> Dict[str, Any]:
+    def get_dashboard(self) -> dict[str, Any]:
         return {
             "api": self.get_api_stats(24),
             "workflows": self.get_workflow_stats(24),

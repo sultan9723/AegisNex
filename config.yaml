@@ -73,14 +73,3 @@ health_checks:
     enabled: false
     timeout_seconds: 5
     targets:
-
-smtp:
-  enabled: false
-  host: smtp.gmail.com
-  port: 587
-  timeout_seconds: 10
-  starttls: true
-  username: ""
-  password: ""
-  recipient: ""
-  subject: AegisNex Alert

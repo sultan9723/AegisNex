@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from datetime import UTC
+from typing import Any
 
 import docker
 from docker import errors as docker_errors
@@ -24,7 +25,7 @@ class ScanContainer(dict):
 class DockerScanner:
     def __init__(
         self,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
         include_all: bool = True,
         client_timeout_seconds: int = 10,
         restart_timeout_seconds: int = 10,
@@ -39,7 +40,7 @@ class DockerScanner:
             self._docker_client = docker.from_env(timeout=self.client_timeout_seconds)
         return self._docker_client
 
-    def ensure_running(self, container_name: str) -> Dict[str, Any]:
+    def ensure_running(self, container_name: str) -> dict[str, Any]:
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -82,7 +83,7 @@ class DockerScanner:
                 "container": container_name,
             }
 
-    def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             params = params or {}
             include_all = bool(params.get("include_all", self.include_all))
@@ -90,33 +91,42 @@ class DockerScanner:
             client.ping()
 
             containers = client.containers.list(all=include_all)
-            payload: List[Dict[str, object]] = []
+            payload: list[dict[str, object]] = []
             for container in containers:
                 container_stats = self._container_stats(container)
-                started_at = container.attrs.get("State", {}).get("StartedAt") if hasattr(container, "attrs") else None
+                started_at = (
+                    container.attrs.get("State", {}).get("StartedAt")
+                    if hasattr(container, "attrs")
+                    else None
+                )
                 uptime_seconds = None
                 if started_at and container.status == "running":
                     try:
-                        from datetime import datetime, timezone
+                        from datetime import datetime
+
                         parsed = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
-                        uptime_seconds = int((datetime.now(timezone.utc) - parsed).total_seconds())
+                        uptime_seconds = int((datetime.now(UTC) - parsed).total_seconds())
                     except Exception:
                         pass
-                payload.append(ScanContainer({
-                    "id": container.short_id,
-                    "name": container.name,
-                    "status": self._map_status(container.status),
-                    "raw_status": container.status,
-                    "health_status": self._health_status(container),
-                    "image": self._container_image(container),
-                    "started_at": started_at,
-                    "uptime_seconds": uptime_seconds,
-                    "ports": self._ports(container),
-                    "cpu_percent": container_stats.get("cpu_percent"),
-                    "memory_usage_bytes": container_stats.get("memory_usage_bytes"),
-                    "memory_limit_bytes": container_stats.get("memory_limit_bytes"),
-                    "memory_percent": container_stats.get("memory_percent"),
-                }))
+                payload.append(
+                    ScanContainer(
+                        {
+                            "id": container.short_id,
+                            "name": container.name,
+                            "status": self._map_status(container.status),
+                            "raw_status": container.status,
+                            "health_status": self._health_status(container),
+                            "image": self._container_image(container),
+                            "started_at": started_at,
+                            "uptime_seconds": uptime_seconds,
+                            "ports": self._ports(container),
+                            "cpu_percent": container_stats.get("cpu_percent"),
+                            "memory_usage_bytes": container_stats.get("memory_usage_bytes"),
+                            "memory_limit_bytes": container_stats.get("memory_limit_bytes"),
+                            "memory_percent": container_stats.get("memory_percent"),
+                        }
+                    )
+                )
 
             return {"status": "ok", "containers": payload}
         except docker_errors.DockerException as exc:
@@ -127,9 +137,9 @@ class DockerScanner:
             return {"status": "error", "message": "Docker scan failed"}
 
     @staticmethod
-    def _container_stats(container: Any) -> Dict[str, Any]:
+    def _container_stats(container: Any) -> dict[str, Any]:
         """Return CPU percent and memory stats for a single container."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "cpu_percent": None,
             "memory_usage_bytes": None,
             "memory_limit_bytes": None,
@@ -144,7 +154,9 @@ class DockerScanner:
             cpu_usage = cpu_stats.get("cpu_usage", {})
             precpu_usage = precpu_stats.get("cpu_usage", {})
             cpu_delta = cpu_usage.get("total_usage", 0) - precpu_usage.get("total_usage", 0)
-            system_delta = cpu_stats.get("system_cpu_usage", 0) - precpu_stats.get("system_cpu_usage", 0)
+            system_delta = cpu_stats.get("system_cpu_usage", 0) - precpu_stats.get(
+                "system_cpu_usage", 0
+            )
             num_cpus = cpu_stats.get("online_cpus", 1) or 1
             if system_delta > 0 and cpu_delta > 0:
                 result["cpu_percent"] = round((cpu_delta / system_delta) * num_cpus * 100.0, 2)
@@ -169,7 +181,7 @@ class DockerScanner:
             self.logger.exception("Docker health lookup failed: %s", exc)
             return "unknown"
 
-    def restart_container(self, container_name: str) -> Dict[str, Any]:
+    def restart_container(self, container_name: str) -> dict[str, Any]:
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -218,19 +230,23 @@ class DockerScanner:
         return str(health.get("Status", "none"))
 
     @staticmethod
-    def _ports(container: Any) -> List[Dict[str, object]]:
-        result: List[Dict[str, object]] = []
+    def _ports(container: Any) -> list[dict[str, object]]:
+        result: list[dict[str, object]] = []
         raw_ports = getattr(container, "ports", {}) or {}
         for container_port, mappings in raw_ports.items():
             if mappings:
                 for mapping in mappings:
-                    result.append({
-                        "container_port": container_port,
-                        "host_port": mapping.get("HostPort"),
-                        "host_ip": mapping.get("HostIp"),
-                    })
+                    result.append(
+                        {
+                            "container_port": container_port,
+                            "host_port": mapping.get("HostPort"),
+                            "host_ip": mapping.get("HostIp"),
+                        }
+                    )
             else:
-                    result.append({"container_port": container_port, "host_port": None, "host_ip": None})
+                result.append(
+                    {"container_port": container_port, "host_port": None, "host_ip": None}
+                )
         return result
 
     @staticmethod
@@ -249,7 +265,7 @@ class DockerScanner:
 
         return "unknown"
 
-    def start_container(self, container_name: str) -> Dict[str, Any]:
+    def start_container(self, container_name: str) -> dict[str, Any]:
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -257,13 +273,17 @@ class DockerScanner:
             container.reload()
             return {"status": "ok", "container": container.name, "current_status": container.status}
         except docker_errors.NotFound:
-            return {"status": "error", "message": "Container not found", "container": container_name}
+            return {
+                "status": "error",
+                "message": "Container not found",
+                "container": container_name,
+            }
         except docker_errors.DockerException as exc:
             return {"status": "error", "message": str(exc), "container": container_name}
         except Exception as exc:
             return {"status": "error", "message": str(exc), "container": container_name}
 
-    def stop_container(self, container_name: str) -> Dict[str, Any]:
+    def stop_container(self, container_name: str) -> dict[str, Any]:
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -271,22 +291,32 @@ class DockerScanner:
             container.reload()
             return {"status": "ok", "container": container.name, "current_status": container.status}
         except docker_errors.NotFound:
-            return {"status": "error", "message": "Container not found", "container": container_name}
+            return {
+                "status": "error",
+                "message": "Container not found",
+                "container": container_name,
+            }
         except docker_errors.DockerException as exc:
             return {"status": "error", "message": str(exc), "container": container_name}
         except Exception as exc:
             return {"status": "error", "message": str(exc), "container": container_name}
 
-    def get_container_logs(self, container_name: str, tail: int = 100) -> Dict[str, Any]:
+    def get_container_logs(self, container_name: str, tail: int = 100) -> dict[str, Any]:
         try:
             client = self._client()
             container = client.containers.get(container_name)
             logs = container.logs(tail=tail, timestamps=True)
-            decoded = logs.decode("utf-8", errors="replace") if isinstance(logs, bytes) else str(logs)
+            decoded = (
+                logs.decode("utf-8", errors="replace") if isinstance(logs, bytes) else str(logs)
+            )
             lines = decoded.splitlines()
             return {"status": "ok", "container": container_name, "logs": lines, "count": len(lines)}
         except docker_errors.NotFound:
-            return {"status": "error", "message": "Container not found", "container": container_name}
+            return {
+                "status": "error",
+                "message": "Container not found",
+                "container": container_name,
+            }
         except docker_errors.DockerException as exc:
             return {"status": "error", "message": str(exc), "container": container_name}
         except Exception as exc:
