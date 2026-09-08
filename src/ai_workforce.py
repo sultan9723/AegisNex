@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -283,7 +283,6 @@ def _ensure_table_agents(repo: Any) -> None:
         _add_column_if_missing(repo, TABLE_AGENTS, "team_id", "INTEGER")
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_AGENTS} (
             id {pkey},
@@ -347,7 +346,6 @@ def _ensure_table_versions(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_VERSIONS):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_VERSIONS} (
             id {pkey},
@@ -367,7 +365,6 @@ def _ensure_table_prompts(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_PROMPTS):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_PROMPTS} (
             id {pkey},
@@ -389,7 +386,6 @@ def _ensure_table_tool_perms(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_TOOL_PERMS):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_TOOL_PERMS} (
             id {pkey},
@@ -408,7 +404,6 @@ def _ensure_table_knowledge(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_KNOWLEDGE):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_KNOWLEDGE} (
             id {pkey},
@@ -427,7 +422,6 @@ def _ensure_table_executions(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_EXECUTIONS):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_EXECUTIONS} (
             id {pkey},
@@ -452,7 +446,6 @@ def _ensure_table_health(repo: Any) -> None:
     if repo is None or repo.table_exists(TABLE_HEALTH):
         return
     pkey = "INTEGER PRIMARY KEY AUTOINCREMENT" if repo.backend == "sqlite" else "SERIAL PRIMARY KEY"
-    now = "datetime('now')" if repo.backend == "sqlite" else "NOW()"
     repo._execute(f"""
         CREATE TABLE IF NOT EXISTS {TABLE_HEALTH} (
             id {pkey},
@@ -613,17 +606,97 @@ def _calculate_trust_score(executions: list[WorkforceExecution], current_score: 
     if not executions:
         return current_score
     total = len(executions)
-    successes = sum(1 for e in executions if e.status == "success")
-    failures = total - successes
-    success_ratio = successes / max(total, 1)
+    outcome_score = sum(_execution_outcome_score(e) for e in executions) / total
+    avg_confidence = _calculate_agent_confidence(executions)
+    policy_penalty = sum(_policy_penalty(e) for e in executions) / total
+    stale_penalty = _staleness_penalty(executions)
 
-    avg_confidence = sum(e.confidence for e in executions if e.confidence > 0) / max(sum(1 for e in executions if e.confidence > 0), 1)
+    raw = (outcome_score * 65.0) + (avg_confidence * 25.0) + 10.0
+    raw -= policy_penalty + stale_penalty
+    return round(max(0.0, min(100.0, raw)), 1)
 
-    penalty = failures * 5.0
-    bonus = successes * 1.0
 
-    raw = (success_ratio * 60.0) + (avg_confidence * 20.0) + 10.0 + bonus - penalty
-    return max(0.0, min(100.0, raw))
+def _calculate_agent_confidence(executions: list[WorkforceExecution]) -> float:
+    if not executions:
+        return 0.0
+    values = [_execution_confidence(e) for e in executions]
+    return round(sum(values) / len(values), 4)
+
+
+def _execution_confidence(execution: WorkforceExecution) -> float:
+    if execution.confidence > 0:
+        confidence = execution.confidence
+    elif execution.status == ExecutionResult.SUCCESS.value:
+        confidence = 0.75
+    elif execution.status == ExecutionResult.FAILED.value:
+        confidence = 0.25
+    elif execution.status == ExecutionResult.TIMEOUT.value:
+        confidence = 0.15
+    else:
+        confidence = 0.1
+
+    penalty = _policy_penalty(execution) / 100.0
+    return round(max(0.0, min(1.0, confidence - penalty)), 4)
+
+
+def _execution_outcome_score(execution: WorkforceExecution) -> float:
+    if execution.status == ExecutionResult.SUCCESS.value:
+        return 1.0
+    if execution.status == ExecutionResult.FAILED.value:
+        return 0.25
+    if execution.status == ExecutionResult.TIMEOUT.value:
+        return 0.15
+    return 0.0
+
+
+def _policy_penalty(execution: WorkforceExecution) -> float:
+    verdicts = _policy_verdicts(execution.metadata)
+    penalty = 0.0
+    for verdict in verdicts:
+        if verdict == "approval_required":
+            penalty += 8.0
+        elif verdict == "forbidden":
+            penalty += 20.0
+    return penalty
+
+
+def _policy_verdicts(metadata: dict) -> list[str]:
+    candidates: list[Any] = []
+    for key in ("policy_verdict", "policy_verdicts", "policy", "policy_evaluation"):
+        value = metadata.get(key)
+        if value is not None:
+            candidates.append(value)
+    candidates.extend(metadata.get("policy_decisions", []) or [])
+
+    verdicts: list[str] = []
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            verdicts.append(candidate.strip().lower())
+        elif isinstance(candidate, dict):
+            value = candidate.get("verdict") or candidate.get("policy_verdict")
+            if value is not None:
+                verdicts.append(str(value).strip().lower())
+        elif isinstance(candidate, list):
+            verdicts.extend(_policy_verdicts({"policy_verdicts": candidate}))
+    return verdicts
+
+
+def _staleness_penalty(executions: list[WorkforceExecution]) -> float:
+    timestamps: list[datetime] = []
+    for execution in executions:
+        if not execution.created_at:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(execution.created_at.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    if not timestamps:
+        return 0.0
+    newest = max(timestamps)
+    age_days = (datetime.now(UTC) - newest).total_seconds() / 86400
+    if age_days <= 7:
+        return 0.0
+    return min(15.0, (age_days - 7) * 0.25)
 
 
 def _calculate_success_rate(executions: list[WorkforceExecution]) -> float:
@@ -1150,6 +1223,8 @@ class WorkforceManager:
         if not execution.execution_id:
             execution.execution_id = f"exec_{new_id()}"
         execution.created_at = utc_now()
+        if execution.confidence <= 0:
+            execution.confidence = _execution_confidence(execution)
 
         self.repo._execute(
             f"""INSERT INTO {TABLE_EXECUTIONS}
@@ -1175,7 +1250,7 @@ class WorkforceManager:
             agent.success_rate = _calculate_success_rate(recent)
             agent.average_latency_ms = _calculate_avg_latency(recent)
             agent.last_active_at = utc_now()
-            agent.confidence = sum(e.confidence for e in recent if e.confidence > 0) / max(sum(1 for e in recent if e.confidence > 0), 1)
+            agent.confidence = _calculate_agent_confidence(recent)
             agent.trust_score = _calculate_trust_score(recent, agent.trust_score)
             self.update_agent(agent)
 
