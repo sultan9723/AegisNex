@@ -20,6 +20,16 @@ _logger = logging.getLogger(__name__)
 
 import jwt as pyjwt
 
+from src.enterprise_auth import is_production_environment
+from src.session import SessionStore
+
+try:
+    import hashlib as _hashlib
+    import secrets as _secrets
+    _HAVE_HASH = True
+except ImportError:
+    _HAVE_HASH = False
+
 
 def generate_api_key() -> tuple[str, str, str]:
     """Generate a new API key.
@@ -257,9 +267,22 @@ class UserStore:
             if "last_login" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
             if "mfa_enabled" not in existing:
-                connection.execute(
-                    "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"
+                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS external_identities (
+                    provider TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    email TEXT NOT NULL,
+                    claims_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    last_login TEXT,
+                    PRIMARY KEY (provider, subject),
+                    FOREIGN KEY (user_id) REFERENCES users(id)
                 )
+                """
+            )
 
     def create_user(self, email: str, password: str, role: str = "viewer") -> User:
         normalized_email = normalize_email(email)
@@ -356,6 +379,116 @@ class UserStore:
             )
             return cursor.rowcount > 0
 
+    def upsert_external_user(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        email: str,
+        display_name: str = "",
+        role: str = "read_only",
+        claims: dict[str, Any] | None = None,
+    ) -> User:
+        normalized_email = normalize_email(email)
+        normalized_role = Role.from_str(role).value
+        now = utc_timestamp()
+        claims_json = json.dumps(claims or {}, sort_keys=True)
+        with self._connect() as connection:
+            identity = connection.execute(
+                "SELECT user_id FROM external_identities WHERE provider = ? AND subject = ?",
+                (provider, subject),
+            ).fetchone()
+            if identity is not None:
+                user_id = int(identity["user_id"])
+                connection.execute(
+                    """
+                    UPDATE users
+                    SET email = ?, display_name = ?, is_verified = 1, role = ?, is_superuser = ?, last_login = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_email,
+                        display_name.strip()[:64],
+                        normalized_role,
+                        1 if normalized_role in ("super_admin", "administrator") else 0,
+                        now,
+                        user_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE external_identities
+                    SET email = ?, claims_json = ?, last_login = ?
+                    WHERE provider = ? AND subject = ?
+                    """,
+                    (normalized_email, claims_json, now, provider, subject),
+                )
+            else:
+                existing = connection.execute(
+                    "SELECT * FROM users WHERE email = ?",
+                    (normalized_email,),
+                ).fetchone()
+                if existing is not None:
+                    user_id = int(existing["id"])
+                    connection.execute(
+                        """
+                        UPDATE users
+                        SET display_name = CASE WHEN display_name = '' THEN ? ELSE display_name END,
+                            role = ?,
+                            is_superuser = ?,
+                            is_verified = 1,
+                            last_login = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            display_name.strip()[:64],
+                            normalized_role,
+                            1 if normalized_role in ("super_admin", "administrator") else 0,
+                            now,
+                            user_id,
+                        ),
+                    )
+                else:
+                    cursor = connection.execute(
+                        """
+                        INSERT INTO users (
+                            email,
+                            hashed_password,
+                            is_active,
+                            is_superuser,
+                            is_verified,
+                            role,
+                            display_name,
+                            created_at,
+                            last_login
+                        )
+                        VALUES (?, ?, 1, ?, 1, ?, ?, ?, ?)
+                        """,
+                        (
+                            normalized_email,
+                            hash_password(secrets.token_urlsafe(48)),
+                            1 if normalized_role in ("super_admin", "administrator") else 0,
+                            normalized_role,
+                            display_name.strip()[:64],
+                            now,
+                            now,
+                        ),
+                    )
+                    user_id = int(cursor.lastrowid)
+                connection.execute(
+                    """
+                    INSERT INTO external_identities (
+                        provider, subject, user_id, email, claims_json, created_at, last_login
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (provider, subject, user_id, normalized_email, claims_json, now, now),
+                )
+        user = self.get_user_by_email(normalized_email)
+        if user is None:
+            raise AuthError("Failed to provision SSO user.")
+        return user
+
     def set_verified(self, user_id: int, verified: bool = True) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -394,6 +527,7 @@ class AuthManager:
         jwt_secret: str | None = None,
         token_ttl_seconds: int = 60 * 30,  # 30 minutes default
         refresh_token_ttl_seconds: int = 60 * 60 * 24 * 7,  # 7 days
+        session_store: SessionStore | None = None,
     ) -> None:
         self.user_store = user_store or UserStore()
         # JWT secret MUST come from environment variable - no hardcoded fallback
@@ -407,6 +541,11 @@ class AuthManager:
                 "AEGISNEX_JWT_SECRET environment variable is required. "
                 "Set it to a random 256-bit key (e.g., openssl rand -hex 32)."
             )
+        if is_production_environment() and len(self.jwt_secret.encode("utf-8")) < 32:
+            raise RuntimeError(
+                "AEGISNEX_JWT_SECRET must be at least 32 bytes in production. "
+                "Generate one with: openssl rand -hex 32."
+            )
         self.token_ttl_seconds = int(
             os.getenv("AEGISNEX_TOKEN_TTL_SECONDS", str(token_ttl_seconds))
         )
@@ -414,6 +553,7 @@ class AuthManager:
             os.getenv("AEGISNEX_REFRESH_TOKEN_TTL_SECONDS", str(refresh_token_ttl_seconds))
         )
         self.blacklist = TokenBlacklist(self.user_store.database_path)
+        self.session_store = session_store
 
     def create_access_token(self, user: User) -> str:
         now = datetime.now(UTC)
@@ -495,8 +635,29 @@ class AuthManager:
             user = refreshed
         return user, self.create_access_token(user), self.create_refresh_token(user)
 
+    def external_login(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        email: str,
+        display_name: str = "",
+        role: str = "read_only",
+        claims: dict[str, Any] | None = None,
+    ) -> tuple[User, str, str]:
+        """Provision or update an SSO user and return app session tokens."""
+        user = self.user_store.upsert_external_user(
+            provider=provider,
+            subject=subject,
+            email=email,
+            display_name=display_name,
+            role=role,
+            claims=claims,
+        )
+        return user, self.create_access_token(user), self.create_refresh_token(user)
+
     def logout(self, token: str | None) -> bool:
-        """Revoke the given token."""
+        """Revoke the given token and deactivate all user sessions."""
         if not token:
             return False
         try:
@@ -509,12 +670,30 @@ class AuthManager:
             jti = payload.get("jti", "")
             exp = payload.get("exp", 0)
             self.blacklist.revoke(jti, exp)
+
+            # Revoke all sessions for this user on logout
+            if self.session_store is not None:
+                try:
+                    user_id = int(payload.get("sub", "0"))
+                    if user_id > 0:
+                        self.session_store.revoke_all_user_sessions(user_id)
+                except (ValueError, TypeError):
+                    pass
+
             return True
         except pyjwt.PyJWTError:
             return False
 
-    def refresh_access_token(self, refresh_token: str) -> str | None:
-        """Exchange a valid refresh token for a new access token."""
+    def refresh_access_token(self, refresh_token: str) -> tuple[str, str] | None:
+        """Exchange a valid refresh token for a new access and refresh token pair.
+
+        If a SessionStore is configured this method implements refresh token
+        rotation with family tracking:
+        - The old refresh JTI is revoked.
+        - A new refresh JTI is issued within the same session family.
+        - If the old JTI was *already* revoked (theft detection), the entire
+          family is deactivated.
+        """
         try:
             payload = pyjwt.decode(
                 refresh_token,
@@ -529,7 +708,11 @@ class AuthManager:
             return None
 
         jti = payload.get("jti", "")
-        if self.blacklist.is_revoked(jti):
+        already_revoked = self.blacklist.is_revoked(jti)
+
+        # Theft detection: if the token was already revoked, deactivate family
+        if already_revoked and self.session_store is not None:
+            self.session_store.detect_token_theft(jti)
             return None
 
         try:
@@ -541,11 +724,77 @@ class AuthManager:
         if user is None or not user.is_active:
             return None
 
+        # Verify session is still active (if session store is available)
+        if self.session_store is not None:
+            session = self.session_store.get_session_by_refresh_jti(jti)
+            if session is None or not session.is_active:
+                return None
+
         # Revoke the old refresh token
         exp = payload.get("exp", 0)
         self.blacklist.revoke(jti, exp)
 
-        return self.create_access_token(user)
+        # Issue new tokens
+        new_access = self.create_access_token(user)
+        new_refresh = self.create_refresh_token(user)
+
+        # Rotate session (update refresh JTI)
+        if self.session_store is not None:
+            new_payload = pyjwt.decode(
+                new_refresh,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"verify_exp": False},
+            )
+            new_jti = new_payload.get("jti", "")
+            new_exp = new_payload.get("exp", 0)
+            new_expires_at = datetime.fromtimestamp(new_exp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            self.session_store.rotate_refresh_token(jti, new_jti, new_expires_at)
+
+        return new_access, new_refresh
+
+    def create_session_for_user(
+        self,
+        user_id: int,
+        refresh_jti: str,
+        expires_at: str,
+        ip_address: str = "",
+        user_agent: str = "",
+        metadata: dict | None = None,
+    ) -> any:
+        """Create a session record for the user.  Requires session_store."""
+        if self.session_store is None:
+            return None
+        return self.session_store.create_session(
+            user_id=user_id,
+            refresh_jti=refresh_jti,
+            expires_at=expires_at,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            metadata=metadata,
+        )
+
+    def list_sessions(self, user_id: int, active_only: bool = True) -> list:
+        """List sessions for a user."""
+        if self.session_store is None:
+            return []
+        return self.session_store.list_sessions_for_user(user_id, active_only=active_only)
+
+    def revoke_session(self, session_id: int) -> bool:
+        """Revoke a specific session by ID."""
+        if self.session_store is None:
+            return False
+        return self.session_store.revoke_session(session_id)
+
+    def revoke_all_sessions(self, user_id: int) -> int:
+        """Revoke all sessions for a user.  Returns count revoked."""
+        if self.session_store is None:
+            return 0
+        return self.session_store.revoke_all_user_sessions(user_id)
+
+    def refresh_session(self, refresh_token: str) -> tuple[str, str] | None:
+        """Compatibility wrapper for dashboard routes."""
+        return self.refresh_access_token(refresh_token)
 
 
 def row_to_user(row: sqlite3.Row | None) -> User | None:

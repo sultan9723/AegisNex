@@ -186,6 +186,31 @@ def test_openai_proxy_rejects_streaming_for_v1(tmp_path: Path) -> None:
     assert response.json()["error"]["type"] == "unsupported_feature"
 
 
+def test_openai_proxy_rejects_api_key_without_commandmesh_scope(tmp_path: Path) -> None:
+    app, _api_key = _build_proxy_app(tmp_path)
+    full_key, key_hash, key_prefix = generate_api_key()
+    app.state.services.platform_repository.create_api_key(
+        "audit-only",
+        key_hash,
+        key_prefix,
+        role="administrator",
+        scopes=["audit:read"],
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {full_key}"},
+            json={
+                "model": "fake-fast",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "API key scope required: commandmesh:chat, ai:invoke"
+
+
 def test_openai_proxy_respects_locked_model_metadata(tmp_path: Path) -> None:
     app, api_key = _build_proxy_app(tmp_path)
     _register_proxy_agent(app.state.governance)

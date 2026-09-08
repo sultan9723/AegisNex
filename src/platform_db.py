@@ -210,17 +210,9 @@ DATABASE_MODELS = {
     ),
     "api_keys": DatabaseModel(
         "api_keys",
-        (
-            "id",
-            "name",
-            "key_hash",
-            "key_prefix",
-            "role",
-            "is_active",
-            "created_at",
-            "last_used_at",
-            "request_count",
-        ),
+        ("id", "name", "key_hash", "key_prefix", "role", "scopes", "org_id", "expires_at",
+         "revoked_at", "allowed_ips", "rate_limit_max", "is_active", "created_at",
+         "last_used_at", "request_count"),
     ),
     "alert_rules": DatabaseModel(
         "alert_rules",
@@ -656,6 +648,12 @@ class PlatformRepository:
                 key_hash {text} NOT NULL,
                 key_prefix {text} NOT NULL,
                 role {text} NOT NULL DEFAULT 'viewer',
+                scopes {text} NOT NULL DEFAULT '["*"]',
+                org_id {integer},
+                expires_at {text},
+                revoked_at {text},
+                allowed_ips {text},
+                rate_limit_max {integer} NOT NULL DEFAULT 100,
                 is_active {bool_type} NOT NULL DEFAULT {true_default},
                 created_at {text} NOT NULL,
                 last_used_at {text},
@@ -808,12 +806,23 @@ class PlatformRepository:
             "remediation_history": "TEXT",
         }
         if self.backend == "postgresql":
-            return [
+            monitoring_migrations = [
                 f"ALTER TABLE monitoring_targets ADD COLUMN IF NOT EXISTS {name} {column_type}"
                 for name, column_type in columns.items()
             ] + [
                 f"ALTER TABLE incidents ADD COLUMN IF NOT EXISTS {name} {column_type}"
                 for name, column_type in incident_columns.items()
+            ]
+            return monitoring_migrations + [
+                "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS before_state TEXT",
+                "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS after_state TEXT",
+                "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS execution_id TEXT",
+                "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT '[\"*\"]'",
+                "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id INTEGER",
+                "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TEXT",
+                "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at TEXT",
+                "UPDATE incidents SET incident_status = status",
+                "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
             ]
         existing = {
             str(row["name"])
@@ -836,21 +845,26 @@ class PlatformRepository:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN after_state TEXT")
         if "execution_id" not in audit_columns:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN execution_id TEXT")
-        incident_existing = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
-        }
-        incident_migrations = [
-            f"ALTER TABLE incidents ADD COLUMN {name} {column_type}"
-            for name, column_type in incident_columns.items()
-            if name not in incident_existing
-        ]
+        api_key_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(api_keys)").fetchall()}
+        api_key_migrations = []
+        if "scopes" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"*\"]'")
+        if "org_id" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN org_id INTEGER")
+        if "expires_at" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN expires_at TEXT")
+        if "revoked_at" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN revoked_at TEXT")
+        if "allowed_ips" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT")
+        if "rate_limit_max" not in api_key_columns:
+            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100")
         # Migrate legacy incident data
         updates = [
             "UPDATE incidents SET incident_status = status",
             "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
         ]
-        return alter_statements + audit_migrations + incident_migrations + updates
+        return alter_statements + audit_migrations + api_key_migrations + updates
 
     @property
     def placeholder(self) -> str:
@@ -1264,18 +1278,30 @@ class PlatformRepository:
         return rows[0] if rows else None
 
     def create_api_key(
-        self, name: str, key_hash: str, key_prefix: str, role: str = "viewer", actor: str = "system"
-    ) -> dict[str, Any]:
+        self,
+        name: str,
+        key_hash: str,
+        key_prefix: str,
+        role: str = "viewer",
+        actor: str = "system",
+        scopes: List[str] | None = None,
+        org_id: int | None = None,
+        expires_at: str | None = None,
+        allowed_ips: List[str] | None = None,
+        rate_limit_max: int = 100,
+    ) -> Dict[str, Any]:
         now = utc_timestamp()
         p = self.placeholder
+        scopes_json = json.dumps(scopes or ["*"], sort_keys=True)
+        allowed_ips_json = json.dumps(allowed_ips or [], sort_keys=True) if allowed_ips else None
         new_id = self._execute(
             f"""
-            INSERT INTO api_keys (name, key_hash, key_prefix, role, is_active, created_at)
-            VALUES ({p}, {p}, {p}, {p}, {p}, {p})
+            INSERT INTO api_keys (name, key_hash, key_prefix, role, scopes, org_id, expires_at, allowed_ips, rate_limit_max, is_active, created_at)
+            VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
-            (name, key_hash, key_prefix, role, 1, now),
+            (name, key_hash, key_prefix, role, scopes_json, org_id, expires_at, allowed_ips_json, rate_limit_max, 1, now),
         )
-        self.record_audit_log(actor, "create", "api_key", name, {"role": role})
+        self.record_audit_log(actor, "create", "api_key", name, {"role": role, "scopes": scopes or ["*"], "org_id": org_id})
         if self.backend != "postgresql":
             key = self.get_api_key_by_hash(key_hash)
         else:
@@ -1301,19 +1327,39 @@ class PlatformRepository:
         from src.auth import Role as AuthRole
 
         normalized_role = AuthRole.from_str(role).value
+        scopes = payload.get("scopes", existing.get("scopes", '["*"]'))
+        if isinstance(scopes, str):
+            try:
+                parsed_scopes = json.loads(scopes)
+            except json.JSONDecodeError:
+                parsed_scopes = [scopes]
+        else:
+            parsed_scopes = scopes
+        if not isinstance(parsed_scopes, list):
+            parsed_scopes = ["*"]
+        scopes_json = json.dumps([str(scope).strip() for scope in parsed_scopes if str(scope).strip()] or ["*"], sort_keys=True)
+        org_id = payload.get("org_id", existing.get("org_id"))
+        expires_at = payload.get("expires_at", existing.get("expires_at"))
         is_active = payload.get("is_active", existing.get("is_active", True))
         if isinstance(is_active, bool):
             is_active = 1 if is_active else 0
+        allowed_ips = payload.get("allowed_ips", existing.get("allowed_ips"))
+        allowed_ips_json = json.dumps(allowed_ips) if isinstance(allowed_ips, list) else (allowed_ips or existing.get("allowed_ips"))
+        rate_limit_max = int(payload.get("rate_limit_max", existing.get("rate_limit_max", 100)))
         p = self.placeholder
         self._execute(
             f"""
             UPDATE api_keys
-            SET name = {p}, role = {p}, is_active = {p}
+            SET name = {p}, role = {p}, scopes = {p}, org_id = {p}, expires_at = {p},
+                allowed_ips = {p}, rate_limit_max = {p}, is_active = {p},
+                revoked_at = CASE WHEN {p} = 0 THEN COALESCE(revoked_at, {p}) ELSE NULL END
             WHERE id = {p}
             """,
-            (name, normalized_role, int(is_active), key_id),
+            (name, normalized_role, scopes_json, org_id, expires_at,
+             allowed_ips_json, rate_limit_max, int(is_active),
+             int(is_active), utc_timestamp(), key_id),
         )
-        self.record_audit_log(actor, "update", "api_key", name, {})
+        self.record_audit_log(actor, "update", "api_key", name, {"scopes": json.loads(scopes_json), "org_id": org_id})
         return self.get_api_key(key_id)
 
     def delete_api_key(self, key_id: int, actor: str = "system") -> bool:

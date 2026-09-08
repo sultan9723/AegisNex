@@ -8,35 +8,31 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { RouteScaffold } from "@/components/pages/RouteScaffold";
-import { getAppSettings, saveAppSettings, API_BASE_URL, type AppSettings } from "@/lib/api";
+import {
+  createApiKey,
+  getApiKeys,
+  getAppSettings,
+  revokeApiKey,
+  saveAppSettings,
+  API_BASE_URL,
+  type ApiKeyRow,
+  type AppSettings,
+} from "@/lib/api";
 import { toast } from "sonner";
 import { publish } from "@/lib/workflow";
 import { SkeletonList } from "@/components/common/Skeleton";
-
-type ApiKey = {
-  id: string;
-  name: string;
-  prefix: string;
-  created_at: string;
-  last_used_at: string | null;
-  is_active: boolean;
-};
-
-type ApiKeysResponse = {
-  keys: ApiKey[];
-};
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [apiKeys, setApiKeys] = useState<ApiKeyRow[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
   const [showNewKeyDialog, setShowNewKeyDialog] = useState(false);
   const [newKeyName, setNewKeyName] = useState("");
   const [newKeyValue, setNewKeyValue] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [deleteKeyConfirm, setDeleteKeyConfirm] = useState<ApiKey | null>(null);
+  const [deleteKeyConfirm, setDeleteKeyConfirm] = useState<ApiKeyRow | null>(null);
   const [deleteWorkspaceConfirm, setDeleteWorkspaceConfirm] = useState(false);
   const [deleteWorkspaceText, setDeleteWorkspaceText] = useState("");
 
@@ -47,11 +43,8 @@ export default function SettingsPage() {
   const loadApiKeys = useCallback(async () => {
     setApiKeysLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/settings/api-keys`, { credentials: "include" });
-      if (res.ok) {
-        const data: ApiKeysResponse = await res.json();
-        setApiKeys(data.keys);
-      }
+      const data = await getApiKeys();
+      setApiKeys(data.keys);
     } catch {} finally {
       setApiKeysLoading(false);
     }
@@ -75,14 +68,8 @@ export default function SettingsPage() {
   const handleGenerateKey = async () => {
     if (!newKeyName.trim()) { toast.error("Please enter a name for the API key"); return; }
     try {
-      const res = await fetch(`${API_BASE_URL}/api/settings/api-keys`, {
-        method: "POST", credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newKeyName.trim() }),
-      });
-      if (!res.ok) throw new Error("Failed to generate key");
-      const data = await res.json();
-      setNewKeyValue(data.key);
+      const data = await createApiKey(newKeyName.trim(), ["commandmesh:chat"]);
+      setNewKeyValue(data.api_key);
       toast.success("API key generated");
       loadApiKeys();
     } catch {
@@ -90,23 +77,16 @@ export default function SettingsPage() {
     }
   };
 
-  const handleRevokeKey = async (key: ApiKey) => {
+  const handleRevokeKey = async (key: ApiKeyRow) => {
     const keyId = key.id;
     const keyName = key.name;
     try {
-      const res = await fetch(`${API_BASE_URL}/api/settings/api-keys/${keyId}`, {
-        method: "DELETE", credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to revoke key");
+      await revokeApiKey(String(keyId));
       toast.success("API key revoked", {
         action: {
           label: "Undo",
           onClick: async () => {
-            await fetch(`${API_BASE_URL}/api/settings/api-keys`, {
-              method: "POST", credentials: "include",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: keyName }),
-            });
+            await createApiKey(keyName, key.scopes?.length ? key.scopes : ["commandmesh:chat"]);
             publish("ApiKeyCreated", { name: keyName });
             toast.success("API key restored");
             loadApiKeys();
@@ -269,7 +249,12 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-sm font-medium text-text-primary">{key.name}</p>
                     <p className="text-xs text-text-tertiary">
-                      Created {formatDate(key.created_at)} &middot; Last used {formatLastUsed(key.last_used_at)} &middot; {key.prefix}...
+                      Created {formatDate(key.created_at)} &middot; Last used {formatLastUsed(key.last_used_at)} &middot; {(key.key_prefix ?? key.prefix) || "unknown"}...
+                    </p>
+                    <p className="mt-1 text-[11px] text-text-tertiary">
+                      Role {key.role ?? "read_only"} &middot; Scopes {(key.scopes?.length ? key.scopes : ["commandmesh:chat"]).join(", ")}
+                      {key.org_id ? ` · Org ${key.org_id}` : ""}
+                      {key.expires_at ? ` · Expires ${formatDate(key.expires_at)}` : ""}
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
