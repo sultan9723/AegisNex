@@ -254,7 +254,7 @@ class Config:
                     **_notification_base(notification_email_raw),
                     host=_env_str(
                         "NOTIFY_EMAIL_HOST",
-                        _str(notification_email_raw, "host", "smtp.gmail.com"),
+                        _str(notification_email_raw, "host", "localhost"),
                     ),
                     port=_env_int(
                         "NOTIFY_EMAIL_PORT", _int(notification_email_raw, "port", 587)
@@ -323,7 +323,7 @@ class Config:
             ),
             smtp=SMTPConfig(
                 enabled=smtp_enabled,
-                host=_env_str("SMTP_HOST", _str(smtp_raw, "host", "smtp.gmail.com")),
+                host=_env_str("SMTP_HOST", _str(smtp_raw, "host", "localhost")),
                 port=_env_int("SMTP_PORT", _int(smtp_raw, "port", 587)),
                 timeout_seconds=_env_int(
                     "SMTP_TIMEOUT_SECONDS",

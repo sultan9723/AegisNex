@@ -29,7 +29,7 @@ notifications:
     retry_attempts: 2
     retry_delay_seconds: 1
     timeout_seconds: 10
-    host: smtp.gmail.com
+    host: localhost
     port: 587
     starttls: true
     username: ""
@@ -76,7 +76,7 @@ health_checks:
 
 smtp:
   enabled: false
-  host: smtp.gmail.com
+  host: localhost
   port: 587
   timeout_seconds: 10
   starttls: true

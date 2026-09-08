@@ -33,7 +33,7 @@ class Notifier:
     def __init__(
         self,
         enabled: bool = False,
-        smtp_host: str = "smtp.gmail.com",
+        smtp_host: str = "localhost",
         smtp_port: int = 587,
         smtp_timeout_seconds: int = 10,
         starttls: bool = True,
