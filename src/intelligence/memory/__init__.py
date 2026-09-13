@@ -14,6 +14,7 @@ from src.intelligence.memory.types import (
 __all__ = [
     "ConversationEntry",
     "IncidentEntry",
+    "LearningEntry",
     "MemoryEntry",
     "MemorySearchResult",
     "MemoryStore",

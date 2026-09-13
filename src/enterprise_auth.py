@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import os
 import secrets
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 import jwt as pyjwt
-
 
 NON_PRODUCTION_ENVS = {"development", "dev", "local", "test"}
 
@@ -32,7 +31,7 @@ class OIDCSettings:
     enabled: bool = False
 
     @classmethod
-    def from_env(cls) -> "OIDCSettings":
+    def from_env(cls) -> OIDCSettings:
         issuer = os.getenv("AEGISNEX_OIDC_ISSUER", "").strip().rstrip("/")
         client_id = os.getenv("AEGISNEX_OIDC_CLIENT_ID", "").strip()
         client_secret = os.getenv("AEGISNEX_OIDC_CLIENT_SECRET", "").strip()
@@ -48,8 +47,10 @@ class OIDCSettings:
             client_id=client_id,
             client_secret=client_secret,
             redirect_uri=redirect_uri,
-            scopes=os.getenv("AEGISNEX_OIDC_SCOPES", "openid email profile").strip() or "openid email profile",
-            default_role=os.getenv("AEGISNEX_OIDC_DEFAULT_ROLE", "read_only").strip() or "read_only",
+            scopes=os.getenv("AEGISNEX_OIDC_SCOPES", "openid email profile").strip()
+            or "openid email profile",
+            default_role=os.getenv("AEGISNEX_OIDC_DEFAULT_ROLE", "read_only").strip()
+            or "read_only",
             allowed_domains=domains,
             enabled=enabled,
         )
@@ -190,7 +191,7 @@ def new_oidc_nonce() -> str:
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def current_environment() -> str:

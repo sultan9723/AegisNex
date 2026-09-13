@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Mapping
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)

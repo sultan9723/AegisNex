@@ -3,7 +3,7 @@ from pathlib import Path
 
 from src.incidents import IncidentManager
 from src.ssl_monitor import CERT_DATETIME_FORMAT, SslCertificateMonitor
-from src.storage import AegisNexRepository
+from src.platform_db import PlatformRepository
 
 
 def certificate(days_remaining: int, issuer: str = "Example CA") -> dict:
@@ -15,7 +15,7 @@ def certificate(days_remaining: int, issuer: str = "Example CA") -> dict:
 
 
 def test_ssl_monitor_reports_expiry_issuer_and_days_remaining(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident_manager = IncidentManager(
         tmp_path / "incident_history.json",
         storage_repository=repository,
@@ -35,11 +35,13 @@ def test_ssl_monitor_reports_expiry_issuer_and_days_remaining(tmp_path: Path) ->
     assert check["issuer"] == "Example CA, Example CA"
     assert 88 <= check["days_remaining"] <= 90
     assert check["expires_at"].endswith("Z")
-    assert repository.fetch_all("ssl_checks")[0]["target_name"] == "api"
+    results = repository.fetch_all("check_results")
+    ssl_results = [r for r in results if r.get("target_type") == "ssl"]
+    assert ssl_results[0]["target_name"] == "api"
 
 
 def test_ssl_monitor_generates_and_resolves_expiry_incidents(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident_manager = IncidentManager(
         tmp_path / "incident_history.json",
         storage_repository=repository,

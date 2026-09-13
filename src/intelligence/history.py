@@ -47,7 +47,6 @@ def ensure_table(repo: PlatformRepository) -> None:
     if repo.table_exists(TABLE_NAME):
         _ensure_columns(repo)
         return
-    p = repo.placeholder
     with repo._connect() as conn:
         if repo.backend == "postgresql":
             conn.execute(f"""

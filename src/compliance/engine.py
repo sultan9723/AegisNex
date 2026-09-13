@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -78,8 +79,7 @@ class ComplianceEngine:
             raise ValueError(f"Unknown framework: {framework_id}")
         for control in fw.controls:
             if control.id == control_id:
-                result = self._check_control(control)
-                return result
+                return self._check_control(control)
         raise ValueError(f"Unknown control: {control_id} in framework {framework_id}")
 
     def _check_control(self, control: ComplianceControl) -> ComplianceResult:
@@ -1229,12 +1229,7 @@ class ComplianceEngine:
             )
 
     def _check_rate_limiting_check(self) -> tuple[list[dict], ComplianceStatus, str]:
-        try:
-            from slowapi import Limiter
-
-            has_rate_limiting = True
-        except ImportError:
-            has_rate_limiting = False
+        has_rate_limiting = find_spec("slowapi") is not None
         if has_rate_limiting:
             return (
                 [{"type": "rate_limiting", "enabled": True}],
@@ -1255,12 +1250,7 @@ class ComplianceEngine:
         )
 
     def _check_session_token_check(self) -> tuple[list[dict], ComplianceStatus, str]:
-        try:
-            import jwt as pyjwt
-
-            has_jwt = True
-        except ImportError:
-            has_jwt = False
+        has_jwt = find_spec("jwt") is not None
         if has_jwt:
             return (
                 [{"type": "session_tokens", "jwt_available": True}],
@@ -1325,12 +1315,7 @@ class ComplianceEngine:
         )
 
     def _check_sqli_prevention_check(self) -> tuple[list[dict], ComplianceStatus, str]:
-        try:
-            import sqlite3
-
-            has_parameterized = True
-        except ImportError:
-            has_parameterized = False
+        has_parameterized = find_spec("sqlite3") is not None
         if has_parameterized:
             return (
                 [{"type": "sqli_prevention", "parameterized_queries": True}],
@@ -1358,12 +1343,7 @@ class ComplianceEngine:
         )
 
     def _check_rng_security_check(self) -> tuple[list[dict], ComplianceStatus, str]:
-        try:
-            import secrets
-
-            has_secure_rng = True
-        except ImportError:
-            has_secure_rng = False
+        has_secure_rng = find_spec("secrets") is not None
         if has_secure_rng:
             return (
                 [{"type": "rng_security", "secure_rng": True}],

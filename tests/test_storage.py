@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from src.incidents import Incident
-from src.storage import AegisNexRepository
+from src.platform_db import PlatformRepository
 
 
 def sample_incident() -> Incident:
@@ -25,22 +25,21 @@ def sample_incident() -> Incident:
 def test_repository_creates_database_and_tables(tmp_path: Path) -> None:
     db_path = tmp_path / "aegisnex.db"
 
-    repository = AegisNexRepository(db_path)
+    repository = PlatformRepository(str(db_path))
+    repository.initialize()
 
     assert db_path.exists()
     assert {
         "incidents",
         "notifications",
-        "remediations",
+        "remediation_actions",
         "metrics_snapshots",
-        "http_checks",
-        "ssl_checks",
-        "tcp_checks",
+        "check_results",
     }.issubset(repository.table_names())
 
 
 def test_repository_saves_and_updates_incident(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident = sample_incident()
 
     repository.save_incident(incident)
@@ -59,7 +58,7 @@ def test_repository_saves_and_updates_incident(tmp_path: Path) -> None:
 
 
 def test_repository_saves_notification_event(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_notification_event(
         {
@@ -82,7 +81,7 @@ def test_repository_saves_notification_event(tmp_path: Path) -> None:
 
 
 def test_repository_saves_remediation_action(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_remediation_action(
         service_name="api",
@@ -93,7 +92,7 @@ def test_repository_saves_remediation_action(tmp_path: Path) -> None:
         timestamp="2026-06-04T12:00:00Z",
     )
 
-    rows = repository.fetch_all("remediations")
+    rows = repository.fetch_all("remediation_actions")
     assert len(rows) == 1
     assert rows[0]["service_name"] == "api"
     assert rows[0]["action"] == "restart"
@@ -102,7 +101,7 @@ def test_repository_saves_remediation_action(tmp_path: Path) -> None:
 
 
 def test_repository_saves_metrics_snapshot(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_metrics_snapshot(
         {
@@ -134,7 +133,7 @@ def test_repository_saves_metrics_snapshot(tmp_path: Path) -> None:
 
 
 def test_repository_saves_http_checks(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_http_check(
         {
@@ -150,17 +149,17 @@ def test_repository_saves_http_checks(tmp_path: Path) -> None:
         }
     )
 
-    rows = repository.fetch_all("http_checks")
+    rows = repository.fetch_all("check_results")
+    http_rows = [r for r in rows if r.get("target_type") == "http"]
 
-    assert len(rows) == 1
-    assert rows[0]["endpoint_name"] == "api"
-    assert rows[0]["available"] == 1
-    assert rows[0]["status_code"] == 200
-    assert rows[0]["latency_ms"] == 12.5
+    assert len(http_rows) == 1
+    assert http_rows[0]["target_name"] == "api"
+    assert http_rows[0]["status"] == "ok"
+    assert http_rows[0]["latency_ms"] == 12.5
 
 
 def test_repository_saves_ssl_checks(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_ssl_check(
         {
@@ -179,17 +178,16 @@ def test_repository_saves_ssl_checks(tmp_path: Path) -> None:
         }
     )
 
-    rows = repository.fetch_all("ssl_checks")
+    rows = repository.fetch_all("check_results")
+    ssl_rows = [r for r in rows if r.get("target_type") == "ssl"]
 
-    assert len(rows) == 1
-    assert rows[0]["target_name"] == "api"
-    assert rows[0]["issuer"] == "Example CA"
-    assert rows[0]["days_remaining"] == 10
-    assert rows[0]["valid"] == 0
+    assert len(ssl_rows) == 1
+    assert ssl_rows[0]["target_name"] == "api"
+    assert ssl_rows[0]["status"] == "warning"
 
 
 def test_repository_saves_tcp_checks(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     repository.save_tcp_check(
         {
@@ -205,17 +203,17 @@ def test_repository_saves_tcp_checks(tmp_path: Path) -> None:
         }
     )
 
-    rows = repository.fetch_all("tcp_checks")
+    rows = repository.fetch_all("check_results")
+    tcp_rows = [r for r in rows if r.get("target_type") == "tcp"]
 
-    assert len(rows) == 1
-    assert rows[0]["target_name"] == "db"
-    assert rows[0]["host"] == "localhost"
-    assert rows[0]["port"] == 5432
-    assert rows[0]["reachable"] == 1
+    assert len(tcp_rows) == 1
+    assert tcp_rows[0]["target_name"] == "db"
+    assert tcp_rows[0]["status"] == "ok"
+    assert tcp_rows[0]["latency_ms"] == 4.2
 
 
 def test_repository_rejects_unknown_table(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
 
     try:
         repository.fetch_all("sqlite_master")
