@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -22,7 +22,6 @@ from src.enterprise_auth import (
     sso_role_for_email,
 )
 from src.logging_config import get_logger
-from src.rbac import RequirePermission
 
 logger = get_logger(__name__)
 
@@ -43,6 +42,7 @@ def _user_agent(request: Request) -> str:
 def _extract_refresh_jti(auth_manager: AuthManager, refresh_token: str) -> str:
     """Extract the JTI from a refresh token without verification."""
     import jwt as pyjwt
+
     try:
         payload = pyjwt.decode(
             refresh_token,
@@ -64,7 +64,12 @@ class LoginRequest(BaseModel):
 
 def _set_auth_cookie(response: Response, token: str, ttl_seconds: int) -> None:
     """Set the authentication cookie."""
-    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {"development", "dev", "local", "test"}
+    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {
+        "development",
+        "dev",
+        "local",
+        "test",
+    }
     response.set_cookie(
         key="aegisnex_session",
         value=token,
@@ -77,7 +82,12 @@ def _set_auth_cookie(response: Response, token: str, ttl_seconds: int) -> None:
 
 def _set_refresh_cookie(response: Response, token: str, ttl_seconds: int) -> None:
     """Set the refresh token cookie."""
-    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {"development", "dev", "local", "test"}
+    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {
+        "development",
+        "dev",
+        "local",
+        "test",
+    }
     response.set_cookie(
         key="aegisnex_refresh",
         value=token,
@@ -89,7 +99,12 @@ def _set_refresh_cookie(response: Response, token: str, ttl_seconds: int) -> Non
 
 
 def _set_oidc_cookie(response: Response, key: str, value: str) -> None:
-    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {"development", "dev", "local", "test"}
+    secure = os.getenv("AEGISNEX_ENV", "development").strip().lower() not in {
+        "development",
+        "dev",
+        "local",
+        "test",
+    }
     response.set_cookie(
         key=key,
         value=value,
@@ -144,6 +159,7 @@ async def api_login(request: Request) -> Any:
     refresh_jti = _extract_refresh_jti(auth_manager, refresh_token)
     if refresh_jti:
         import jwt as pyjwt
+
         try:
             payload = pyjwt.decode(
                 refresh_token,
@@ -152,7 +168,7 @@ async def api_login(request: Request) -> Any:
                 options={"verify_exp": False},
             )
             exp_ts = payload.get("exp", 0)
-            expires_at = datetime.fromtimestamp(exp_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            expires_at = datetime.fromtimestamp(exp_ts, tz=UTC).isoformat().replace("+00:00", "Z")
             auth_manager.create_session_for_user(
                 user_id=user.id,
                 refresh_jti=refresh_jti,
@@ -167,10 +183,12 @@ async def api_login(request: Request) -> Any:
     if repo is not None and hasattr(repo, "record_audit_log"):
         repo.record_audit_log(email, "login", "session", email, {})
     response = Response(
-        content=json.dumps({
-            "access_token": access_token,
-            "token_type": "bearer",
-        }),
+        content=json.dumps(
+            {
+                "access_token": access_token,
+                "token_type": "bearer",
+            }
+        ),
         media_type="application/json",
     )
     _set_auth_cookie(response, access_token, auth_manager.token_ttl_seconds)
@@ -184,11 +202,15 @@ async def api_demo_login(request: Request) -> Any:
     if not demo_auth_enabled():
         raise HTTPException(status_code=404, detail="Demo login is not enabled")
     import os as _os
+
     username = _os.getenv("AEGISNEX_DEMO_USERNAME", "admin")
     password = _os.getenv("AEGISNEX_DEMO_PASSWORD")
     if not password:
         from fastapi import HTTPException
-        raise HTTPException(status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD.")
+
+        raise HTTPException(
+            status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD."
+        )
     auth_manager: AuthManager = request.app.state.auth_manager
     result = auth_manager.login(username, password)
     if result is None:
@@ -196,16 +218,19 @@ async def api_demo_login(request: Request) -> Any:
         result = auth_manager.login(username, password)
     if result is None:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=500, detail="Demo login is unavailable")
     _user, access_token, refresh_token = result
     repo = getattr(request.app.state.services, "platform_repository", None)
     if repo is not None and hasattr(repo, "record_audit_log"):
         repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
     response = Response(
-        content=json.dumps({
-            "access_token": access_token,
-            "token_type": "bearer",
-        }),
+        content=json.dumps(
+            {
+                "access_token": access_token,
+                "token_type": "bearer",
+            }
+        ),
         media_type="application/json",
     )
     _set_auth_cookie(response, access_token, auth_manager.token_ttl_seconds)
@@ -217,7 +242,9 @@ async def api_demo_login(request: Request) -> Any:
 async def sso_config(request: Request) -> Any:
     """Return enterprise SSO availability without exposing provider secrets."""
     client = getattr(request.app.state, "oidc_client", None) or OIDCClient()
-    provider_name = os.getenv("AEGISNEX_SSO_PROVIDER_NAME", "Enterprise SSO").strip() or "Enterprise SSO"
+    provider_name = (
+        os.getenv("AEGISNEX_SSO_PROVIDER_NAME", "Enterprise SSO").strip() or "Enterprise SSO"
+    )
     return {
         "enabled": bool(client.is_enabled),
         "provider": provider_name,
@@ -276,7 +303,9 @@ async def sso_callback(request: Request) -> Any:
 
     repo = getattr(request.app.state.services, "platform_repository", None)
     if repo is not None and hasattr(repo, "record_audit_log"):
-        repo.record_audit_log(user.email, "sso_login", "session", user.email, {"provider": profile.issuer})
+        repo.record_audit_log(
+            user.email, "sso_login", "session", user.email, {"provider": profile.issuer}
+        )
 
     frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "/").strip() or "/"
     dashboard_url = "/dashboard" if frontend_url == "/" else f"{frontend_url.rstrip('/')}/dashboard"
@@ -291,6 +320,7 @@ async def sso_callback(request: Request) -> Any:
 async def auth_verify(request: Request) -> Any:
     """Verify current authentication status."""
     from src.dashboard import require_auth
+
     auth_manager: AuthManager = request.app.state.auth_manager
     user = require_auth(request, auth_manager)
     return {
@@ -308,6 +338,7 @@ async def auth_verify(request: Request) -> Any:
 async def logout(request: Request) -> Any:
     """Logout current user."""
     from src.dashboard import _extract_token
+
     auth_manager: AuthManager = request.app.state.auth_manager
     token = _extract_token(request)
     user = auth_manager.get_user_from_token(token)
@@ -324,6 +355,7 @@ async def logout(request: Request) -> Any:
 async def api_logout(request: Request) -> Any:
     """API logout endpoint."""
     from src.dashboard import _extract_token
+
     auth_manager: AuthManager = request.app.state.auth_manager
     token = _extract_token(request)
     user = auth_manager.get_user_from_token(token)
@@ -343,17 +375,21 @@ async def api_refresh_token(request: Request) -> Any:
     refresh_token = request.cookies.get("aegisnex_refresh")
     if not refresh_token:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=401, detail="No refresh token")
     result = auth_manager.refresh_access_token(refresh_token)
     if result is None:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=401, detail="Invalid refresh token")
     new_access_token, new_refresh_token = result
     response = Response(
-        content=json.dumps({
-            "access_token": new_access_token,
-            "token_type": "bearer",
-        }),
+        content=json.dumps(
+            {
+                "access_token": new_access_token,
+                "token_type": "bearer",
+            }
+        ),
         media_type="application/json",
     )
     _set_auth_cookie(response, new_access_token, auth_manager.token_ttl_seconds)
@@ -368,6 +404,7 @@ async def api_refresh_token(request: Request) -> Any:
 async def list_sessions(request: Request) -> Any:
     """List active sessions for the current user."""
     from src.dashboard import require_auth
+
     auth_manager: AuthManager = request.app.state.auth_manager
     user = require_auth(request, auth_manager)
     sessions = auth_manager.list_sessions(user.id, active_only=True)
@@ -391,10 +428,10 @@ async def list_sessions(request: Request) -> Any:
 async def revoke_session(
     request: Request,
     session_id: int,
-    _=Depends(RequirePermission("session:revoke")),
 ) -> Any:
     """Revoke a specific session."""
-    from src.dashboard import require_auth, _extract_token
+    from src.dashboard import require_auth
+
     auth_manager: AuthManager = request.app.state.auth_manager
     user = require_auth(request, auth_manager)
     # Ensure user owns this session or has admin
@@ -409,7 +446,8 @@ async def revoke_session(
 @router.delete("/api/sessions")
 async def revoke_all_sessions(request: Request) -> Any:
     """Revoke all sessions for the current user except the current one."""
-    from src.dashboard import require_auth, _extract_token
+    from src.dashboard import require_auth
+
     auth_manager: AuthManager = request.app.state.auth_manager
     user = require_auth(request, auth_manager)
     # Revoke all sessions

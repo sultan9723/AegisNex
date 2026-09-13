@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import time
 from typing import Any
 
@@ -28,17 +30,16 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
         method = request.method
 
         # Skip health-check noise
-        if path.startswith("/api/health") or path.startswith("/ws"):
+        if path.startswith(("/api/health", "/ws")):
             return response
 
-        try:
-            self._collector.record_api_latency(
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                self._collector.record_api_latency,
                 method=method,
                 path=path,
                 status_code=response.status_code,
                 duration_ms=round(duration_ms, 2),
             )
-        except Exception:
-            pass
 
         return response

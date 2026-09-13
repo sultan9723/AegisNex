@@ -11,10 +11,11 @@ from typing import Any
 
 
 def is_otel_enabled() -> bool:
-    return (
-        os.getenv("AEGISNEX_OTEL_ENABLED", "").strip().lower() in ("true", "1", "yes")
-        or os.getenv("OTEL_ENABLED", "").strip().lower() in ("true", "1", "yes")
-    )
+    return os.getenv("AEGISNEX_OTEL_ENABLED", "").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+    ) or os.getenv("OTEL_ENABLED", "").strip().lower() in ("true", "1", "yes")
 
 
 def instrument_app(app: Any) -> None:
@@ -27,15 +28,17 @@ def instrument_app(app: Any) -> None:
         return
 
     try:
-        from opentelemetry import trace
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
         from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        from opentelemetry import trace
     except ModuleNotFoundError:
         import logging
+
         logging.getLogger(__name__).warning(
             "OpenTelemetry packages not installed. "
             "Install: opentelemetry-api opentelemetry-sdk "
@@ -48,11 +51,13 @@ def instrument_app(app: Any) -> None:
     endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     service_name = os.getenv("OTEL_SERVICE_NAME", "aegisnex")
 
-    resource = Resource.create({
-        "service.name": service_name,
-        "service.version": "1.0.0",
-        "deployment.environment": os.getenv("AEGISNEX_ENV", "development"),
-    })
+    resource = Resource.create(
+        {
+            "service.name": service_name,
+            "service.version": "1.0.0",
+            "deployment.environment": os.getenv("AEGISNEX_ENV", "development"),
+        }
+    )
 
     provider = TracerProvider(resource=resource)
     exporter = OTLPSpanExporter(endpoint=endpoint)
@@ -64,6 +69,7 @@ def instrument_app(app: Any) -> None:
     RequestsInstrumentor().instrument()
 
     import logging
+
     logging.getLogger(__name__).info(
         "OpenTelemetry instrumentation enabled, exporting to %s", endpoint
     )

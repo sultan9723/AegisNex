@@ -4,34 +4,35 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class BackupManager:
     """Export and import AegisNex configuration, incidents, and knowledge data."""
 
-    EXPORT_TABLES = frozenset({
-        "incidents",
-        "notifications",
-        "remediation_actions",
-        "incident_transitions",
-        "monitoring_targets",
-        "check_results",
-        "metrics_snapshots",
-        "app_settings",
-        "notification_channels",
-        "alert_rules",
-        "api_keys",
-        "policies",
-    })
+    EXPORT_TABLES = frozenset(
+        {
+            "incidents",
+            "notifications",
+            "remediation_actions",
+            "incident_transitions",
+            "monitoring_targets",
+            "check_results",
+            "metrics_snapshots",
+            "app_settings",
+            "notification_channels",
+            "alert_rules",
+            "api_keys",
+            "policies",
+        }
+    )
 
     def __init__(self, repo: Any | None = None) -> None:
         self._repo = repo
@@ -96,18 +97,22 @@ class BackupManager:
         backups: list[dict[str, Any]] = []
         if not self._backup_dir.exists():
             return backups
-        for fpath in sorted(self._backup_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        for fpath in sorted(
+            self._backup_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True
+        ):
             if fpath.suffix == ".zip":
                 manifest = self._read_manifest(fpath)
-                backups.append({
-                    "file_path": str(fpath),
-                    "file_name": fpath.name,
-                    "file_size_bytes": fpath.stat().st_size,
-                    "created_at": manifest.get("created_at", ""),
-                    "label": manifest.get("label", ""),
-                    "tables": manifest.get("tables", {}),
-                    "knowledge_included": manifest.get("knowledge_included", False),
-                })
+                backups.append(
+                    {
+                        "file_path": str(fpath),
+                        "file_name": fpath.name,
+                        "file_size_bytes": fpath.stat().st_size,
+                        "created_at": manifest.get("created_at", ""),
+                        "label": manifest.get("label", ""),
+                        "tables": manifest.get("tables", {}),
+                        "knowledge_included": manifest.get("knowledge_included", False),
+                    }
+                )
         return backups
 
     def _read_manifest(self, path: Path) -> dict[str, Any]:
@@ -142,9 +147,11 @@ class BackupManager:
 
         with zipfile.ZipFile(str(backup_path), "r") as zf:
             if self._repo is not None:
-                table_files = [n for n in zf.namelist() if n.startswith("tables/") and n.endswith(".json")]
+                table_files = [
+                    n for n in zf.namelist() if n.startswith("tables/") and n.endswith(".json")
+                ]
                 for tf in table_files:
-                    table_name = tf[len("tables/"):-len(".json")]
+                    table_name = tf[len("tables/") : -len(".json")]
                     if tables and table_name not in tables:
                         continue
                     try:
@@ -169,7 +176,9 @@ class BackupManager:
 
         return result
 
-    def _restore_table(self, table_name: str, rows: list[dict[str, Any]], actor: str = "system") -> int:
+    def _restore_table(
+        self, table_name: str, rows: list[dict[str, Any]], actor: str = "system"
+    ) -> int:
         """Restore rows into a table using the repository."""
         if not rows or self._repo is None:
             return 0
@@ -183,10 +192,17 @@ class BackupManager:
                     value = row.get("value", "")
                     if key:
                         self._repo.upsert_setting(key, value)
-                elif table_name in ("incidents", "notifications", "remediation_actions",
-                                    "incident_transitions", "monitoring_targets",
-                                    "check_results", "metrics_snapshots",
-                                    "notification_channels", "alert_rules"):
+                elif table_name in (
+                    "incidents",
+                    "notifications",
+                    "remediation_actions",
+                    "incident_transitions",
+                    "monitoring_targets",
+                    "check_results",
+                    "metrics_snapshots",
+                    "notification_channels",
+                    "alert_rules",
+                ):
                     self._restore_generic(table_name, row)
                 count += 1
             except Exception:

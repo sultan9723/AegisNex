@@ -2,7 +2,7 @@ from pathlib import Path
 
 from src.http_monitor import HttpEndpointMonitor
 from src.incidents import IncidentManager
-from src.storage import AegisNexRepository
+from src.platform_db import PlatformRepository
 
 
 class FakeResponse:
@@ -31,7 +31,7 @@ class HeaderAwareClient:
 
 
 def test_http_monitor_records_latency_status_and_availability(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident_manager = IncidentManager(
         tmp_path / "incident_history.json",
         storage_repository=repository,
@@ -50,7 +50,9 @@ def test_http_monitor_records_latency_status_and_availability(tmp_path: Path) ->
     assert result["availability_percent"] == 100.0
     assert result["checks"][0]["status_code"] == 200
     assert result["checks"][0]["latency_ms"] >= 0
-    assert repository.fetch_all("http_checks")[0]["endpoint_name"] == "api"
+    results = repository.fetch_all("check_results")
+    http_results = [r for r in results if r.get("target_type") == "http"]
+    assert http_results[0]["target_name"] == "api"
 
 
 def test_http_monitor_accepts_redirect_range_and_sends_user_agent() -> None:
@@ -70,7 +72,7 @@ def test_http_monitor_accepts_redirect_range_and_sends_user_agent() -> None:
 
 
 def test_http_monitor_generates_and_resolves_incidents(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident_manager = IncidentManager(
         tmp_path / "incident_history.json",
         storage_repository=repository,

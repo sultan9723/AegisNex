@@ -8,8 +8,9 @@ a structured error response.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, Dict, TypeVar
+from typing import Any, TypeVar
 
 _logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def failsafe(
         def get_docker_containers():
             ...
     """
+
     def decorator(fn: F) -> F:
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -41,7 +43,9 @@ def failsafe(
                 if fallback is not None:
                     return fallback
                 return {"status": "error", "error": str(exc), "message": message}
+
         return wrapper  # type: ignore
+
     return decorator
 
 
@@ -59,4 +63,3 @@ def safe_import(module_name: str, attr: str | None = None) -> Any:
 
 class ServiceUnavailable(Exception):
     """Raised when an external service is not reachable."""
-    pass

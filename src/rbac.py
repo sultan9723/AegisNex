@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import functools
 import logging
-from typing import Any, Callable, Sequence
+from typing import Any
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import HTTPException, Request, status
 
 _logger = logging.getLogger(__name__)
 
@@ -69,27 +68,49 @@ ALL_PERMISSIONS = "*"
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "super_admin": {ALL_PERMISSIONS},
     "administrator": {
-        INCIDENT_READ, INCIDENT_WRITE, INCIDENT_ACK, INCIDENT_RESOLVE, INCIDENT_DELETE,
-        MONITORING_READ, MONITORING_WRITE, MONITORING_DELETE,
-        APIKEY_READ, APIKEY_WRITE, APIKEY_DELETE,
-        USER_READ, USER_WRITE, USER_ADMIN,
-        SESSION_READ, SESSION_REVOKE,
-        ORG_READ, ORG_WRITE, ORG_ADMIN,
-        SETTINGS_READ, SETTINGS_WRITE,
+        INCIDENT_READ,
+        INCIDENT_WRITE,
+        INCIDENT_ACK,
+        INCIDENT_RESOLVE,
+        INCIDENT_DELETE,
+        MONITORING_READ,
+        MONITORING_WRITE,
+        MONITORING_DELETE,
+        APIKEY_READ,
+        APIKEY_WRITE,
+        APIKEY_DELETE,
+        USER_READ,
+        USER_WRITE,
+        USER_ADMIN,
+        SESSION_READ,
+        SESSION_REVOKE,
+        ORG_READ,
+        ORG_WRITE,
+        ORG_ADMIN,
+        SETTINGS_READ,
+        SETTINGS_WRITE,
         AUDIT_READ,
-        AI_CHAT, AI_PLAN, AI_EXECUTE,
-        NOTIFICATION_READ, NOTIFICATION_WRITE,
+        AI_CHAT,
+        AI_PLAN,
+        AI_EXECUTE,
+        NOTIFICATION_READ,
+        NOTIFICATION_WRITE,
     },
     "soc_analyst": {
-        INCIDENT_READ, INCIDENT_WRITE, INCIDENT_ACK, INCIDENT_RESOLVE,
+        INCIDENT_READ,
+        INCIDENT_WRITE,
+        INCIDENT_ACK,
+        INCIDENT_RESOLVE,
         MONITORING_READ,
         USER_READ,
         SESSION_READ,
-        AI_CHAT, AI_PLAN,
+        AI_CHAT,
+        AI_PLAN,
         NOTIFICATION_READ,
     },
     "operator": {
-        INCIDENT_READ, INCIDENT_ACK,
+        INCIDENT_READ,
+        INCIDENT_ACK,
         MONITORING_READ,
         AI_CHAT,
         NOTIFICATION_READ,
@@ -183,7 +204,9 @@ class RequirePermission:
     async def __call__(self, request: Request) -> None:
         user = getattr(request.state, "user", None)
         if user is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+            )
         role = getattr(user, "role", "")
         if not has_permission(role, self.permission):
             raise HTTPException(
@@ -207,13 +230,17 @@ class RequireRole:
 
     def __init__(self, min_role: str) -> None:
         from src.auth import Role
+
         self.min_level = Role.from_str(min_role).level()
 
     async def __call__(self, request: Request) -> None:
         user = getattr(request.state, "user", None)
         if user is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+            )
         from src.auth import Role
+
         user_role = getattr(user, "role", "")
         if Role.from_str(user_role).level() < self.min_level:
             raise HTTPException(
