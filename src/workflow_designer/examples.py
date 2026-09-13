@@ -22,7 +22,7 @@ def _node(
     node_id: str,
     node_type: WorkflowNodeType,
     label: str,
-    config: dict[str, Any] = None,
+    config: dict[str, Any] | None = None,
     pos_x: float = 0.0,
     pos_y: float = 0.0,
 ) -> WorkflowNode:

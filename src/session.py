@@ -6,14 +6,14 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from src.platform_db import PlatformRepository
 
 
 def _utc_ts() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _epoch_ts(dt_str: str | None = None) -> int:
@@ -134,17 +134,28 @@ class SessionStore:
                 VALUES ({p},{p},{p},{p},{p},{p},{p},{p},{p},{p})
             """,
             (
-                user_id, family_id, refresh_jti, expires_at, now,
-                now, ip_address, user_agent, 1,
+                user_id,
+                family_id,
+                refresh_jti,
+                expires_at,
+                now,
+                now,
+                ip_address,
+                user_agent,
+                1,
                 json.dumps(metadata or {}, sort_keys=True),
             ),
         )
-        rows = self._repo._fetch_all(
-            f"SELECT * FROM sessions WHERE id = {p}",
-            (new_id,),
-        ) if new_id else self._repo._fetch_all(
-            f"SELECT * FROM sessions WHERE refresh_jti = {p}",
-            (refresh_jti,),
+        rows = (
+            self._repo._fetch_all(
+                f"SELECT * FROM sessions WHERE id = {p}",
+                (new_id,),
+            )
+            if new_id
+            else self._repo._fetch_all(
+                f"SELECT * FROM sessions WHERE refresh_jti = {p}",
+                (refresh_jti,),
+            )
         )
         if not rows:
             raise RuntimeError("Failed to create session")

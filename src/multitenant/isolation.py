@@ -32,7 +32,7 @@ class TenantAwareQuery:
             sql = sql[:idx] + clause + sql[idx:]
         else:
             sql = f"{sql} AND {filter_clause}" if "WHERE" in sql else f"{sql} WHERE {filter_clause}"
-        return sql, params + (self.org_id,)
+        return sql, (*params, self.org_id)
 
 
 def isolate_query(query: str, org_id: int, table_column: str = "org_id") -> tuple[str, tuple]:

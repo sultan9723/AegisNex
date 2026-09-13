@@ -84,7 +84,7 @@ class ObservabilityTracker:
 
     def get_latency_stats(self, key: str | None = None) -> dict[str, Any]:
         buckets = (
-            {k: v for k, v in self._latency_buckets.items()}
+            dict(self._latency_buckets.items())
             if key is None
             else {key: self._latency_buckets.get(key, [])}
         )

@@ -6,8 +6,9 @@ import json
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 
@@ -20,6 +21,7 @@ _logger = logging.getLogger(__name__)
 # ======================================================================
 # In-memory rate-limiter (per-key sliding window)
 # ======================================================================
+
 
 class KeyRateLimiter:
     """Simple in-memory sliding-window rate limiter keyed by API key prefix."""
@@ -58,6 +60,7 @@ _rate_limiter = KeyRateLimiter()
 # API Key authenticator
 # ======================================================================
 
+
 def authenticate_api_key(
     request: Request,
     repo: PlatformRepository,
@@ -86,7 +89,7 @@ def authenticate_api_key(
     if expires_at:
         try:
             exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            if exp < datetime.now(timezone.utc):
+            if exp < datetime.now(UTC):
                 return None
         except (ValueError, TypeError):
             pass
@@ -147,7 +150,9 @@ def enforce_api_key_ip_restriction(request: Request, key_record: dict[str, Any])
         return
 
     try:
-        allowed_ips = json.loads(allowed_ips_raw) if isinstance(allowed_ips_raw, str) else allowed_ips_raw
+        allowed_ips = (
+            json.loads(allowed_ips_raw) if isinstance(allowed_ips_raw, str) else allowed_ips_raw
+        )
     except (json.JSONDecodeError, TypeError):
         return
 
@@ -169,6 +174,8 @@ def enforce_api_key_ip_restriction(request: Request, key_record: dict[str, Any])
 # ======================================================================
 # FastAPI middleware to detect API key auth
 # ======================================================================
+
+import contextlib
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
@@ -212,16 +219,13 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                         )
 
                     # Record usage
-                    try:
+                    with contextlib.suppress(Exception):
                         repo.record_api_key_usage(key_record["id"])
-                    except Exception:
-                        pass
 
                     # Set on request state
                     request.state.api_key = key_record
 
-        response = await call_next(request)
-        return response
+        return await call_next(request)
 
     def _get_repo(self, request: Request) -> PlatformRepository | None:
         if self._repo_factory:

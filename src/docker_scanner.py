@@ -15,10 +15,7 @@ class ScanContainer(dict):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, dict):
-            for key, value in other.items():
-                if self.get(key) != value:
-                    return False
-            return True
+            return all(self.get(key) == value for key, value in other.items())
         return super().__eq__(other)
 
 

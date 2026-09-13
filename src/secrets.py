@@ -40,7 +40,7 @@ class SecretManager:
                 "AEGISNEX_SECRET_KEY must decode to exactly 32 bytes (a valid Fernet key). "
                 "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             )
-        return base64.urlsafe_b64encode(key_bytes)
+            return base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
 
     def _get_fernet(self) -> Fernet:
         if self._fernet is None:

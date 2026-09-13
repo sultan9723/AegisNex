@@ -67,7 +67,10 @@ class UserCreateRequest(BaseModel):
 
     email: str = Field(..., description="User email address")
     password: str = Field(..., min_length=8, max_length=128)
-    role: str = Field(default="read_only", pattern=r"^(super_admin|administrator|soc_analyst|operator|read_only|auditor)$")
+    role: str = Field(
+        default="read_only",
+        pattern=r"^(super_admin|administrator|soc_analyst|operator|read_only|auditor)$",
+    )
 
     @field_validator("email")
     @classmethod

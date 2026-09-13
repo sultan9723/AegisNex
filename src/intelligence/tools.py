@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from src.platform_db import PlatformRepository
@@ -21,7 +21,7 @@ def utc_now() -> str:
 ToolFn = Callable[..., dict[str, Any]]
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     NONE = "none"
     LOW = "low"
     MEDIUM = "medium"
@@ -29,12 +29,12 @@ class RiskLevel(str, Enum):
     CRITICAL = "critical"
 
 
-class AccessMode(str, Enum):
+class AccessMode(StrEnum):
     READ = "read"
     WRITE = "write"
 
 
-class PermissionLevel(str, Enum):
+class PermissionLevel(StrEnum):
     VIEWER = "viewer"
     OPERATOR = "operator"
     ADMIN = "admin"
@@ -546,7 +546,7 @@ def get_tool(name: str) -> Tool | None:
 
 def list_tools(category: str | None = None) -> list[dict[str, Any]]:
     tools = []
-    for name, tool in TOOL_REGISTRY.items():
+    for _name, tool in TOOL_REGISTRY.items():
         if category and tool.category != category:
             continue
         tools.append(tool.to_dict())

@@ -10,6 +10,7 @@ AegisNex. It answers the questions every organization deploying AI must answer:
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
@@ -19,7 +20,7 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -31,14 +32,14 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class AgentStatus(str, Enum):
+class AgentStatus(StrEnum):
     ACTIVE = "active"
     INACTIVE = "inactive"
     SUSPENDED = "suspended"
     DECOMMISSIONED = "decommissioned"
 
 
-class RiskLevel(str, Enum):
+class RiskLevel(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -46,20 +47,20 @@ class RiskLevel(str, Enum):
     UNKNOWN = "unknown"
 
 
-class PolicyEffect(str, Enum):
+class PolicyEffect(StrEnum):
     ALLOW = "allow"
     DENY = "deny"
     APPROVE = "approve"
 
 
-class AnomalyStatus(str, Enum):
+class AnomalyStatus(StrEnum):
     OPEN = "open"
     INVESTIGATING = "investigating"
     RESOLVED = "resolved"
     FALSE_POSITIVE = "false_positive"
 
 
-class ActionVerdict(str, Enum):
+class ActionVerdict(StrEnum):
     ALLOWED = "allowed"
     DENIED = "denied"
     PENDING_APPROVAL = "pending_approval"
@@ -231,10 +232,8 @@ class GovernanceManager:
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self.database_path), timeout=10)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -700,7 +699,7 @@ class GovernanceManager:
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         fields["updated_at"] = now
         set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [self._tenant(tenant_id), agent_id]
+        values = [*list(fields.values()), self._tenant(tenant_id), agent_id]
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE ai_agents SET {set_clause} WHERE tenant_id = ? AND agent_id = ?",
@@ -966,7 +965,7 @@ class GovernanceManager:
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM agent_actions {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                params + [limit, offset],
+                [*params, limit, offset],
             ).fetchall()
         return [self._row_to_action(r) for r in rows]
 
@@ -1166,7 +1165,7 @@ class GovernanceManager:
         if "enabled" in fields:
             fields["enabled"] = int(fields["enabled"])
         set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [self._tenant(tenant_id), name]
+        values = [*list(fields.values()), self._tenant(tenant_id), name]
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE agent_policies SET {set_clause} WHERE tenant_id = ? AND name = ?",
@@ -1408,7 +1407,7 @@ class GovernanceManager:
         with self._connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM agent_anomalies {where} ORDER BY detected_at DESC LIMIT ?",
-                params + [limit],
+                [*params, limit],
             ).fetchall()
         return [self._row_to_anomaly(r) for r in rows]
 

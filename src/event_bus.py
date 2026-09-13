@@ -12,14 +12,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 _logger = logging.getLogger(__name__)
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     CONTAINER_DOWN = "container_down"
     CONTAINER_STOPPED = "container_stopped"
     CONTAINER_RESTARTED = "container_restarted"

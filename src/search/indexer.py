@@ -9,6 +9,8 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
+import contextlib
+
 from src.platform_db import PlatformRepository
 
 _SEARCH_DB_PATH: str = ""
@@ -24,18 +26,12 @@ def _get_conn() -> sqlite3.Connection:
     _logger.debug("Search indexer opening connection to %s", path)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("PRAGMA journal_mode=WAL")
-    except sqlite3.OperationalError:
-        pass
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("PRAGMA busy_timeout=30000")
-    except sqlite3.OperationalError:
-        pass
-    try:
+    with contextlib.suppress(sqlite3.OperationalError):
         conn.execute("PRAGMA synchronous=OFF")
-    except sqlite3.OperationalError:
-        pass
     return conn
 
 
@@ -370,8 +366,7 @@ class SearchIndexer:
             conn = _get_conn()
             try:
                 _ensure_fts(conn)
-                count = self._index_domain_raw(domain, conn)
-                return count
+                return self._index_domain_raw(domain, conn)
             finally:
                 conn.close()
 

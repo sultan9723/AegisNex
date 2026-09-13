@@ -78,7 +78,7 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
     monitor_logger = build_logger("agentx.monitor", handler)
     docker_logger = build_logger("agentx.docker", handler)
     health_logger = build_logger("agentx.health", handler)
-    notifier_logger = build_logger("agentx.notifier", handler)
+    build_logger("agentx.notifier", handler)
     guardian_logger = build_logger("agentx.guardian", handler)
 
     agent = AgentX(logger=agent_logger)

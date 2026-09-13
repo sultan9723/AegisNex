@@ -417,7 +417,7 @@ class RetrospectiveLoader(DocumentLoader):
         severity_val = ""
         service_val = ""
         date_val = ""
-        for section_name, section_content in parsed["sections"].items():
+        for _section_name, section_content in parsed["sections"].items():
             for meta_key, aliases in self._VALUE_EXTRACTORS.items():
                 if meta_key == "incident_id" and not incident_id:
                     incident_id = self._extract_value(section_content, aliases)

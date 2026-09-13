@@ -108,7 +108,7 @@ class CollaborativeDomainAgent(BaseAgent):
             return {"status": "skipped", "detail": "No tools executed"}
         if "health" in tool_results:
             result = tool_results["health"]
-            healthy = not result.get("status") == "error" and result.get("cpu_percent") is not None
+            healthy = result.get("status") != "error" and result.get("cpu_percent") is not None
             return {
                 "signal": "system_health",
                 "value": "healthy" if healthy else "degraded",

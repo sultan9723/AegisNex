@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -18,17 +19,12 @@ from urllib.parse import parse_qs
 
 _logger = logging.getLogger(__name__)
 
+import contextlib
+
 import jwt as pyjwt
 
 from src.enterprise_auth import is_production_environment
 from src.session import SessionStore
-
-try:
-    import hashlib as _hashlib
-    import secrets as _secrets
-    _HAVE_HASH = True
-except ImportError:
-    _HAVE_HASH = False
 
 
 def generate_api_key() -> tuple[str, str, str]:
@@ -153,10 +149,8 @@ class TokenBlacklist:
         _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -176,7 +170,9 @@ class TokenBlacklist:
                 with self._connect() as connection:
                     now = int(datetime.now(UTC).timestamp())
                     try:
-                        connection.execute("DELETE FROM token_blacklist WHERE expires_at < ?", (now,))
+                        connection.execute(
+                            "DELETE FROM token_blacklist WHERE expires_at < ?", (now,)
+                        )
                     except sqlite3.OperationalError as exc:
                         _logger.warning("Token blacklist cleanup skipped: %s", exc)
                     rows = connection.execute(
@@ -188,7 +184,7 @@ class TokenBlacklist:
                 last_error = exc
                 if "locked" not in str(exc).lower() or attempt == 2:
                     break
-                time.sleep(0.25 * (2 ** attempt))
+                time.sleep(0.25 * (2**attempt))
         _logger.warning("Token blacklist unavailable during startup: %s", last_error)
         self._cache = set()
 
@@ -226,10 +222,8 @@ class UserStore:
         _logger.debug("UserStore opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -267,7 +261,9 @@ class UserStore:
             if "last_login" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
             if "mfa_enabled" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS external_identities (
@@ -780,7 +776,9 @@ class AuthManager:
             )
             new_jti = new_payload.get("jti", "")
             new_exp = new_payload.get("exp", 0)
-            new_expires_at = datetime.fromtimestamp(new_exp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            new_expires_at = (
+                datetime.fromtimestamp(new_exp, tz=UTC).isoformat().replace("+00:00", "Z")
+            )
             self.session_store.rotate_refresh_token(jti, new_jti, new_expires_at)
 
         return new_access, new_refresh

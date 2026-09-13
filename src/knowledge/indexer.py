@@ -105,7 +105,7 @@ class KnowledgeIndexer:
             except (json.JSONDecodeError, TypeError):
                 h = []
                 m = {}
-            doc = self._store.get_knowledge_doc_by_source(m.get("source", ""))
+            self._store.get_knowledge_doc_by_source(m.get("source", ""))
             entries.append(
                 {
                     "id": entry.get("id"),

@@ -7,8 +7,16 @@ import json
 import os
 import platform
 import re
+import secrets
+import sys
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -16,7 +24,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.responses import RedirectResponse as StarletteRedirect
 
-from src.auth import AuthManager, User, Role, AuthError, parse_form_body
+from src.auth import AuthError, AuthManager, Role, User, parse_form_body
+from src.config import Config
+from src.docker_scanner import DockerScanner
 from src.enterprise_auth import (
     OIDCClient,
     OIDCConfigurationError,
@@ -30,7 +40,8 @@ from src.enterprise_auth import (
     sso_role_for_email,
     tenant_membership_required,
 )
-from src.platform_db import PlatformRepository, load_database_settings
+from src.guardian import Guardian
+from src.incidents import Incident, IncidentManager
 from src.logging_config import configure_logging, get_logger
 from src.monitor import SystemResourceMonitor
 from src.platform_db import PlatformRepository, load_database_settings
@@ -83,13 +94,11 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-        if environment not in {"development", "dev", "local", "test"}:
-            if (
-                request.url.scheme != "https"
-                and request.headers.get("x-forwarded-proto") != "https"
-            ):
-                url = request.url.replace(scheme="https")
-                return StarletteRedirect(url=url, status_code=301)
+        if environment not in {"development", "dev", "local", "test"} and (
+            request.url.scheme != "https" and request.headers.get("x-forwarded-proto") != "https"
+        ):
+            url = request.url.replace(scheme="https")
+            return StarletteRedirect(url=url, status_code=301)
         return await call_next(request)
 
 
@@ -216,6 +225,7 @@ def enforce_tenant_membership(request: FastAPIRequest, user: User) -> None:
         tenants = []
     if not tenants:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=403, detail="User is not assigned to an organization")
 
 
@@ -227,7 +237,10 @@ def require_api_scope(request: FastAPIRequest, *required_scopes: str) -> None:
         return
     if not any(scope in scopes for scope in required_scopes):
         from fastapi import HTTPException
-        raise HTTPException(status_code=403, detail=f"API key scope required: {', '.join(required_scopes)}")
+
+        raise HTTPException(
+            status_code=403, detail=f"API key scope required: {', '.join(required_scopes)}"
+        )
 
 
 def _extract_token(request: FastAPIRequest) -> str | None:
@@ -294,15 +307,13 @@ def _authenticate_api_key(request: FastAPIRequest, auth_manager: AuthManager) ->
     if expires_at:
         try:
             parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-            if parsed_expiry <= datetime.now(timezone.utc):
+            if parsed_expiry <= datetime.now(UTC):
                 return None
         except ValueError:
             return None
     key_id = int(key_record["id"])
-    try:
+    with suppress(Exception):
         repo.record_api_key_usage(key_id)
-    except Exception:
-        pass
     raw_scopes = key_record.get("scopes") or '["*"]'
     try:
         parsed_scopes = json.loads(raw_scopes) if isinstance(raw_scopes, str) else raw_scopes
@@ -1804,7 +1815,7 @@ async def incident_broadcast_task(app: Any, event_type: str, payload: dict[str, 
 
 
 def create_app(
-    services: Optional[DashboardServices] = None,
+    services: DashboardServices | None = None,
     auth_manager: AuthManager | None = None,
     telemetry_db_path: str | None = None,
 ) -> Any:
@@ -1852,7 +1863,13 @@ def create_app(
         from src.ai_governance import GovernanceManager
         from src.governance_seed import seed_governance
 
-        governance = GovernanceManager(database_path=_auth_db)
+        governance = GovernanceManager(
+            database_path=(
+                fastapi_app.state.services.platform_repository.database_path
+                if getattr(fastapi_app.state.services, "platform_repository", None) is not None
+                else "aegisnex.db"
+            )
+        )
         fastapi_app.state.governance = governance
         try:
             seed_counts = seed_governance(governance)
@@ -1881,21 +1898,23 @@ def create_app(
                 t = getattr(fastapi_app.state, task_name, None)
                 if t is not None:
                     t.cancel()
-                    try:
+                    with suppress(asyncio.CancelledError):
                         await t
-                    except asyncio.CancelledError:
-                        pass
 
     app = FastAPI(title="AegisNex Dashboard", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=get_cors_origins(), allow_credentials=True, allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"], allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=get_cors_origins(),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+        allow_headers=["Authorization", "Content-Type", "Accept", "X-CSRF-Token"],
+    )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(TLSRedirectMiddleware)
     from src.telemetry.collector import TelemetryCollector
     from src.telemetry.middleware import TelemetryMiddleware
-    if not telemetry_db_path:
-        data_dir = os.getenv("AEGISNEX_DATA_DIR", "").strip()
-        telemetry_db_path = str(Path(data_dir) / "telemetry.db") if data_dir else "telemetry.db"
-    telemetry_collector = TelemetryCollector(telemetry_db_path)
+
+    telemetry_collector = TelemetryCollector(telemetry_db_path or "telemetry.db")
     app.add_middleware(TelemetryMiddleware, collector=telemetry_collector)
     app.add_middleware(AuthModeMiddleware)
     app.state.limiter = limiter
@@ -1912,7 +1931,11 @@ def create_app(
     app.state.services = services or create_services()
     app.state.auth_manager = auth_manager or AuthManager()
     app.state.oidc_client = OIDCClient()
-    if is_production_environment() and not app.state.oidc_client.is_enabled and not local_auth_enabled():
+    if (
+        is_production_environment()
+        and not app.state.oidc_client.is_enabled
+        and not local_auth_enabled()
+    ):
         raise RuntimeError(
             "Production auth is not configured. Configure OIDC SSO or set "
             "AEGISNEX_LOCAL_AUTH_ENABLED=true for a controlled fallback."
@@ -1950,6 +1973,7 @@ def create_app(
     # Include modular routers
     from src.routers.auth import router as auth_router
     from src.routers.monitoring import router as monitoring_router
+
     app.include_router(auth_router)
     app.include_router(monitoring_router)
 
@@ -1978,7 +2002,7 @@ def create_app(
         user = current_user(request)
         return getattr(user, "email", None) or "anonymous"
 
-    def user_tenant_rows(user: User) -> list[Dict[str, Any]]:
+    def user_tenant_rows(user: User) -> list[dict[str, Any]]:
         tenant_manager = getattr(app.state, "tenant_manager", None)
         if tenant_manager is None or user.id <= 0:
             return []
@@ -2002,7 +2026,9 @@ def create_app(
                 return None
         return None
 
-    def require_workforce_agent_access(request: FastAPIRequest, agent: Any, user: User, write: bool = False) -> None:
+    def require_workforce_agent_access(
+        request: FastAPIRequest, agent: Any, user: User, write: bool = False
+    ) -> None:
         from fastapi import HTTPException
 
         if user.is_superuser or user.role == "super_admin":
@@ -2010,11 +2036,15 @@ def create_app(
         org_id = getattr(agent, "org_id", None)
         if org_id is None:
             if write:
-                raise HTTPException(status_code=403, detail="Unassigned workforce agent requires administrator")
+                raise HTTPException(
+                    status_code=403, detail="Unassigned workforce agent requires administrator"
+                )
             return
         allowed_org = request_org_id(request, user)
         if allowed_org != int(org_id):
-            raise HTTPException(status_code=403, detail="Workforce agent is outside your organization")
+            raise HTTPException(
+                status_code=403, detail="Workforce agent is outside your organization"
+            )
 
     def maybe_assign_sso_org(user: User) -> None:
         if user.is_superuser or not sso_auto_create_orgs_enabled():
@@ -2036,7 +2066,9 @@ def create_app(
         api_key_org_id = getattr(request.state, "api_key_org_id", None)
         if api_key_org_id not in (None, ""):
             if int(api_key_org_id) != int(org_id):
-                raise HTTPException(status_code=403, detail="API key is not scoped to this organization")
+                raise HTTPException(
+                    status_code=403, detail="API key is not scoped to this organization"
+                )
             return
         user = require_auth(request, app.state.auth_manager)
         if user.is_superuser or user.role == "super_admin":
@@ -2048,10 +2080,8 @@ def create_app(
     def run_monitoring_once() -> None:
         engine = getattr(app.state.services, "monitoring_engine", None)
         if engine is not None:
-            try:
+            with suppress(Exception):
                 engine.run_once()
-            except Exception:
-                pass
 
     def render_report_response(report_type: str, report_format: str) -> Any:
         from src.reporting import OperationalReporter
@@ -2258,6 +2288,7 @@ def create_app(
 
         # Create session record
         import jwt as pyjwt
+
         try:
             refresh_payload = pyjwt.decode(
                 refresh_token,
@@ -2268,8 +2299,11 @@ def create_app(
             refresh_jti = refresh_payload.get("jti", "")
             if refresh_jti:
                 exp_ts = refresh_payload.get("exp", 0)
-                from datetime import datetime, timezone
-                expires_at = datetime.fromtimestamp(exp_ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                from datetime import datetime
+
+                expires_at = (
+                    datetime.fromtimestamp(exp_ts, tz=UTC).isoformat().replace("+00:00", "Z")
+                )
                 ip = request.client.host if request.client else ""
                 ua = request.headers.get("User-Agent", "")
                 app.state.auth_manager.create_session_for_user(
@@ -2308,9 +2342,9 @@ def create_app(
         username = os.getenv("AEGISNEX_DEMO_USERNAME", "demo")
         password = os.getenv("AEGISNEX_DEMO_PASSWORD")
         if not password:
-            raise HTTPException(status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD.")
-        # Demo login always resolves to a dedicated, restricted read_only
-        # account - never the real admin - regardless of AEGISNEX_DEMO_USERNAME.
+            raise HTTPException(
+                status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD."
+            )
         result = app.state.auth_manager.login(username, password)
         if result is None:
             try:
@@ -2320,7 +2354,7 @@ def create_app(
             result = app.state.auth_manager.login(username, password)
         if result is None:
             raise HTTPException(status_code=500, detail="Demo login is unavailable")
-        user, access_token, refresh_token = result
+        _user, access_token, refresh_token = result
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
@@ -2353,7 +2387,9 @@ def create_app(
     @app.get("/api/auth/sso/config")
     async def sso_config(request: FastAPIRequest) -> Any:
         client: OIDCClient = request.app.state.oidc_client
-        provider_name = os.getenv("AEGISNEX_SSO_PROVIDER_NAME", "Enterprise SSO").strip() or "Enterprise SSO"
+        provider_name = (
+            os.getenv("AEGISNEX_SSO_PROVIDER_NAME", "Enterprise SSO").strip() or "Enterprise SSO"
+        )
         return {
             "enabled": bool(client.is_enabled),
             "provider": provider_name,
@@ -2408,11 +2444,16 @@ def create_app(
 
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and hasattr(repo, "record_audit_log"):
-            repo.record_audit_log(user.email, "sso_login", "session", user.email, {"provider": profile.issuer})
-        response = RedirectResponse(url=frontend_redirect_url("/dashboard"), status_code=302)
+            repo.record_audit_log(
+                user.email, "sso_login", "session", user.email, {"provider": profile.issuer}
+            )
+        frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "/").strip() or "/"
+        response = RedirectResponse(url=f"{frontend_url.rstrip('/')}/dashboard", status_code=302)
         _clear_auth_cookies(response)
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
-        _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
+        _set_refresh_cookie(
+            response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds
+        )
         return response
 
     @app.get("/api/auth/verify")
@@ -2491,6 +2532,7 @@ def create_app(
     @app.delete("/api/sessions/{session_id}")
     async def revoke_session(request: FastAPIRequest, session_id: int) -> Any:
         from src.rbac import has_permission
+
         auth_manager = request.app.state.auth_manager
         user = require_auth(request, auth_manager)
         sessions = auth_manager.list_sessions(user.id, active_only=False)
@@ -3039,14 +3081,12 @@ def create_app(
         result = repo.assign_incident_org(incident_id, org_id, org_name, actor=user.email)
         if result is None:
             return Response(content="Incident not found", status_code=404)
-        try:
+        with suppress(KeyError):
             request.app.state.services.incident_manager.update_incident(
                 incident_id,
                 org_id=org_id,
                 org_name=org_name,
             )
-        except KeyError:
-            pass
         return result
 
     @app.post("/api/incidents/{incident_id}/explain")
@@ -3805,8 +3845,15 @@ def create_app(
     def api_container_start(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         import uuid
+
         mc_id = f"mc-docker-start-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Start container: {name}", "docker_action", audit_links={"action": "container_start", "container": name})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Start container: {name}",
+            "docker_action",
+            audit_links={"action": "container_start", "container": name},
+        )
         if mc_exec is not None:
             _mc_complete_stage(mc_exec, "docker", status="running")
         start_ts = time.time()
@@ -3815,22 +3862,49 @@ def create_app(
         duration = (time.time() - start_ts) * 1000
         if result.get("status") == "error":
             if mc_exec is not None:
-                _finish_mc_execution(mc_exec, status="failed", error=result.get("message", "start failed"), total_latency_ms=duration)
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+                _finish_mc_execution(
+                    mc_exec,
+                    status="failed",
+                    error=result.get("message", "start failed"),
+                    total_latency_ms=duration,
+                )
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_start", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_start", "container", name, {}
+            )
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "docker", status="completed", latency_ms=duration, summary=f"Container {name} started")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=f"Container {name} started successfully", total_latency_ms=duration)
+            _mc_complete_stage(
+                mc_exec,
+                "docker",
+                status="completed",
+                latency_ms=duration,
+                summary=f"Container {name} started",
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=f"Container {name} started successfully",
+                total_latency_ms=duration,
+            )
         return result
 
     @app.post("/api/containers/{name}/stop")
     def api_container_stop(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         import uuid
+
         mc_id = f"mc-docker-stop-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Stop container: {name}", "docker_action", audit_links={"action": "container_stop", "container": name})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Stop container: {name}",
+            "docker_action",
+            audit_links={"action": "container_stop", "container": name},
+        )
         if mc_exec is not None:
             _mc_complete_stage(mc_exec, "docker", status="running")
         start_ts = time.time()
@@ -3839,22 +3913,49 @@ def create_app(
         duration = (time.time() - start_ts) * 1000
         if result.get("status") == "error":
             if mc_exec is not None:
-                _finish_mc_execution(mc_exec, status="failed", error=result.get("message", "stop failed"), total_latency_ms=duration)
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+                _finish_mc_execution(
+                    mc_exec,
+                    status="failed",
+                    error=result.get("message", "stop failed"),
+                    total_latency_ms=duration,
+                )
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_stop", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_stop", "container", name, {}
+            )
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "docker", status="completed", latency_ms=duration, summary=f"Container {name} stopped")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=f"Container {name} stopped successfully", total_latency_ms=duration)
+            _mc_complete_stage(
+                mc_exec,
+                "docker",
+                status="completed",
+                latency_ms=duration,
+                summary=f"Container {name} stopped",
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=f"Container {name} stopped successfully",
+                total_latency_ms=duration,
+            )
         return result
 
     @app.post("/api/containers/{name}/restart")
     def api_container_restart(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         import uuid
+
         mc_id = f"mc-docker-restart-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Restart container: {name}", "docker_action", audit_links={"action": "container_restart", "container": name})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Restart container: {name}",
+            "docker_action",
+            audit_links={"action": "container_restart", "container": name},
+        )
         if mc_exec is not None:
             _mc_complete_stage(mc_exec, "docker", status="running")
         start_ts = time.time()
@@ -3863,14 +3964,34 @@ def create_app(
         duration = (time.time() - start_ts) * 1000
         if result.get("status") == "error":
             if mc_exec is not None:
-                _finish_mc_execution(mc_exec, status="failed", error=result.get("message", "restart failed"), total_latency_ms=duration)
-            return Response(content=json.dumps(result), status_code=404, media_type="application/json")
+                _finish_mc_execution(
+                    mc_exec,
+                    status="failed",
+                    error=result.get("message", "restart failed"),
+                    total_latency_ms=duration,
+                )
+            return Response(
+                content=json.dumps(result), status_code=404, media_type="application/json"
+            )
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "container_restart", "container", name, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "container_restart", "container", name, {}
+            )
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "docker", status="completed", latency_ms=duration, summary=f"Container {name} restarted")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=f"Container {name} restarted successfully", total_latency_ms=duration)
+            _mc_complete_stage(
+                mc_exec,
+                "docker",
+                status="completed",
+                latency_ms=duration,
+                summary=f"Container {name} restarted",
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=f"Container {name} restarted successfully",
+                total_latency_ms=duration,
+            )
         return result
 
     @app.get("/api/containers/{name}/logs")
@@ -3888,7 +4009,6 @@ def create_app(
     @app.get("/api/containers/{name}/inspect")
     def api_container_inspect(name: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        scanner = app.state.services.docker_scanner
         try:
             import docker
 
@@ -4008,10 +4128,9 @@ def create_app(
             return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            channel = repo.create_notification_channel(
+            return repo.create_notification_channel(
                 payload, actor=user.email if user else "anonymous"
             )
-            return channel
         except ValueError as exc:
             return Response(content=str(exc), status_code=400)
 
@@ -4224,8 +4343,8 @@ def create_app(
         try:
             with store._connect() as conn:
                 conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user_id))
-        except Exception:
-            raise HTTPException(status_code=500, detail="Failed to update user role")
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to update user role") from exc
         app.state.services.platform_repository.record_audit_log(
             user.email, "update_role", "user", str(user_id), {"role": normalized_role}
         )
@@ -4264,20 +4383,22 @@ def create_app(
                 scopes = ["*"]
             if not isinstance(scopes, list):
                 scopes = ["*"]
-            sanitized.append({
-                "id": k.get("id"),
-                "name": k.get("name"),
-                "key_prefix": k.get("key_prefix"),
-                "role": k.get("role", "viewer"),
-                "scopes": scopes,
-                "org_id": k.get("org_id"),
-                "expires_at": k.get("expires_at"),
-                "revoked_at": k.get("revoked_at"),
-                "is_active": bool(k.get("is_active", False)),
-                "created_at": k.get("created_at"),
-                "last_used_at": k.get("last_used_at"),
-                "request_count": k.get("request_count", 0),
-            })
+            sanitized.append(
+                {
+                    "id": k.get("id"),
+                    "name": k.get("name"),
+                    "key_prefix": k.get("key_prefix"),
+                    "role": k.get("role", "viewer"),
+                    "scopes": scopes,
+                    "org_id": k.get("org_id"),
+                    "expires_at": k.get("expires_at"),
+                    "revoked_at": k.get("revoked_at"),
+                    "is_active": bool(k.get("is_active", False)),
+                    "created_at": k.get("created_at"),
+                    "last_used_at": k.get("last_used_at"),
+                    "request_count": k.get("request_count", 0),
+                }
+            )
         return {"keys": sanitized, "count": len(sanitized)}
 
     @app.post("/api/api-keys")
@@ -4304,7 +4425,9 @@ def create_app(
             scopes = ["commandmesh:chat"]
         normalized_scopes = [str(scope).strip() for scope in scopes if str(scope).strip()]
         if "*" in normalized_scopes and user.role != "super_admin":
-            return Response(content="Only super_admin can create wildcard API keys", status_code=403)
+            return Response(
+                content="Only super_admin can create wildcard API keys", status_code=403
+            )
         org_id_value = payload.get("org_id")
         org_id = int(org_id_value) if org_id_value not in (None, "") else None
         expires_at = str(payload.get("expires_at", "")).strip() or None
@@ -4345,10 +4468,18 @@ def create_app(
         if requested_scopes is not None:
             parsed_scopes = requested_scopes
             if isinstance(parsed_scopes, str):
-                parsed_scopes = [scope.strip() for scope in parsed_scopes.split(",") if scope.strip()]
-            if isinstance(parsed_scopes, list) and "*" in [str(scope).strip() for scope in parsed_scopes]:
-                if user.role != "super_admin":
-                    return Response(content="Only super_admin can assign wildcard API key scope", status_code=403)
+                parsed_scopes = [
+                    scope.strip() for scope in parsed_scopes.split(",") if scope.strip()
+                ]
+            if (
+                isinstance(parsed_scopes, list)
+                and "*" in [str(scope).strip() for scope in parsed_scopes]
+                and user.role != "super_admin"
+            ):
+                return Response(
+                    content="Only super_admin can assign wildcard API key scope",
+                    status_code=403,
+                )
         result = repo.update_api_key(key_id, payload, actor=user.email)
         if result is None:
             return Response(content="API key not found", status_code=404)
@@ -4383,8 +4514,7 @@ def create_app(
             return Response(content="Platform database unavailable", status_code=503)
         try:
             payload = await request.json()
-            rule = repo.create_alert_rule(payload, actor=user.email)
-            return rule
+            return repo.create_alert_rule(payload, actor=user.email)
         except ValueError as exc:
             return Response(content=str(exc), status_code=400)
 
@@ -4875,10 +5005,9 @@ def create_app(
         from src.backup import BackupManager
 
         bm = BackupManager(repo=repo)
-        result = bm.restore_backup(
+        return bm.restore_backup(
             file_path, tables=tables, restore_knowledge=restore_knowledge, actor=user.email
         )
-        return result
 
     @app.get("/api/backup/list")
     def api_backup_list(request: FastAPIRequest) -> dict[str, Any]:
@@ -4969,7 +5098,6 @@ def create_app(
     @app.get("/api/compliance/report/{framework_id}")
     def api_compliance_report(framework_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        engine: ComplianceEngine = request.app.state.compliance_engine
         from src.compliance.evidence import EvidenceCollector
 
         collector = EvidenceCollector(
@@ -5040,10 +5168,8 @@ def create_app(
         agents = []
         orch = getattr(app.state, "agent_orchestrator", None)
         if orch is not None:
-            try:
+            with suppress(Exception):
                 agents = [a.get("name", a.get("id", "unknown")) for a in orch.list_agents()]
-            except Exception:
-                pass
         return agents
 
     def _start_mc_execution(
@@ -5054,6 +5180,7 @@ def create_app(
         audit_links: dict[str, str] | None = None,
     ) -> Any:
         from src.mission_control import create_execution
+
         repo = _mc_repo()
         if repo is None:
             return None
@@ -5073,8 +5200,17 @@ def create_app(
             get_logger(__name__).warning("MC create error: %s", exc)
             return None
 
-    def _finish_mc_execution(execution: Any, status: str = "completed", error: str = "", overall_result: str = "", confidence: float = 0.0, total_latency_ms: float = 0.0, total_cost: float = 0.0) -> None:
+    def _finish_mc_execution(
+        execution: Any,
+        status: str = "completed",
+        error: str = "",
+        overall_result: str = "",
+        confidence: float = 0.0,
+        total_latency_ms: float = 0.0,
+        total_cost: float = 0.0,
+    ) -> None:
         from src.mission_control import update_execution
+
         repo = _mc_repo()
         if repo is None or execution is None:
             return
@@ -5091,13 +5227,10 @@ def create_app(
             get_logger(__name__).warning("MC finish error: %s", exc)
 
     def _mc_complete_stage(
-        execution: Any,
-        stage_id: str,
-        status: str = "completed",
-        broadcast: bool = True,
-        **kw: Any,
+        execution: Any, stage_id: str, status: str = "completed", **kw: Any
     ) -> None:
         from src.mission_control import complete_stage, update_execution
+
         repo = _mc_repo()
         if repo is None or execution is None:
             return
@@ -5114,9 +5247,12 @@ def create_app(
             ws_mgr = getattr(app.state, "websocket_manager", None)
             if ws_mgr is not None:
                 from src.mission_control import get_execution_stats
+
                 stats = get_execution_stats(repo)
                 asyncio.create_task(
-                    ws_mgr.broadcast({"type": "execution_update", "stats": stats}, channel="mission_control")
+                    ws_mgr.broadcast(
+                        {"type": "mc_stats_update", "stats": stats}, channel="mission_control"
+                    )
                 )
         except Exception:
             pass
@@ -5305,6 +5441,7 @@ def create_app(
         if not user_request:
             return Response(content="request is required", status_code=400)
         import uuid
+
         mc_id = f"mc-chat-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "chat")
         if mc_exec is not None:
@@ -5313,14 +5450,21 @@ def create_app(
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_chat
         from src.intelligence.history import save_workflow
+
         start_ts = time.time()
         try:
             result = run_chat(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI chat error: %s", exc)
             duration = (time.time() - start_ts) * 1000
-            _finish_mc_execution(mc_exec, status="failed", error=str(exc), total_latency_ms=duration)
-            return Response(content=json.dumps({"error": "AI chat processing failed"}), status_code=500, media_type="application/json")
+            _finish_mc_execution(
+                mc_exec, status="failed", error=str(exc), total_latency_ms=duration
+            )
+            return Response(
+                content=json.dumps({"error": "AI chat processing failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
 
         duration = (time.time() - start_ts) * 1000
         confidence = result.get("confidence", 0.0)
@@ -5329,11 +5473,32 @@ def create_app(
         steps = result.get("steps", [])
 
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "planner", status="completed", latency_ms=duration * 0.3, confidence=confidence, summary=user_request[:200], outputs={"plan_steps": len(steps)})
+            _mc_complete_stage(
+                mc_exec,
+                "planner",
+                status="completed",
+                latency_ms=duration * 0.3,
+                confidence=confidence,
+                summary=user_request[:200],
+                outputs={"plan_steps": len(steps)},
+            )
             _mc_complete_stage(mc_exec, "knowledge", status="completed", evidence=evidence)
             _mc_complete_stage(mc_exec, "verifier", status="completed", confidence=confidence)
-            _mc_complete_stage(mc_exec, "executor", status="completed", latency_ms=duration * 0.7, summary=answer[:200])
-            _finish_mc_execution(mc_exec, status="completed", overall_result=answer, confidence=confidence, total_latency_ms=duration, total_cost=result.get("execution_duration_ms", 0) * 0.00001)
+            _mc_complete_stage(
+                mc_exec,
+                "executor",
+                status="completed",
+                latency_ms=duration * 0.7,
+                summary=answer[:200],
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=answer,
+                confidence=confidence,
+                total_latency_ms=duration,
+                total_cost=result.get("execution_duration_ms", 0) * 0.00001,
+            )
 
         if repo is not None:
             try:
@@ -5372,29 +5537,56 @@ def create_app(
         if not user_request:
             return Response(content="request is required", status_code=400)
         import uuid
+
         mc_id = f"mc-analyze-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "analyze")
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_analyze
         from src.intelligence.history import save_workflow
+
         start_ts = time.time()
         try:
             result = run_analyze(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI analyze error: %s", exc)
             duration = (time.time() - start_ts) * 1000
-            _finish_mc_execution(mc_exec, status="failed", error=str(exc), total_latency_ms=duration)
-            return Response(content=json.dumps({"error": "AI analysis failed"}), status_code=500, media_type="application/json")
+            _finish_mc_execution(
+                mc_exec, status="failed", error=str(exc), total_latency_ms=duration
+            )
+            return Response(
+                content=json.dumps({"error": "AI analysis failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
 
         duration = (time.time() - start_ts) * 1000
         confidence = result.get("confidence", 0.0)
         final_answer = result.get("final_answer", "")
 
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "planner", status="completed", latency_ms=duration * 0.2, confidence=confidence, outputs={"plan": result.get("plan", {})})
+            _mc_complete_stage(
+                mc_exec,
+                "planner",
+                status="completed",
+                latency_ms=duration * 0.2,
+                confidence=confidence,
+                outputs={"plan": result.get("plan", {})},
+            )
             _mc_complete_stage(mc_exec, "verifier", status="completed", confidence=confidence)
-            _mc_complete_stage(mc_exec, "executor", status="completed", latency_ms=duration * 0.8, summary=final_answer[:300])
-            _finish_mc_execution(mc_exec, status="completed", overall_result=final_answer, confidence=confidence, total_latency_ms=duration)
+            _mc_complete_stage(
+                mc_exec,
+                "executor",
+                status="completed",
+                latency_ms=duration * 0.8,
+                summary=final_answer[:300],
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=final_answer,
+                confidence=confidence,
+                total_latency_ms=duration,
+            )
 
         if repo is not None:
             try:
@@ -5433,32 +5625,51 @@ def create_app(
         if not user_request:
             return Response(content="request is required", status_code=400)
         import uuid
+
         mc_id = f"mc-plan-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "plan")
         repo = getattr(app.state.services, "platform_repository", None)
         from src.intelligence.graph import run_plan
+
         start_ts = time.time()
         try:
             result = run_plan(user_request, repo=repo)
         except Exception as exc:
             get_logger(__name__).warning("AI plan error: %s", exc)
             duration = (time.time() - start_ts) * 1000
-            _finish_mc_execution(mc_exec, status="failed", error=str(exc), total_latency_ms=duration)
-            return Response(content=json.dumps({"error": "AI planning failed"}), status_code=500, media_type="application/json")
+            _finish_mc_execution(
+                mc_exec, status="failed", error=str(exc), total_latency_ms=duration
+            )
+            return Response(
+                content=json.dumps({"error": "AI planning failed"}),
+                status_code=500,
+                media_type="application/json",
+            )
 
         duration = (time.time() - start_ts) * 1000
         plan = result.get("plan", {})
         plan_text = json.dumps(plan)[:500] if plan else ""
 
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "planner", status="completed", latency_ms=duration, summary=plan_text, outputs={"plan": plan, "current_plan": result.get("current_plan", []), "objective": result.get("objective", "")})
+            _mc_complete_stage(
+                mc_exec,
+                "planner",
+                status="completed",
+                latency_ms=duration,
+                summary=plan_text,
+                outputs={
+                    "plan": plan,
+                    "current_plan": result.get("current_plan", []),
+                    "objective": result.get("objective", ""),
+                },
+            )
             _mc_complete_stage(mc_exec, "verifier", status="completed")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=plan_text, total_latency_ms=duration)
+            _finish_mc_execution(
+                mc_exec, status="completed", overall_result=plan_text, total_latency_ms=duration
+            )
         return result
 
     # ── Mission Control Routes ──
-
-    mc_broadcast_queue: list[dict[str, Any]] = []
 
     @app.get("/api/mission-control/executions")
     def api_mc_executions(request: FastAPIRequest) -> Any:
@@ -5473,31 +5684,76 @@ def create_app(
         user = request.query_params.get("user") or None
         exec_type = request.query_params.get("execution_type") or None
         org = request.query_params.get("organization") or None
-        days = _query_int(request, "days")
-        from src.mission_control import list_executions, count_executions
+        days = request.query_params.get("days", type=int) or None
+        from src.mission_control import count_executions, list_executions
+
         try:
-            executions = list_executions(repo, limit=limit, offset=offset, status=status, search=search, user=user, execution_type=exec_type, organization=org, days=days)
-            total = count_executions(repo, status=status, search=search, user=user, execution_type=exec_type, organization=org, days=days)
-            return {"executions": [e.to_dict() for e in executions], "count": len(executions), "total": total, "limit": limit, "offset": offset}
+            executions = list_executions(
+                repo,
+                limit=limit,
+                offset=offset,
+                status=status,
+                search=search,
+                user=user,
+                execution_type=exec_type,
+                organization=org,
+                days=days,
+            )
+            total = count_executions(
+                repo,
+                status=status,
+                search=search,
+                user=user,
+                execution_type=exec_type,
+                organization=org,
+                days=days,
+            )
+            return {
+                "executions": [e.to_dict() for e in executions],
+                "count": len(executions),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
         except Exception as exc:
             get_logger(__name__).warning("MC list error: %s", exc)
-            return {"executions": [], "count": 0, "total": 0, "limit": limit, "offset": offset, "error": str(exc)}
+            return {
+                "executions": [],
+                "count": 0,
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "error": str(exc),
+            }
 
     @app.get("/api/mission-control/executions/{execution_id}")
     def api_mc_execution_detail(execution_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         repo = _mc_repo()
         if repo is None:
-            return Response(content=json.dumps({"error": "No database"}), status_code=503, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "No database"}),
+                status_code=503,
+                media_type="application/json",
+            )
         from src.mission_control import get_execution, get_execution_stats
+
         try:
             execution = get_execution(repo, execution_id)
             if execution is None:
-                return Response(content=json.dumps({"error": "Execution not found"}), status_code=404, media_type="application/json")
+                return Response(
+                    content=json.dumps({"error": "Execution not found"}),
+                    status_code=404,
+                    media_type="application/json",
+                )
             stats = get_execution_stats(repo)
             return {"execution": execution.to_dict(), "stats": stats}
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/mission-control/executions/{execution_id}/export")
     def api_mc_export(execution_id: str, request: FastAPIRequest) -> Any:
@@ -5506,41 +5762,94 @@ def create_app(
         if repo is None:
             return Response(content="No database", status_code=503)
         from src.mission_control import get_execution
+
         try:
             execution = get_execution(repo, execution_id)
             if execution is None:
-                return Response(content=json.dumps({"error": "Not found"}), status_code=404, media_type="application/json")
-            return Response(content=json.dumps(execution.to_dict(), indent=2), media_type="application/json", headers={"Content-Disposition": f"attachment; filename=execution-{execution_id}.json"})
+                return Response(
+                    content=json.dumps({"error": "Not found"}),
+                    status_code=404,
+                    media_type="application/json",
+                )
+            return Response(
+                content=json.dumps(execution.to_dict(), indent=2),
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f"attachment; filename=execution-{execution_id}.json"
+                },
+            )
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/mission-control/executions/{execution_id}/replay")
     def api_mc_replay(execution_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         repo = _mc_repo()
         if repo is None:
-            return Response(content=json.dumps({"error": "No database"}), status_code=503, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "No database"}),
+                status_code=503,
+                media_type="application/json",
+            )
         from src.mission_control import get_execution
+
         try:
             execution = get_execution(repo, execution_id)
             if execution is None:
-                return Response(content=json.dumps({"error": "Execution not found"}), status_code=404, media_type="application/json")
+                return Response(
+                    content=json.dumps({"error": "Execution not found"}),
+                    status_code=404,
+                    media_type="application/json",
+                )
             return execution.replay_data()
         except Exception as exc:
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/mission-control/stats")
     def api_mc_stats(request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         repo = _mc_repo()
         if repo is None:
-            return {"total": 0, "completed": 0, "failed": 0, "running": 0, "queued": 0, "avg_latency": 0, "avg_cost": 0, "avg_confidence": 0, "total_cost": 0, "type_count": 0, "user_count": 0}
+            return {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+                "queued": 0,
+                "avg_latency": 0,
+                "avg_cost": 0,
+                "avg_confidence": 0,
+                "total_cost": 0,
+                "type_count": 0,
+                "user_count": 0,
+            }
         from src.mission_control import get_execution_stats
+
         try:
             return get_execution_stats(repo)
         except Exception as exc:
             get_logger(__name__).warning("MC stats error: %s", exc)
-            return {"total": 0, "completed": 0, "failed": 0, "running": 0, "queued": 0, "avg_latency": 0, "avg_cost": 0, "avg_confidence": 0, "total_cost": 0, "type_count": 0, "user_count": 0}
+            return {
+                "total": 0,
+                "completed": 0,
+                "failed": 0,
+                "running": 0,
+                "queued": 0,
+                "avg_latency": 0,
+                "avg_cost": 0,
+                "avg_confidence": 0,
+                "total_cost": 0,
+                "type_count": 0,
+                "user_count": 0,
+            }
 
     @app.get("/api/mission-control/stats/types")
     def api_mc_stats_types(request: FastAPIRequest) -> Any:
@@ -5549,6 +5858,7 @@ def create_app(
         if repo is None:
             return []
         from src.mission_control import get_execution_type_stats
+
         try:
             return get_execution_type_stats(repo)
         except Exception as exc:
@@ -5565,11 +5875,18 @@ def create_app(
         offset = max(0, int(request.query_params.get("offset", 0)))
         days = _query_int(request, "days", 30) or 30
         exec_type = request.query_params.get("execution_type") or None
-        from src.mission_control import list_executions, count_executions
+        from src.mission_control import count_executions, list_executions
+
         try:
-            executions = list_executions(repo, limit=limit, offset=offset, days=days, execution_type=exec_type)
+            executions = list_executions(
+                repo, limit=limit, offset=offset, days=days, execution_type=exec_type
+            )
             total = count_executions(repo, days=days, execution_type=exec_type)
-            return {"executions": [e.to_dict() for e in executions], "count": len(executions), "total": total}
+            return {
+                "executions": [e.to_dict() for e in executions],
+                "count": len(executions),
+                "total": total,
+            }
         except Exception as exc:
             return {"executions": [], "count": 0, "total": 0, "error": str(exc)}
 
@@ -5585,22 +5902,29 @@ def create_app(
         exec_type = str(payload.get("execution_type", "chat")).strip()
         if not execution_id:
             import uuid
+
             execution_id = f"mc-{exec_type}-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, execution_id, req_text, exec_type, audit_links=payload.get("audit_links"))
+        mc_exec = _start_mc_execution(
+            request, execution_id, req_text, exec_type, audit_links=payload.get("audit_links")
+        )
         if mc_exec is not None:
             _mc_complete_stage(mc_exec, "planner", status="completed", summary=req_text[:200])
-            _finish_mc_execution(mc_exec, status="completed", overall_result=payload.get("result", ""))
+            _finish_mc_execution(
+                mc_exec, status="completed", overall_result=payload.get("result", "")
+            )
             return {"status": "ok", "execution_id": execution_id}
-        return Response(content=json.dumps({"error": "Tracking failed"}), status_code=500, media_type="application/json")
+        return Response(
+            content=json.dumps({"error": "Tracking failed"}),
+            status_code=500,
+            media_type="application/json",
+        )
 
     @app.websocket("/ws/mission-control")
     async def mission_control_websocket(websocket: WebSocket) -> None:
         token = _websocket_token(websocket)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
-            try:
+            with suppress(Exception):
                 await websocket.close(code=4001, reason="Authentication required")
-            except Exception:
-                pass
             return
         manager = getattr(app.state, "websocket_manager", None)
         if manager is not None:
@@ -5609,20 +5933,17 @@ def create_app(
             repo = _mc_repo()
             if repo is not None:
                 from src.mission_control import get_execution_stats
+
                 stats = get_execution_stats(repo)
-                try:
+                with suppress(Exception):
                     await websocket.send_json({"type": "mc_stats_update", "stats": stats})
-                except Exception:
-                    pass
             while True:
                 try:
                     data = await websocket.receive_text()
                     msg = json.loads(data)
                     if msg.get("type") == "ping":
-                        try:
+                        with suppress(Exception):
                             await websocket.send_json({"type": "pong"})
-                        except Exception:
-                            pass
                 except json.JSONDecodeError:
                     pass
         except Exception:
@@ -5642,19 +5963,27 @@ def create_app(
         limit = int(request.query_params.get("limit", 10))
         limit = max(1, min(limit, 100))
         import uuid
+
         mc_id = f"mc-kb-{uuid.uuid4().hex[:12]}"
 
         repo_store: tuple = _get_knowledge_services()
-        _, _, indexer, retriever = repo_store
+        _, _, _indexer, retriever = repo_store
 
         if not query:
             mc_exec = _start_mc_execution(request, mc_id, "", "knowledge_search")
             if mc_exec is not None:
-                _finish_mc_execution(mc_exec, status="completed", overall_result="No query provided")
+                _finish_mc_execution(
+                    mc_exec, status="completed", overall_result="No query provided"
+                )
             return {"results": [], "count": 0}
 
-        mc_exec = _start_mc_execution(request, mc_id, f"Search: {query[:200]}", "knowledge_search",
-                                       audit_links={"type": "knowledge_search", "query": query[:200]})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Search: {query[:200]}",
+            "knowledge_search",
+            audit_links={"type": "knowledge_search", "query": query[:200]},
+        )
         start_ts = time.time()
         try:
             doc_types_str = request.query_params.get("doc_types", "")
@@ -5665,14 +5994,32 @@ def create_app(
                 results = retriever.retrieve(query, limit=limit)
             duration = (time.time() - start_ts) * 1000
             if mc_exec is not None:
-                _mc_complete_stage(mc_exec, "knowledge", status="completed", latency_ms=duration, summary=f"Found {len(results)} results")
-                _finish_mc_execution(mc_exec, status="completed", overall_result=f"Found {len(results)} results", total_latency_ms=duration, confidence=0.9 if results else 0.5)
+                _mc_complete_stage(
+                    mc_exec,
+                    "knowledge",
+                    status="completed",
+                    latency_ms=duration,
+                    summary=f"Found {len(results)} results",
+                )
+                _finish_mc_execution(
+                    mc_exec,
+                    status="completed",
+                    overall_result=f"Found {len(results)} results",
+                    total_latency_ms=duration,
+                    confidence=0.9 if results else 0.5,
+                )
             return {"results": results, "count": len(results), "query": query}
         except Exception as exc:
             duration = (time.time() - start_ts) * 1000
             if mc_exec is not None:
-                _finish_mc_execution(mc_exec, status="failed", error=str(exc), total_latency_ms=duration)
-            return Response(content=json.dumps({"error": str(exc)}), status_code=500, media_type="application/json")
+                _finish_mc_execution(
+                    mc_exec, status="failed", error=str(exc), total_latency_ms=duration
+                )
+            return Response(
+                content=json.dumps({"error": str(exc)}),
+                status_code=500,
+                media_type="application/json",
+            )
 
     @app.get("/api/ai/history")
     def api_ai_history(request: FastAPIRequest) -> dict[str, Any]:
@@ -5815,8 +6162,7 @@ def create_app(
             context = payload.get("context", {})
             repo = getattr(app.state.services, "platform_repository", None)
             context["repo"] = repo
-            result = await engine.execute_skill(skill_id, context)
-            return result
+            return await engine.execute_skill(skill_id, context)
         except Exception as exc:
             return Response(
                 content=json.dumps({"status": "error", "error": str(exc)}),
@@ -5881,13 +6227,29 @@ def create_app(
         }
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "approve", "ai_approval", approval_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "approve", "ai_approval", approval_id, {}
+            )
         import uuid
+
         mc_id = f"mc-gov-approve-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Approval: {approval_id}", "governance_approval", audit_links={"approval_id": approval_id, "decision": "approved"})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Approval: {approval_id}",
+            "governance_approval",
+            audit_links={"approval_id": approval_id, "decision": "approved"},
+        )
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "policy", status="completed", summary=f"Approved {approval_id}")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=f"Approval {approval_id} granted", confidence=1.0)
+            _mc_complete_stage(
+                mc_exec, "policy", status="completed", summary=f"Approved {approval_id}"
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=f"Approval {approval_id} granted",
+                confidence=1.0,
+            )
         return {"status": "approved", "approval_id": approval_id}
 
     @app.post("/api/ai/reject")
@@ -5906,13 +6268,29 @@ def create_app(
         }
         repo = app.state.services.platform_repository
         if repo is not None:
-            repo.record_audit_log(user.email if user else "anonymous", "reject", "ai_approval", approval_id, {})
+            repo.record_audit_log(
+                user.email if user else "anonymous", "reject", "ai_approval", approval_id, {}
+            )
         import uuid
+
         mc_id = f"mc-gov-reject-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Rejection: {approval_id}", "governance_approval", audit_links={"approval_id": approval_id, "decision": "rejected"})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Rejection: {approval_id}",
+            "governance_approval",
+            audit_links={"approval_id": approval_id, "decision": "rejected"},
+        )
         if mc_exec is not None:
-            _mc_complete_stage(mc_exec, "policy", status="completed", summary=f"Rejected {approval_id}")
-            _finish_mc_execution(mc_exec, status="completed", overall_result=f"Approval {approval_id} denied", confidence=1.0)
+            _mc_complete_stage(
+                mc_exec, "policy", status="completed", summary=f"Rejected {approval_id}"
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed",
+                overall_result=f"Approval {approval_id} denied",
+                confidence=1.0,
+            )
         return {"status": "rejected", "approval_id": approval_id}
 
     @app.get("/api/ai/pending-approvals")
@@ -5954,8 +6332,7 @@ def create_app(
 
             registry = get_registry()
             engine = RunbookEngine(registry)
-            result = engine.execute(runbook_name)
-            return result
+            return engine.execute(runbook_name)
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
@@ -6195,6 +6572,7 @@ def create_app(
         gov = getattr(app.state, "governance", None)
         if gov is None:
             from src.ai_governance import GovernanceManager
+
             gov = GovernanceManager("governance.db")
             app.state.governance = gov
         return gov
@@ -6215,12 +6593,12 @@ def create_app(
         return "default"
 
     @app.get("/api/governance/stats")
-    def api_governance_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         return governance_manager().get_agent_stats(tenant_id=governance_tenant_id(request))
 
     @app.get("/api/governance/agents")
-    def api_governance_agents(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_agents(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         gov = governance_manager()
         agents = [a.to_dict() for a in gov.list_agents(tenant_id=governance_tenant_id(request))]
@@ -6231,11 +6609,15 @@ def create_app(
         require_role(*VIEWER_ROLES)(request)
         agent = governance_manager().get_agent(agent_id, tenant_id=governance_tenant_id(request))
         if agent is None:
-            return Response(content=json.dumps({"error": "Agent not found"}), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "Agent not found"}),
+                status_code=404,
+                media_type="application/json",
+            )
         return agent.to_dict()
 
     @app.get("/api/governance/agents/{agent_id}/history")
-    def api_governance_agent_history(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_agent_history(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         limit = max(1, min(int(request.query_params.get("limit", 50)), 200))
         history = [
@@ -6247,7 +6629,7 @@ def create_app(
         return {"history": history, "count": len(history)}
 
     @app.get("/api/governance/agents/{agent_id}/policies")
-    def api_governance_agent_policies(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_agent_policies(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         policies = [
             p.to_dict()
@@ -6260,21 +6642,33 @@ def create_app(
     @app.get("/api/governance/agents/{agent_id}/tools")
     def api_governance_agent_tools(agent_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        tools = governance_manager().get_agent_tools(agent_id, tenant_id=governance_tenant_id(request))
+        tools = governance_manager().get_agent_tools(
+            agent_id, tenant_id=governance_tenant_id(request)
+        )
         if tools is None:
-            return Response(content=json.dumps({"error": "Agent not found"}), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "Agent not found"}),
+                status_code=404,
+                media_type="application/json",
+            )
         return tools
 
     @app.get("/api/governance/agents/{agent_id}/metrics")
     def api_governance_agent_metrics(agent_id: str, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        metrics = governance_manager().get_agent_metrics(agent_id, tenant_id=governance_tenant_id(request))
+        metrics = governance_manager().get_agent_metrics(
+            agent_id, tenant_id=governance_tenant_id(request)
+        )
         if metrics is None:
-            return Response(content=json.dumps({"error": "Agent not found"}), status_code=404, media_type="application/json")
+            return Response(
+                content=json.dumps({"error": "Agent not found"}),
+                status_code=404,
+                media_type="application/json",
+            )
         return metrics
 
     @app.get("/api/governance/actions")
-    def api_governance_actions(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_actions(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         limit = max(1, min(int(request.query_params.get("limit", 100)), 500))
         offset = max(0, int(request.query_params.get("offset", 0)))
@@ -6292,7 +6686,7 @@ def create_app(
         return {"actions": actions, "count": len(actions)}
 
     @app.get("/api/governance/actions/stats")
-    def api_governance_action_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_action_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = max(1, min(int(request.query_params.get("hours", 24)), 24 * 30))
         return governance_manager().get_action_stats(
@@ -6302,9 +6696,12 @@ def create_app(
         )
 
     @app.get("/api/governance/policies")
-    def api_governance_policies(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_policies(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        policies = [p.to_dict() for p in governance_manager().list_policies(tenant_id=governance_tenant_id(request))]
+        policies = [
+            p.to_dict()
+            for p in governance_manager().list_policies(tenant_id=governance_tenant_id(request))
+        ]
         return {"policies": policies, "count": len(policies)}
 
     @app.post("/api/governance/policies")
@@ -6315,6 +6712,7 @@ def create_app(
         except Exception:
             return Response(content="Invalid JSON body", status_code=400)
         from src.ai_governance import AgentPolicy
+
         policy = AgentPolicy(
             policy_id=0,
             name=str(payload.get("name", "")).strip(),
@@ -6328,7 +6726,9 @@ def create_app(
         )
         if not policy.name:
             return Response(content="name is required", status_code=400)
-        created = governance_manager().create_policy(policy, tenant_id=governance_tenant_id(request))
+        created = governance_manager().create_policy(
+            policy, tenant_id=governance_tenant_id(request)
+        )
         return created.to_dict()
 
     @app.post("/api/governance/evaluate")
@@ -6342,8 +6742,15 @@ def create_app(
         action_type = str(payload.get("action_type", ""))
         target = str(payload.get("target", ""))
         import uuid
+
         mc_id = f"mc-gov-eval-{uuid.uuid4().hex[:12]}"
-        mc_exec = _start_mc_execution(request, mc_id, f"Policy eval: {action_type} on {target}", "policy_check", audit_links={"agent_id": agent_id, "action_type": action_type, "target": target})
+        mc_exec = _start_mc_execution(
+            request,
+            mc_id,
+            f"Policy eval: {action_type} on {target}",
+            "policy_check",
+            audit_links={"agent_id": agent_id, "action_type": action_type, "target": target},
+        )
         if mc_exec is not None:
             _mc_complete_stage(mc_exec, "policy", status="running")
         start_ts = time.time()
@@ -6356,12 +6763,25 @@ def create_app(
         duration = (time.time() - start_ts) * 1000
         if mc_exec is not None:
             policy_decisions = [{"policy": action_type, "effect": verdict, "reason": reason}]
-            _mc_complete_stage(mc_exec, "policy", status="completed", latency_ms=duration, summary=f"Verdict: {verdict}", policy_decisions=policy_decisions, outputs={"verdict": verdict, "reason": reason})
-            _finish_mc_execution(mc_exec, status="completed" if verdict == "allowed" else "completed", overall_result=f"Policy {verdict}: {reason}", total_latency_ms=duration)
+            _mc_complete_stage(
+                mc_exec,
+                "policy",
+                status="completed",
+                latency_ms=duration,
+                summary=f"Verdict: {verdict}",
+                policy_decisions=policy_decisions,
+                outputs={"verdict": verdict, "reason": reason},
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status="completed" if verdict == "allowed" else "completed",
+                overall_result=f"Policy {verdict}: {reason}",
+                total_latency_ms=duration,
+            )
         return {"verdict": verdict, "reason": reason}
 
     @app.get("/api/governance/anomalies")
-    def api_governance_anomalies(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_anomalies(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         limit = max(1, min(int(request.query_params.get("limit", 100)), 500))
         anomalies = [
@@ -6375,22 +6795,28 @@ def create_app(
         return {"anomalies": anomalies, "count": len(anomalies)}
 
     @app.get("/api/governance/audit/verify")
-    def api_governance_audit_verify(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_audit_verify(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        return governance_manager().verify_action_audit_chain(tenant_id=governance_tenant_id(request))
+        return governance_manager().verify_action_audit_chain(
+            tenant_id=governance_tenant_id(request)
+        )
 
     @app.get("/api/governance/audit/export.csv")
     def api_governance_audit_export(request: FastAPIRequest) -> Response:
         require_role(*VIEWER_ROLES)(request)
-        csv_text = governance_manager().export_action_audit_csv(tenant_id=governance_tenant_id(request))
+        csv_text = governance_manager().export_action_audit_csv(
+            tenant_id=governance_tenant_id(request)
+        )
         return Response(content=csv_text, media_type="text/csv")
 
     @app.get("/api/governance/costs/summary")
-    def api_governance_cost_summary(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_governance_cost_summary(request: FastAPIRequest) -> dict[str, Any]:
         require_auth(request, app.state.auth_manager)
-        actions = governance_manager().list_actions(limit=1000, tenant_id=governance_tenant_id(request))
-        by_model: Dict[str, Dict[str, Any]] = {}
-        by_tier: Dict[str, Dict[str, Any]] = {}
+        actions = governance_manager().list_actions(
+            limit=1000, tenant_id=governance_tenant_id(request)
+        )
+        by_model: dict[str, dict[str, Any]] = {}
+        by_tier: dict[str, dict[str, Any]] = {}
         total_cost = 0.0
         for action in actions:
             data = action.to_dict().get("outputs", {})
@@ -6420,9 +6846,26 @@ def create_app(
         try:
             payload = await request.json()
         except Exception:
-            return Response(content=json.dumps({"error": {"type": "invalid_request", "message": "Invalid JSON body"}}), status_code=400, media_type="application/json")
+            return Response(
+                content=json.dumps(
+                    {"error": {"type": "invalid_request", "message": "Invalid JSON body"}}
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
         if payload.get("stream"):
-            return Response(content=json.dumps({"error": {"type": "unsupported_feature", "message": "Streaming is not supported by this proxy"}}), status_code=400, media_type="application/json")
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": {
+                            "type": "unsupported_feature",
+                            "message": "Streaming is not supported by this proxy",
+                        }
+                    }
+                ),
+                status_code=400,
+                media_type="application/json",
+            )
 
         agent_id = request.headers.get("X-Agent-ID", "commandmesh-proxy")
         messages = payload.get("messages", [])
@@ -6441,10 +6884,22 @@ def create_app(
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
         tenant = governance_tenant_id(request)
-        verdict, reason = governance_manager().evaluate_policies(agent_id, "chat_completion", "/v1/chat/completions", tenant_id=tenant)
+        verdict, reason = governance_manager().evaluate_policies(
+            agent_id, "chat_completion", "/v1/chat/completions", tenant_id=tenant
+        )
         output_tokens = 256
-        selected_cost = estimate_cost_usd(prompt_tokens, output_tokens, route.input_cost_per_million, route.output_cost_per_million)
-        requested_cost = estimate_cost_usd(prompt_tokens, output_tokens, route.requested_input_cost_per_million, route.requested_output_cost_per_million)
+        selected_cost = estimate_cost_usd(
+            prompt_tokens,
+            output_tokens,
+            route.input_cost_per_million,
+            route.output_cost_per_million,
+        )
+        requested_cost = estimate_cost_usd(
+            prompt_tokens,
+            output_tokens,
+            route.requested_input_cost_per_million,
+            route.requested_output_cost_per_million,
+        )
         routing_payload = {
             "requested_model": route.requested_model,
             "selected_model": route.selected_model,
@@ -6468,6 +6923,7 @@ def create_app(
             status = "blocked"
             if verdict == "pending_approval":
                 import secrets as _secrets
+
                 approval_id = f"cmdmesh-{_secrets.token_hex(8)}"
                 repo = app.state.services.platform_repository
                 if repo is not None:
@@ -6486,14 +6942,28 @@ def create_app(
                     action_summary="CommandMesh chat completion request",
                     target_resource="/v1/chat/completions",
                     inputs=json.dumps({"model": requested_model, "prompt_tokens": prompt_tokens}),
-                    outputs=json.dumps({"routing": routing_payload, "cost": cost_payload, "approval_id": approval_id}),
+                    outputs=json.dumps(
+                        {
+                            "routing": routing_payload,
+                            "cost": cost_payload,
+                            "approval_id": approval_id,
+                        }
+                    ),
                     policy_verdict=verdict,
                     status=status,
                 ),
                 tenant_id=tenant,
             )
             return Response(
-                content=json.dumps({"error": {"type": verdict, "message": reason or verdict, "approval_id": approval_id}}),
+                content=json.dumps(
+                    {
+                        "error": {
+                            "type": verdict,
+                            "message": reason or verdict,
+                            "approval_id": approval_id,
+                        }
+                    }
+                ),
                 status_code=403,
                 media_type="application/json",
             )
@@ -6501,9 +6971,13 @@ def create_app(
         factory = getattr(app.state, "commandmesh_provider_factory", None)
         if factory is None:
             from src.intelligence.providers.factory import LLMFactory
-            factory = lambda provider_name="openai": LLMFactory.create(provider_name)
+
+            def factory(provider_name="openai"):
+                return LLMFactory.create(provider_name)
+
         provider = factory(route.selected_provider)
         from src.intelligence.providers.base import Message
+
         provider_messages = [
             Message(role=str(m.get("role", "user")), content=str(m.get("content", "")))
             for m in messages
@@ -6531,8 +7005,18 @@ def create_app(
             "id": f"chatcmpl-{utc_now()}",
             "object": "chat.completion",
             "model": route.selected_model,
-            "choices": [{"index": 0, "message": {"role": result_message.role, "content": result_message.content}, "finish_reason": "stop"}],
-            "commandmesh": {"policy_verdict": verdict, "routing": routing_payload, "cost": cost_payload},
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": result_message.role, "content": result_message.content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "commandmesh": {
+                "policy_verdict": verdict,
+                "routing": routing_payload,
+                "cost": cost_payload,
+            },
         }
 
     # ---- Enterprise Search ----
@@ -6634,8 +7118,7 @@ def create_app(
 
             repo = app.state.services.platform_repository
             indexer = SearchIndexer(repo)
-            stats = indexer.get_index_stats()
-            return stats
+            return indexer.get_index_stats()
         except Exception as exc:
             return {"index_size": 0, "domains": {}, "last_indexed": None, "error": str(exc)}
 
@@ -6663,8 +7146,7 @@ def create_app(
         target = str(payload.get("agent_id", "")).strip()
         orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
         try:
-            result = await orchestrator.dispatch_task(task, target_agent=target)
-            return result
+            return await orchestrator.dispatch_task(task, target_agent=target)
         except Exception as exc:
             return Response(
                 content=json.dumps({"error": str(exc)}),
@@ -6687,8 +7169,7 @@ def create_app(
             return Response(content="agent_ids must be a non-empty list", status_code=400)
         orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
         try:
-            result = await orchestrator.collaborate(agent_ids, task)
-            return result
+            return await orchestrator.collaborate(agent_ids, task)
         except Exception as exc:
             return Response(
                 content=json.dumps({"error": str(exc)}),
@@ -6846,14 +7327,14 @@ def create_app(
         return {"actions": []}
 
     @app.get("/api/telemetry/dashboard")
-    def api_telemetry_dashboard(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_telemetry_dashboard(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         collector: TelemetryCollector = request.app.state.telemetry_collector
         return collector.get_dashboard()
 
     # ---- Multi-Tenant endpoints ----
     @app.get("/api/orgs")
-    def api_list_orgs(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_list_orgs(request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         mgr: TenantManager = request.app.state.tenant_manager
         api_key_org_id = getattr(request.state, "api_key_org_id", None)
@@ -7019,7 +7500,6 @@ def create_app(
     def api_org_users(org_id: int, request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
         require_org_access(request, org_id)
-        from src.multitenant.models import TenantUser
         p = request.app.state.services.platform_repository
         if p is None:
             return {"users": [], "count": 0}
@@ -7031,9 +7511,10 @@ def create_app(
 
     # ---- AI Workforce ----
     @app.get("/api/workforce/stats")
-    def api_workforce_stats(request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_stats(request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"error": "repository_unavailable"}
@@ -7050,9 +7531,10 @@ def create_app(
         search: str = "",
         limit: int = 100,
         offset: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"agents": [], "total": 0}
@@ -7061,20 +7543,25 @@ def create_app(
             lifecycle_status=lifecycle_status or None,
             agent_type=agent_type or None,
             search=search or None,
-            org_id=None if (user.is_superuser or user.role == "super_admin") else request_org_id(request, user),
+            org_id=None
+            if (user.is_superuser or user.role == "super_admin")
+            else request_org_id(request, user),
             limit=min(limit, 500),
             offset=offset,
         )
         total = manager.count_agents(
             lifecycle_status=lifecycle_status or None,
-            org_id=None if (user.is_superuser or user.role == "super_admin") else request_org_id(request, user),
+            org_id=None
+            if (user.is_superuser or user.role == "super_admin")
+            else request_org_id(request, user),
         )
         return {"agents": [a.to_dict() for a in agents], "total": total}
 
     @app.post("/api/workforce/agents")
     async def api_workforce_create_agent(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
-        from src.ai_workforce import WorkforceManager, WorkforceAgent
+        from src.ai_workforce import WorkforceAgent, WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7096,6 +7583,7 @@ def create_app(
     def api_workforce_get_agent(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7109,7 +7597,8 @@ def create_app(
     @app.put("/api/workforce/agents/{agent_id}")
     async def api_workforce_update_agent(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
-        from src.ai_workforce import WorkforceManager, WorkforceAgent
+        from src.ai_workforce import WorkforceAgent, WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7130,6 +7619,7 @@ def create_app(
     def api_workforce_delete_agent(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*ADMIN_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7146,6 +7636,7 @@ def create_app(
     def api_workforce_activate(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7163,6 +7654,7 @@ def create_app(
     def api_workforce_pause(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7180,6 +7672,7 @@ def create_app(
     def api_workforce_resume(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7197,6 +7690,7 @@ def create_app(
     def api_workforce_archive(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7214,6 +7708,7 @@ def create_app(
     async def api_workforce_clone(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7222,7 +7717,11 @@ def create_app(
         if not existing:
             return JSONResponse({"error": "not_found"}, status_code=404)
         require_workforce_agent_access(request, existing, user, write=True)
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
         new_name = body.get("name") if isinstance(body, dict) else None
         agent = manager.clone_agent(agent_id, new_name=new_name)
         if not agent:
@@ -7230,9 +7729,10 @@ def create_app(
         return agent.to_dict()
 
     @app.get("/api/workforce/agents/{agent_id}/versions")
-    def api_workforce_list_versions(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_list_versions(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"versions": []}
@@ -7248,6 +7748,7 @@ def create_app(
     async def api_workforce_create_version(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7256,7 +7757,11 @@ def create_app(
         if not agent:
             return JSONResponse({"error": "agent_not_found"}, status_code=404)
         require_workforce_agent_access(request, agent, user, write=True)
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
         change_summary = (body or {}).get("change_summary", "")
         created_by = (body or {}).get("created_by", "")
         version = manager.create_agent_version(agent_id, change_summary, created_by)
@@ -7268,6 +7773,7 @@ def create_app(
     def api_workforce_get_version(agent_id: str, version: int, request: FastAPIRequest) -> Any:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7285,6 +7791,7 @@ def create_app(
     def api_workforce_restore_version(agent_id: str, version: int, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7299,9 +7806,10 @@ def create_app(
         return agent.to_dict()
 
     @app.get("/api/workforce/agents/{agent_id}/prompts")
-    def api_workforce_list_prompts(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_list_prompts(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"prompts": []}
@@ -7317,6 +7825,7 @@ def create_app(
     async def api_workforce_save_prompt(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7337,9 +7846,10 @@ def create_app(
         return prompt.to_dict()
 
     @app.get("/api/workforce/agents/{agent_id}/tools")
-    def api_workforce_list_tools(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_list_tools(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"tools": []}
@@ -7355,6 +7865,7 @@ def create_app(
     async def api_workforce_set_tool(agent_id: str, tool_name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7363,7 +7874,11 @@ def create_app(
         if not agent:
             return JSONResponse({"error": "not_found"}, status_code=404)
         require_workforce_agent_access(request, agent, user, write=True)
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
         allowed = (body or {}).get("allowed", True)
         config = (body or {}).get("config", {})
         perm = manager.set_tool_permission(agent_id, tool_name, bool(allowed), config)
@@ -7373,6 +7888,7 @@ def create_app(
     def api_workforce_delete_tool(agent_id: str, tool_name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7385,9 +7901,10 @@ def create_app(
         return {"deleted": True}
 
     @app.get("/api/workforce/agents/{agent_id}/knowledge")
-    def api_workforce_list_knowledge(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_list_knowledge(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"assignments": []}
@@ -7403,6 +7920,7 @@ def create_app(
     async def api_workforce_assign_knowledge(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7422,9 +7940,12 @@ def create_app(
         return ka.to_dict()
 
     @app.delete("/api/workforce/agents/{agent_id}/knowledge/{source_id}")
-    def api_workforce_remove_knowledge(agent_id: str, source_id: str, request: FastAPIRequest) -> Any:
+    def api_workforce_remove_knowledge(
+        agent_id: str, source_id: str, request: FastAPIRequest
+    ) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7443,9 +7964,10 @@ def create_app(
         status: str = "",
         limit: int = 50,
         offset: int = 0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"executions": [], "total": 0}
@@ -7454,13 +7976,16 @@ def create_app(
         if not agent:
             return {"executions": [], "total": 0}
         require_workforce_agent_access(request, agent, user)
-        execs = manager.list_executions(agent_id=agent_id, status=status or None, limit=min(limit, 500), offset=offset)
+        execs = manager.list_executions(
+            agent_id=agent_id, status=status or None, limit=min(limit, 500), offset=offset
+        )
         return {"executions": [e.to_dict() for e in execs], "total": len(execs)}
 
     @app.get("/api/workforce/agents/{agent_id}/executions/stats")
-    def api_workforce_execution_stats(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_execution_stats(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"total": 0}
@@ -7472,9 +7997,10 @@ def create_app(
         return manager.get_execution_stats(agent_id=agent_id)
 
     @app.get("/api/workforce/agents/{agent_id}/budget")
-    def api_workforce_budget(agent_id: str, request: FastAPIRequest) -> Dict[str, Any]:
+    def api_workforce_budget(agent_id: str, request: FastAPIRequest) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"error": "repository_unavailable"}
@@ -7486,9 +8012,12 @@ def create_app(
         return manager.get_budget_usage(agent_id)
 
     @app.get("/api/workforce/agents/{agent_id}/health")
-    def api_workforce_health_history(agent_id: str, request: FastAPIRequest, limit: int = 50) -> Dict[str, Any]:
+    def api_workforce_health_history(
+        agent_id: str, request: FastAPIRequest, limit: int = 50
+    ) -> dict[str, Any]:
         user = require_role(*VIEWER_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return {"records": []}
@@ -7499,12 +8028,16 @@ def create_app(
         require_workforce_agent_access(request, agent, user)
         records = manager.get_health_history(agent_id, limit=min(limit, 200))
         latest = manager.get_latest_health(agent_id)
-        return {"records": [r.to_dict() for r in records], "latest": latest.to_dict() if latest else None}
+        return {
+            "records": [r.to_dict() for r in records],
+            "latest": latest.to_dict() if latest else None,
+        }
 
     @app.post("/api/workforce/agents/{agent_id}/health")
     async def api_workforce_record_health(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7513,7 +8046,11 @@ def create_app(
         if not agent:
             return JSONResponse({"error": "not_found"}, status_code=404)
         require_workforce_agent_access(request, agent, user, write=True)
-        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        body = (
+            await request.json()
+            if request.headers.get("content-type", "").startswith("application/json")
+            else {}
+        )
         b = body or {}
         record = manager.record_health_check(
             agent_id=agent_id,
@@ -7528,6 +8065,7 @@ def create_app(
     async def api_workforce_playground(agent_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceExecutionBlocked, WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7560,6 +8098,7 @@ def create_app(
     async def api_workforce_wizard(request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
         from src.ai_workforce import WorkforceManager
+
         repo = app.state.services.platform_repository
         if repo is None:
             return JSONResponse({"error": "repository_unavailable"}, status_code=503)
@@ -7965,7 +8504,7 @@ def create_app(
         }
 
         def _bucket(name: str, key: str) -> dict[str, Any]:
-            bucket = summary[name].setdefault(
+            return summary[name].setdefault(
                 key or "unknown",
                 {
                     "calls": 0,
@@ -7974,7 +8513,6 @@ def create_app(
                     "estimated_savings_usd": 0.0,
                 },
             )
-            return bucket
 
         for action in actions:
             try:
@@ -8147,7 +8685,7 @@ def create_app(
         try:
             result = gov.create_policy(policy, tenant_id=tenant_id)
         except Exception as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise HTTPException(status_code=409, detail=str(e)) from e
         user = require_auth(request, request.app.state.auth_manager)
         repo = getattr(request.app.state.services, "platform_repository", None)
         if repo is not None:
@@ -8621,10 +9159,8 @@ def create_app(
     def _init_mission_control():
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None:
-            try:
+            with suppress(Exception):
                 mc_ensure_table(repo)
-            except Exception:
-                pass
 
     @app.get("/api/mission-control/executions")
     def api_mc_list_executions(request: FastAPIRequest) -> dict[str, Any]:
@@ -8653,38 +9189,6 @@ def create_app(
         except Exception as exc:
             get_logger(__name__).warning("MC list error: %s", exc)
             return {"executions": [], "count": 0, "total": 0, "limit": 50, "offset": 0}
-
-    @app.get("/api/mission-control/stats")
-    def api_mc_stats(request: FastAPIRequest) -> dict[str, Any]:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is None:
-            return {
-                "total": 0,
-                "completed": 0,
-                "failed": 0,
-                "running": 0,
-                "queued": 0,
-                "avg_latency": 0,
-                "avg_cost": 0,
-                "avg_confidence": 0,
-                "total_cost": 0,
-            }
-        try:
-            return mc_get_execution_stats(repo)
-        except Exception as exc:
-            get_logger(__name__).warning("MC stats error: %s", exc)
-            return {
-                "total": 0,
-                "completed": 0,
-                "failed": 0,
-                "running": 0,
-                "queued": 0,
-                "avg_latency": 0,
-                "avg_cost": 0,
-                "avg_confidence": 0,
-                "total_cost": 0,
-            }
 
     @app.get("/api/mission-control/executions/{execution_id}")
     def api_mc_get_execution(execution_id: str, request: FastAPIRequest) -> Any:
@@ -8787,4 +9291,13 @@ def create_app(
     return app
 
 
-app = create_app()
+if "pytest" in sys.modules:
+    app = None
+else:
+    try:
+        app = create_app()
+    except (RuntimeError, AttributeError):
+        import traceback
+
+        traceback.print_exc()
+        app = None

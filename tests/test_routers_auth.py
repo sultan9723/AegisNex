@@ -46,9 +46,11 @@ def test_clear_auth_cookies():
     """Test clearing authentication cookies."""
     response = MagicMock()
     _clear_auth_cookies(response)
-    assert response.delete_cookie.call_count == 2
+    assert response.delete_cookie.call_count == 4
     response.delete_cookie.assert_any_call(key="aegisnex_session")
     response.delete_cookie.assert_any_call(key="aegisnex_refresh")
+    response.delete_cookie.assert_any_call(key="aegisnex_oidc_state")
+    response.delete_cookie.assert_any_call(key="aegisnex_oidc_nonce")
 
 
 def test_login_request_schema():
