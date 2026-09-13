@@ -3,7 +3,6 @@ knowledge, executions, trust scoring, budget, health, clone, pause/resume."""
 
 from __future__ import annotations
 
-import json
 import re
 from unittest.mock import MagicMock
 
@@ -13,8 +12,9 @@ from src.ai_workforce import (
     WorkforceManager, WorkforceAgent, AgentVersion, PromptVersion,
     ToolPermission, KnowledgeAssignment, WorkforceExecution, HealthRecord,
     LifecycleStatus, HealthStatus, ExecutionResult, PromptRole, AccessLevel,
-    WorkforceExecutionBlocked, utc_now, new_id, ensure_all_tables,
+    WorkforceExecutionBlocked, utc_now, new_id,
     _calculate_trust_score, _calculate_success_rate, _calculate_avg_latency,
+    _calculate_agent_confidence,
 )
 
 WORKFORCE_TABLES = (
@@ -328,6 +328,32 @@ class TestTrustCalculation:
     def test_calculate_trust_score_empty(self):
         score = _calculate_trust_score([], current_score=50.0)
         assert score == 50.0
+
+    def test_trust_score_mixed_failures_lower_than_successes(self):
+        successes = [WorkforceExecution(status="success", confidence=0.9) for _ in range(3)]
+        failures = [WorkforceExecution(status="failed", confidence=0.1) for _ in range(3)]
+        assert _calculate_trust_score(failures) < _calculate_trust_score(successes)
+
+    def test_trust_score_penalizes_policy_blocks(self):
+        clean = [WorkforceExecution(status="success", confidence=0.8) for _ in range(3)]
+        blocked = [
+            WorkforceExecution(
+                status="success",
+                confidence=0.8,
+                metadata={"policy_verdict": "forbidden"},
+            )
+            for _ in range(3)
+        ]
+        assert _calculate_trust_score(blocked) < _calculate_trust_score(clean)
+
+    def test_agent_confidence_uses_execution_status_when_unscored(self):
+        execs = [
+            WorkforceExecution(status="success"),
+            WorkforceExecution(status="failed"),
+            WorkforceExecution(status="error"),
+        ]
+        assert _calculate_agent_confidence(execs) > 0.0
+        assert _calculate_agent_confidence(execs) < 0.75
 
     def test_calculate_success_rate(self):
         execs = [WorkforceExecution(status="success") for _ in range(7)] + [WorkforceExecution(status="failed") for _ in range(3)]
@@ -752,6 +778,39 @@ class TestExecutions:
         assert updated is not None
         assert updated.total_executions == 2
         assert updated.average_latency_ms == 150.0
+        assert updated.confidence > 0.0
+        assert updated.trust_score != 50.0
+
+    def test_record_execution_scores_mixed_outcomes(self, repo):
+        mgr = WorkforceManager(repo)
+        success_agent = mgr.register_agent(WorkforceAgent(name="SuccessBot"))
+        failed_agent = mgr.register_agent(WorkforceAgent(name="FailedBot"))
+        mgr.activate_agent(success_agent.agent_id)
+        mgr.activate_agent(failed_agent.agent_id)
+
+        for index in range(3):
+            mgr.record_execution(
+                WorkforceExecution(
+                    agent_id=success_agent.agent_id,
+                    task=f"success-{index}",
+                    status="success",
+                )
+            )
+            mgr.record_execution(
+                WorkforceExecution(
+                    agent_id=failed_agent.agent_id,
+                    task=f"failed-{index}",
+                    status="failed",
+                    metadata={"policy_verdict": "approval_required"},
+                )
+            )
+
+        successful = mgr.get_agent(success_agent.agent_id)
+        failed = mgr.get_agent(failed_agent.agent_id)
+        assert successful is not None
+        assert failed is not None
+        assert successful.trust_score > failed.trust_score
+        assert successful.confidence > failed.confidence
 
     def test_record_execution_tracks_cost(self, repo):
         mgr = WorkforceManager(repo)

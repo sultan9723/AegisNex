@@ -1,9 +1,15 @@
 #!/bin/bash
+set -euo pipefail
 
 # Configuration: Paths for the audit engine
-TARGET_URL="https://stayfit.pk"
+TARGET_URL="${1:-}"
 RAW_VULNS="/tmp/nuclei_raw.json"
 JSON_OUTPUT="/data/audit_output.json"
+
+if [[ -z "$TARGET_URL" ]]; then
+    echo -e "\033[0;31m[!] Pipeline Execution Failure:\033[0m Target URL parameter is null."
+    exit 1
+fi
 
 echo "[*] AegisNexus [Module 2]: Initializing application threat discovery on: $TARGET_URL"
 

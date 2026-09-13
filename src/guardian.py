@@ -12,6 +12,7 @@ from src.health_checks import HealthCheck, HealthCheckResult
 from src.incidents import IncidentManager
 from src.notifications_compat import NotifierCompat
 from src.orchestrator import SystemHealthChecker
+from src.policy_engine import ActionVerdict, AppPolicyEngine
 
 
 class Guardian:
@@ -25,6 +26,7 @@ class Guardian:
         restart_history_path: str | Path = "restart_history.json",
         health_checks: list[HealthCheck] | None = None,
         incident_manager: IncidentManager | None = None,
+        policy_engine: AppPolicyEngine | None = None,
         storage_repository: Any | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -36,6 +38,7 @@ class Guardian:
         self.restart_history_path = Path(restart_history_path)
         self.health_checks = health_checks or []
         self.incident_manager = incident_manager
+        self.policy_engine = policy_engine or AppPolicyEngine(repository=storage_repository)
         self.storage_repository = storage_repository
         self.logger = logger or logging.getLogger("agentx.guardian")
         self.restart_history = self._load_restart_history()
@@ -71,13 +74,15 @@ class Guardian:
                 status=str(status),
                 health_check_results=serialized_results,
             )
-            decision = self._restart_decision(name)
+            decision = self._restart_decision(name, container)
             if not decision["allowed"]:
                 skipped = {
                     "status": "skipped",
                     "container": name,
                     "reason": decision["reason"],
                 }
+                if "policy" in decision:
+                    skipped["policy"] = decision["policy"]
                 if incident:
                     skipped["incident_id"] = incident.incident_id
                 if check_results:
@@ -189,24 +194,45 @@ class Guardian:
     def _should_restart(self, container_name: str) -> bool:
         return self._restart_decision(container_name)["allowed"]
 
-    def _restart_decision(self, container_name: str) -> dict[str, Any]:
+    def _restart_decision(
+        self,
+        container_name: str,
+        container: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         history = self.restart_history.get(container_name, {})
         attempts = int(history.get("attempts", 0))
         if attempts >= self.max_restart_attempts:
             return {"allowed": False, "reason": "max_restart_attempts"}
 
-        if self.restart_cooldown_seconds <= 0:
-            return {"allowed": True, "reason": "allowed"}
+        if self.restart_cooldown_seconds > 0:
+            last_restart_raw = history.get("last_restart")
+            if last_restart_raw:
+                last_restart = self._parse_timestamp(str(last_restart_raw))
+                if last_restart:
+                    elapsed = datetime.now(UTC) - last_restart
+                    if elapsed.total_seconds() < self.restart_cooldown_seconds:
+                        return {"allowed": False, "reason": "restart_cooldown"}
 
-        last_restart_raw = history.get("last_restart")
-        if not last_restart_raw:
-            return {"allowed": True, "reason": "allowed"}
-        last_restart = self._parse_timestamp(str(last_restart_raw))
-        if not last_restart:
-            return {"allowed": True, "reason": "allowed"}
-        elapsed = datetime.now(UTC) - last_restart
-        if elapsed.total_seconds() < self.restart_cooldown_seconds:
-            return {"allowed": False, "reason": "restart_cooldown"}
+        policy = self.policy_engine.evaluate(
+            "restart_container",
+            {
+                "container": container or {"name": container_name},
+                "restart_count": attempts,
+                "restart_history": self.restart_history,
+            },
+        )
+        if policy.verdict == ActionVerdict.FORBIDDEN:
+            return {
+                "allowed": False,
+                "reason": "policy_forbidden",
+                "policy": policy.to_dict(),
+            }
+        if policy.verdict == ActionVerdict.APPROVAL_REQUIRED:
+            return {
+                "allowed": False,
+                "reason": "approval_required",
+                "policy": policy.to_dict(),
+            }
         return {"allowed": True, "reason": "allowed"}
 
     def _record_restart_attempt(self, container_name: str) -> None:

@@ -7,6 +7,69 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+SENSITIVE_TARGET_MARKERS = {"critical", "production", "prod"}
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _context_values(params: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("environment", "env", "criticality", "service_criticality", "tier"):
+        value = params.get(key)
+        if value is not None:
+            values.append(str(value).strip().lower())
+
+    for key in ("tags", "service_tags"):
+        values.extend(str(value).strip().lower() for value in _as_list(params.get(key)))
+
+    labels = params.get("labels")
+    if isinstance(labels, dict):
+        for key, value in labels.items():
+            values.append(str(key).strip().lower())
+            values.append(str(value).strip().lower())
+    elif labels is not None:
+        values.extend(str(value).strip().lower() for value in _as_list(labels))
+
+    container = params.get("container")
+    if isinstance(container, dict):
+        nested = {
+            "environment": container.get("environment") or container.get("env"),
+            "criticality": container.get("criticality"),
+            "tags": container.get("tags"),
+            "labels": container.get("labels"),
+        }
+        values.extend(_context_values(nested))
+    return [value for value in values if value]
+
+
+def _restart_count(params: dict[str, Any]) -> int:
+    for key in ("restart_count", "recent_restart_count", "restart_attempts"):
+        try:
+            return int(params.get(key, 0))
+        except (TypeError, ValueError):
+            continue
+
+    container = params.get("container")
+    name = container.get("name") if isinstance(container, dict) else container
+    history = params.get("restart_history")
+    if isinstance(history, dict):
+        if isinstance(name, str) and isinstance(history.get(name), dict):
+            try:
+                return int(history[name].get("attempts", 0))
+            except (TypeError, ValueError):
+                return 0
+        try:
+            return int(history.get("attempts", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
 
 class RiskLevel(str, Enum):
     NONE = "none"
@@ -47,14 +110,18 @@ class RiskEngine:
     def assess_tool(self, tool_name: str, params: dict[str, Any] | None = None) -> RiskAssessment:
         from src.intelligence.tools import get_tool
 
+        params = params or {}
         tool = get_tool(tool_name)
         if tool is None:
+            score = 0.5
+            factors = ["Tool not in registry"]
+            score = self._apply_context_risk(score, factors, params)
             return RiskAssessment(
-                score=0.5,
-                level=RiskLevel.MEDIUM,
+                score=round(score, 2),
+                level=self._score_to_level(score),
                 requires_approval=True,
                 impact_estimate=f"Unknown tool: {tool_name}",
-                factors=["Tool not in registry"],
+                factors=factors,
             )
 
         factors: list[str] = []
@@ -85,6 +152,7 @@ class RiskEngine:
         if tool.requires_approval:
             factors.append("Tool explicitly requires approval")
 
+        score = self._apply_context_risk(score, factors, params)
         impact = self._estimate_impact(tool_name, score, factors)
         requires_approval = tool.requires_approval or score >= 0.5
         auto_execute = not requires_approval and score <= self._auto_execute_threshold
@@ -98,6 +166,21 @@ class RiskEngine:
             factors=factors,
             auto_execute_allowed=auto_execute,
         )
+
+    def _apply_context_risk(
+        self,
+        score: float,
+        factors: list[str],
+        params: dict[str, Any],
+    ) -> float:
+        markers = sorted(set(_context_values(params)) & SENSITIVE_TARGET_MARKERS)
+        if markers:
+            score = max(score, 0.7)
+            factors.append(f"Sensitive target context: {', '.join(markers)}")
+        if _restart_count(params) >= 2:
+            score = max(score, 0.5)
+            factors.append("Repeated recent restart attempts")
+        return score
 
     def assess_runbook(self, runbook_name: str, steps: list[dict[str, Any]]) -> RiskAssessment:
         factors: list[str] = []
