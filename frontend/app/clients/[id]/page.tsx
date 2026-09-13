@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Building2, CheckCircle2, Clock, FileText, RefreshCw, ShieldAlert } from "lucide-react";
 import {
@@ -91,8 +92,10 @@ function StatTile({ label, value, icon: Icon }: { label: string; value: number |
   );
 }
 
-export default function ClientEvidencePage({ params }: { params: { id: string } }) {
-  const orgId = Number(params.id);
+export default function ClientEvidencePage() {
+  const params = useParams<{ id: string }>();
+  const rawOrgId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+  const orgId = rawOrgId && /^\d+$/.test(rawOrgId) ? Number(rawOrgId) : Number.NaN;
   const [client, setClient] = useState<ClientOrganization | null>(null);
   const [stats, setStats] = useState<ClientOrgStats | null>(null);
   const [incidents, setIncidents] = useState<IncidentRow[]>([]);
@@ -101,7 +104,7 @@ export default function ClientEvidencePage({ params }: { params: { id: string } 
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
-    if (!Number.isFinite(orgId)) {
+    if (!Number.isInteger(orgId) || orgId <= 0) {
       setError("Invalid client id");
       setLoading(false);
       return;

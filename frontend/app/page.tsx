@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Zap, Sparkles, Shield } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { buildApiUrl } from "@/lib/api";
 import { Spinner } from "@/components/common/LoadingState";
 
 import { LandingNav } from "@/components/landing/LandingNav";
@@ -18,28 +19,50 @@ import { AgentExecution } from "@/components/landing/AgentExecution";
 import { KnowledgePipeline } from "@/components/landing/KnowledgePipeline";
 import { IntegrationGrid } from "@/components/landing/IntegrationGrid";
 import { AIWorkspacePreview } from "@/components/landing/AIWorkspacePreview";
+import { AIWorkforcePreview } from "@/components/landing/AIWorkforcePreview";
 import { ProductTabs } from "@/components/landing/ProductTabs";
 import { SecurityGrid } from "@/components/landing/SecurityGrid";
 
+// No public API exposes uptime/latency/throughput/error-rate numbers (and
+// none should be fabricated for marketing) - these describe real, always-on
+// product capabilities instead of unverifiable precise stats.
 const METRICS = [
-  { value: "99.97%", label: "Uptime SLA" },
-  { value: "<50ms", label: "Response Time" },
-  { value: "10K+", label: "Events/Second" },
-  { value: "0", label: "False Negatives" },
+  { value: "24/7", label: "Continuous Monitoring" },
+  { value: "AI", label: "Incident Analysis" },
+  { value: "Policy", label: "Gated Remediation" },
+  { value: "Full", label: "Audit Trail" },
 ];
 
 export default function LandingPage() {
   const [demoLoading, setDemoLoading] = useState(false);
   const [demoError, setDemoError] = useState("");
+  // Optimistic default (matches /login's pattern) so the button doesn't
+  // flash into a disabled state while the one-time config check is in flight.
+  const [demoEnabled, setDemoEnabled] = useState(true);
   const { demoLogin } = useAuth();
   const router = useRouter();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(buildApiUrl("/auth/sso/config"), { credentials: "include", cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) setDemoEnabled(Boolean(data.demo_auth_enabled));
+      })
+      .catch(() => {
+        /* backend unreachable - keep the optimistic default, handleDemoLogin surfaces the real error on click */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleDemoLogin = useCallback(async () => {
     setDemoError("");
     setDemoLoading(true);
     try {
       await demoLogin();
-      router.push("/dashboard");
+      router.replace("/dashboard");
     } catch (err) {
       setDemoError(err instanceof Error ? err.message : "Demo login failed. Is the backend running?");
     } finally {
@@ -49,7 +72,7 @@ export default function LandingPage() {
 
   return (
     <div className="min-h-screen bg-background text-text-primary overflow-x-hidden">
-      <LandingNav />
+      <LandingNav demoEnabled={demoEnabled} demoLoading={demoLoading} onTryDemo={handleDemoLogin} />
 
       {/* Hero */}
       <section className="relative pt-32 pb-20 sm:pt-40 sm:pb-28">
@@ -71,21 +94,30 @@ export default function LandingPage() {
             </div>
             <h1 className="mb-6 text-[2.5rem] font-bold tracking-[-0.04em] sm:text-[3.25rem] lg:text-[3.75rem] leading-[1.05]">
               Your infrastructure,{" "}
-              <span className="gradient-text">autonomously secured</span>
+              <span className="gradient-text">autonomously operated</span>
             </h1>
             <p className="mb-10 text-[15px] text-text-secondary sm:text-[17px] leading-relaxed max-w-xl mx-auto">
-              Unified monitoring, AI-powered incident response, and autonomous remediation - from a single command center.
+              Monitor infrastructure, investigate incidents with AI, and execute policy-governed remediation from one command center.
             </p>
             <div className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-              <button
-                onClick={handleDemoLogin}
-                disabled={demoLoading}
-                className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-7 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"
-              >
-                {demoLoading ? <Spinner className="size-4" /> : <Zap className="size-4 transition-transform group-hover:scale-110" />}
-                {demoLoading ? "Signing in..." : "Try Demo Workspace"}
-                {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
-              </button>
+              {demoEnabled ? (
+                <button
+                  onClick={handleDemoLogin}
+                  disabled={demoLoading}
+                  className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-7 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"
+                >
+                  {demoLoading ? <Spinner className="size-4" /> : <Zap className="size-4 transition-transform group-hover:scale-110" />}
+                  {demoLoading ? "Signing in..." : "Try Demo Workspace"}
+                  {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
+                </button>
+              ) : (
+                <span
+                  className="inline-flex h-12 items-center gap-2.5 rounded-xl border border-border bg-surface px-7 text-[13px] font-semibold text-text-disabled"
+                  title="Demo workspace is not enabled on this deployment"
+                >
+                  Demo Workspace Unavailable
+                </span>
+              )}
               <a
                 href="#architecture"
                 className="inline-flex h-12 items-center gap-2 rounded-xl border border-border bg-surface px-6 text-[13px] font-medium text-text-secondary transition-all hover:border-border-strong hover:bg-background hover:text-text-primary"
@@ -110,7 +142,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Live Dashboard Preview */}
+      {/* Product Dashboard Preview */}
       <section className="relative py-12 sm:py-20">
         <div className="mx-auto max-w-6xl px-6">
           <DashboardPreview />
@@ -139,7 +171,7 @@ export default function LandingPage() {
 
       <div className="divider mx-auto max-w-4xl" />
 
-      {/* AI Workspace Preview */}
+      {/* AI Operations Workspace */}
       <section className="relative py-20 sm:py-28">
         <div className="mx-auto max-w-6xl px-6">
           <div className="mb-12 text-center">
@@ -152,6 +184,24 @@ export default function LandingPage() {
             </p>
           </div>
           <AIWorkspacePreview />
+        </div>
+      </section>
+
+      <div className="divider mx-auto max-w-4xl" />
+
+      {/* AI Workforce */}
+      <section className="relative py-20 sm:py-28">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="mb-12 text-center">
+            <p className="section-eyebrow mb-4">AI Workforce</p>
+            <h2 className="text-[1.875rem] font-bold tracking-[-0.03em] sm:text-[2.25rem] leading-[1.15] text-text-primary">
+              AI Workforce Operations
+            </h2>
+            <p className="mx-auto mt-4 max-w-lg text-[14px] text-text-secondary">
+              Govern agents, review execution health, and operate policy-controlled AI workflows from one workspace.
+            </p>
+          </div>
+          <AIWorkforcePreview />
         </div>
       </section>
 
@@ -186,17 +236,26 @@ export default function LandingPage() {
                 Ready to transform your infrastructure?
               </h2>
               <p className="mx-auto mb-8 max-w-lg text-[14px] text-text-secondary">
-                Join the next generation of infrastructure management. One platform, AI-native, fully autonomous.
+                Monitor. Investigate. Govern. Remediate.
               </p>
-              <button
-                onClick={handleDemoLogin}
-                disabled={demoLoading}
-                className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-8 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"
-              >
-                {demoLoading ? <Spinner className="size-4" /> : <Sparkles className="size-4 transition-transform group-hover:scale-110" />}
-                {demoLoading ? "Signing in..." : "Launch Demo Workspace"}
-                {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
-              </button>
+              {demoEnabled ? (
+                <button
+                  onClick={handleDemoLogin}
+                  disabled={demoLoading}
+                  className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-8 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"
+                >
+                  {demoLoading ? <Spinner className="size-4" /> : <Sparkles className="size-4 transition-transform group-hover:scale-110" />}
+                  {demoLoading ? "Signing in..." : "Launch Demo Workspace"}
+                  {!demoLoading && <ArrowRight className="size-3.5 transition-transform group-hover:translate-x-0.5" />}
+                </button>
+              ) : (
+                <span
+                  className="inline-flex h-12 items-center gap-2.5 rounded-xl border border-border bg-surface px-8 text-[13px] font-semibold text-text-disabled"
+                  title="Demo workspace is not enabled on this deployment"
+                >
+                  Demo Workspace Unavailable
+                </span>
+              )}
             </div>
           </div>
         </div>

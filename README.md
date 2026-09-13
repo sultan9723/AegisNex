@@ -36,6 +36,35 @@
 
 ---
 
+## Table of Contents
+
+- [Why AegisNex](#why-aegisnex)
+- [Features](#features)
+  - [Infrastructure Monitoring](#infrastructure-monitoring)
+  - [AI Intelligence Engine](#ai-intelligence-engine)
+  - [AI Workforce, Mission Control & Governance](#ai-workforce-mission-control--governance)
+  - [Autonomous Operations](#autonomous-operations)
+  - [Enterprise Platform](#enterprise-platform)
+  - [Compliance](#compliance)
+  - [Security Scanning Pipeline](#security-scanning-pipeline)
+  - [Frontend](#frontend)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Backend](#backend)
+  - [Frontend](#frontend-1)
+  - [Docker](#docker)
+  - [CLI](#cli)
+- [Configuration](#configuration)
+- [Technology Stack](#technology-stack)
+- [Project Structure](#project-structure)
+- [Documentation](#documentation)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
 ## Why AegisNex
 
 Infrastructure teams today face a fractured toolchain. Monitoring in one dashboard, incidents in another, alerts in Slack, runbooks in Git, compliance in spreadsheets, and AI tools that have no connection to your actual infrastructure.
@@ -84,6 +113,17 @@ A LangGraph-based workflow engine that plans, executes, and learns from operatio
 - Runbook engine with parallel step groups, conditions, retries, and approval gates
 - 5 built-in AI skills (system analyzer, incident investigator, container manager, report generator, security auditor)
 
+### AI Workforce, Mission Control & Governance
+
+A dedicated multi-agent collaboration layer sits above the LangGraph engine: a `SupervisorAgent` coordinates seven domain agents (`InfrastructureAgent`, `DockerAgent`, `MonitoringAgent`, `IncidentAgent`, `ReportingAgent`, `KnowledgeAgent`, `ComplianceAgent`) that can be dispatched a task, fanned out in parallel, or made to collaborate on one problem. Every AI request — chat, plan, tool call, knowledge search, Docker action, governance approval — becomes a tracked, replayable `Execution` record.
+
+- **AI Workforce** (`/workforce`): create, clone, pause, resume agents; per-agent versions, prompts, permissions, knowledge attachments, trust scoring, and budget tracking — fully database-backed, no placeholder data
+- **Mission Control** (`/mission-control`): live execution visualization with replay mode and multi-agent tracking
+- **AI Governance** (`/governance`): agent registry, action-level audit trail, policy enforcement, anomaly detection
+- **Approvals** (`/approvals`): the human-in-the-loop queue for any action the policy engine classifies as requiring sign-off before it runs
+- **Explanations**: every autonomous action carries a machine-generated rationale and evidence trail, not just a log line
+- **Cost-aware LLM routing (CommandMesh)**: query-complexity scoring automatically routes each request to a `cheap` / `medium` / `frontier` model tier by cost-per-million-tokens, configurable per deployment
+
 ### Autonomous Operations
 
 The system doesn't just alert — it acts. The `Guardian` module detects container failures and auto-restarts within configurable cooldowns and max-attempt limits. The healing module can execute predefined remediation actions without human intervention.
@@ -99,11 +139,14 @@ The system doesn't just alert — it acts. The `Guardian` module detects contain
 Built for organizations from day one. Multi-tenancy with data isolation at the application layer, a plugin system with 6 plugin types, an integration marketplace with 11 providers, and cross-domain enterprise search across 12 data domains.
 
 - Multi-tenancy: Organizations → Teams → Projects with row-level isolation
+- MSP-style **Clients** workspace (`/clients`): manage the organizations this deployment serves as the boundary for incidents, approvals, and execution evidence
 - Plugin system: Tool, Integration, Skill, Workflow, Notification, Compliance plugins
 - Integration marketplace: GitHub, GitLab, Jira, ServiceNow, Slack, Teams, PagerDuty, Discord, Kubernetes, Prometheus, Grafana
-- Enterprise search across incidents, targets, notifications, audit logs, reports, compliance, runbooks, knowledge
-- Knowledge management with document upload, directory indexing, semantic search
+- Enterprise search across 12 domains: incidents, targets, reports, audit logs, compliance, runbooks, AI conversations, settings, containers, integrations, knowledge, workflows
+- Knowledge management with document upload, directory indexing, semantic search (RAG)
 - Visual workflow designer with storage and execution engine
+- Built-in **MCP server** (`src/mcp_server.py`) exposing system health, containers, incidents, metrics, and monitoring as MCP tools for external AI clients (e.g. Claude Desktop)
+- **Demo login**: one-click, restricted `read_only` session (`AEGISNEX_DEMO_ENABLED=true`) for safely demoing a production deployment without exposing real credentials
 
 ### Compliance
 
@@ -125,12 +168,12 @@ Dockerized security scanners that run as part of your CI/CD pipeline or on a sch
 
 ### Frontend
 
-A Next.js 14 dashboard with 13 route pages, real-time WebSocket updates, and a premium dark theme. Falls back to Jinja2 templates for backend-only deployments.
+A Next.js 14 dashboard with 19 route pages, real-time WebSocket updates, and a premium dark theme. Falls back to Jinja2 templates for backend-only deployments.
 
-- 13 app router pages (dashboard, AI, audit, containers, incidents, infrastructure, integrations, login, MCP, notifications, reports, search, settings, targets)
+- 19 app router pages: `dashboard`, `infrastructure`, `containers`, `incidents`, `targets`, `mission-control`, `workforce`, `governance`, `approvals`, `ai`, `mcp`, `integrations`, `notifications`, `reports`, `search`, `audit`, `clients` (+ client detail/unassigned sub-routes), `settings`, `login`
 - Real-time WebSocket streams for dashboard, incidents, containers, targets, container logs
 - Radix UI components + Recharts charts + Tailwind CSS dark theme with glass panels
-- Full API client (931 lines) with WebSocket auto-reconnect
+- Single API client (`lib/api.ts`) with automatic timeout, retry, and access-token refresh on 401; WebSocket helper (`lib/ws.ts`) with automatic reconnect/backoff
 
 ---
 
@@ -248,20 +291,31 @@ Full reference: [DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) · [config.yaml]
 
 ```
 aegisnex/
-├── src/                    # Python backend (40+ modules)
-│   ├── dashboard.py        # FastAPI app, 200+ routes, 5 WebSockets
-│   ├── intelligence/       # LangGraph AI engine (12 nodes, 5 providers)
-│   ├── agents/             # Multi-agent system (4 domain supervisors)
-│   ├── integrations/       # 11 provider modules
-│   ├── compliance/         # 5 compliance frameworks
-│   ├── plugins/            # Plugin registry (6 types)
-│   ├── monitoring/         # System, container, HTTP, SSL, TCP, DNS monitors
-│   └── multitenant/        # Organization/Team/Project with isolation
-├── frontend/               # Next.js 14 dashboard (13 routes, 40+ components)
-├── grafana/                # Prometheus + Grafana with 4 dashboards
-├── modules/                # Dockerized Nmap + Nuclei scanners
-├── tests/                  # 35+ test files
-└── docs/                   # 15+ documentation files
+├── src/                     # Python backend (40+ modules)
+│   ├── dashboard.py         # FastAPI app factory, 200+ routes, 5 WebSockets
+│   ├── intelligence/        # LangGraph AI engine — graph, tools, risk, policy, RAG, memory, runbooks
+│   ├── agents/               # Multi-agent workforce (1 supervisor + 7 domain agents)
+│   ├── ai_workforce.py       # Agent lifecycle, versions, trust scoring, budgets
+│   ├── mission_control.py    # Execution tracking/replay for every AI request
+│   ├── ai_governance.py      # Agent registry, action audit, anomaly detection
+│   ├── guardian.py / healing.py / policy_engine.py   # Autonomous remediation + safety gates
+│   ├── monitor.py, docker_scanner.py, http_monitor.py, ssl_monitor.py,
+│   │   tcp_monitor.py, dns_monitor.py                # Infrastructure monitors
+│   ├── integrations/         # Marketplace + 11 provider modules + MCP/AI provider status
+│   ├── compliance/           # 5 compliance frameworks (ISO 27001, SOC 2, NIST, CIS, OWASP)
+│   ├── plugins/               # Plugin registry (6 types: tool/integration/skill/workflow/notification/compliance)
+│   ├── skills/                # 5 built-in AI skills
+│   ├── knowledge/, search/    # Document RAG pipeline + 12-domain enterprise search
+│   ├── multitenant/            # Organization → Team → Project isolation
+│   ├── workflow_designer/      # Visual workflow engine + storage
+│   ├── mcp_server.py           # AegisNex-as-MCP-server for external AI clients
+│   └── platform_db.py          # Single repository, SQLite or PostgreSQL by URL
+├── frontend/                # Next.js 14 dashboard (19 routes, components in components/)
+├── grafana/                 # Prometheus + Grafana with 4 dashboards
+├── modules/                 # Dockerized Nmap + Nuclei scanners (decoupled recon pipeline)
+├── scripts/generate_secrets.py  # Generates JWT/demo/Fernet secrets — prints only, never writes files
+├── tests/                   # Test suite
+└── docs/                    # Documentation files
 ```
 
 Full structure: [REPOSITORY_STRUCTURE.md](docs/REPOSITORY_STRUCTURE.md)

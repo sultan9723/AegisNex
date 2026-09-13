@@ -38,7 +38,7 @@ export function BrowserFrame({
         </div>
         <div className="flex items-center gap-1.5">
           <div className="size-1.5 rounded-full bg-success" />
-          <span className="text-[10px] text-text-tertiary">Live</span>
+          <span className="text-[10px] text-text-tertiary">Product Preview</span>
         </div>
       </div>
       {/* Content area */}

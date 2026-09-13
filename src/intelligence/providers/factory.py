@@ -4,18 +4,24 @@ import os
 
 from src.intelligence.providers.base import ModelProvider, ProviderConfig
 
-_PROVIDER_NAMES = ["openai", "ollama", "anthropic", "gemini", "azure"]
+_PROVIDER_NAMES = ["openai", "ollama", "anthropic", "gemini", "azure", "groq"]
 _DEFAULT_PROVIDER = "openai"
+
+# Groq exposes an OpenAI-compatible chat completions API, so it reuses
+# OpenAIProvider entirely rather than needing its own client. This is only a
+# fallback default (never a secret) - AEGIS_AI_GROQ_BASE_URL still overrides it.
+_GROQ_DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 
 
 def _load_config_from_env(provider: str) -> ProviderConfig:
     prefix = f"AEGIS_AI_{provider.upper()}"
+    default_base_url = _GROQ_DEFAULT_BASE_URL if provider == "groq" else None
     return ProviderConfig(
         model=os.getenv(f"{prefix}_MODEL", ""),
         temperature=float(os.getenv(f"{prefix}_TEMPERATURE", "0.3")),
         max_tokens=int(os.getenv(f"{prefix}_MAX_TOKENS", "2048")),
         api_key=os.getenv(f"{prefix}_API_KEY") or os.getenv(f"{prefix}_KEY"),
-        base_url=os.getenv(f"{prefix}_BASE_URL"),
+        base_url=os.getenv(f"{prefix}_BASE_URL") or default_base_url,
         organization=os.getenv(f"{prefix}_ORGANIZATION"),
         deployment_name=os.getenv(f"{prefix}_DEPLOYMENT"),
     )
@@ -45,6 +51,12 @@ def create_provider(name: str | None = None, config: ProviderConfig | None = Non
         from src.intelligence.providers.azure_provider import AzureProvider
 
         return AzureProvider(cfg)
+    if resolved == "groq":
+        # OpenAI-compatible API - reuse OpenAIProvider with Groq's base URL
+        # and API key rather than a separate client implementation.
+        from src.intelligence.providers.openai_provider import OpenAIProvider
+
+        return OpenAIProvider(cfg)
     raise ValueError(f"Unknown AI provider: {resolved}. Supported: {', '.join(_PROVIDER_NAMES)}")
 
 

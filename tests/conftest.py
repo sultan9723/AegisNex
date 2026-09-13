@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
+# Several test modules import src.dashboard at collection time, which now
+# constructs AuthManager() (and therefore requires AEGISNEX_JWT_SECRET) as
+# soon as the module is imported. setdefault() only supplies a value when
+# nothing else (a real .env, CI secret, etc.) already has, so this never
+# masks an intentionally-configured secret.
+os.environ.setdefault("AEGISNEX_JWT_SECRET", "pytest-only-secret-not-for-production-use")
+
 import pytest
 
 

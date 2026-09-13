@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, AlertTriangle, ArrowRight, BookOpen, Brain, CheckCircle2,
+  Activity, AlertTriangle, BookOpen, Brain, CheckCircle2,
   Container, Cpu, HardDrive, Network, PlugZap, Plus, Server, Shield,
   ShieldAlert, ShieldCheck, Wifi, WifiOff, XCircle, Zap, Bot,
   TrendingUp, TrendingDown, Minus, ChevronRight, Clock, Globe,
@@ -13,11 +13,11 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { LoadingState } from "@/components/common/LoadingState";
 import { StatusBadge, type StatusState } from "@/components/common/StatusBadge";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { SkeletonDashboard } from "@/components/common/Skeleton";
 import {
   getDashboardWebSocketUrl,
   getPlatformHealth,
+  type AgentActivity,
   type ContainerRow,
   type DashboardRealtimeEvent,
   type DashboardSnapshot,
@@ -26,6 +26,8 @@ import {
   type PlatformHealth,
   type RemediationRow,
   getDashboardSnapshot,
+  listGovernanceActions,
+  getGovernanceActionStats,
 } from "@/lib/api";
 import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { formatTimestamp, pct } from "@/lib/format";
@@ -76,7 +78,7 @@ function buildTrend(metrics: MetricsResponse) {
   }));
 }
 
-function buildActivityFeed(data: DashboardData): ActivityItem[] {
+function buildActivityFeed(data: DashboardData, agentActivity: AgentActivity | null): ActivityItem[] {
   const items: ActivityItem[] = [];
   const added: Record<string, true> = {};
 
@@ -121,8 +123,8 @@ function buildActivityFeed(data: DashboardData): ActivityItem[] {
     }
   }
 
-  const agentActivity = data.agent_activity?.recent_actions ?? [];
-  for (const action of agentActivity.slice(0, 3)) {
+  const agentActivityRows = agentActivity?.recent_actions ?? [];
+  for (const action of agentActivityRows.slice(0, 3)) {
     const key = `agent-${action.action_id}`;
     if (!added[key]) {
       added[key] = true;
@@ -210,6 +212,7 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("Disconnected");
   const [platformHealth, setPlatformHealth] = useState<PlatformHealth | null>(null);
+  const [agentActivity, setAgentActivity] = useState<AgentActivity | null>(null);
   const reconnectAttempt = useRef(0);
 
   const load = useCallback(async () => {
@@ -233,11 +236,47 @@ export function DashboardPage() {
     }
   }, []);
 
+  const loadAgentActivity = useCallback(async () => {
+    try {
+      const [{ actions }, stats] = await Promise.all([
+        listGovernanceActions({ limit: 6 }),
+        getGovernanceActionStats(),
+      ]);
+      const recentActions = actions.map((a) => ({
+        action_id: a.action_id,
+        agent_id: a.agent_id,
+        action_type: a.action_type,
+        action_summary: a.action_summary,
+        reasoning: a.reasoning || a.action_type,
+        confidence_score: a.confidence_score,
+        policy_verdict: a.policy_verdict,
+        status: a.status,
+        duration_ms: a.duration_ms,
+        created_at: a.created_at,
+      }));
+      setAgentActivity({
+        recent_actions: recentActions,
+        active_agents: [],
+        stats: {
+          total_actions: stats.total_actions ?? recentActions.length,
+          success_rate: recentActions.length
+            ? recentActions.filter((a) => a.status === "success").length / recentActions.length
+            : 0,
+          pending_approvals: stats.by_verdict?.["pending_approval"] ?? 0,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      // non-critical
+    }
+  }, []);
+
   useEffect(() => {
     const timeout = window.setTimeout(() => void load(), 0);
     const healthTimeout = window.setTimeout(() => void loadPlatformHealth(), 0);
-    return () => { window.clearTimeout(timeout); window.clearTimeout(healthTimeout); };
-  }, [load, loadPlatformHealth]);
+    const agentTimeout = window.setTimeout(() => void loadAgentActivity(), 0);
+    return () => { window.clearTimeout(timeout); window.clearTimeout(healthTimeout); window.clearTimeout(agentTimeout); };
+  }, [load, loadPlatformHealth, loadAgentActivity]);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -247,16 +286,6 @@ export function DashboardPage() {
     const applyRealtimeEvent = (event: DashboardRealtimeEvent) => {
       if (event.type === "metric_update") {
         setData(event.payload as DashboardSnapshot);
-        return;
-      }
-      if (event.type === "agent_activity") {
-        setData((current) => {
-          if (!current) return current;
-          return {
-            ...current,
-            agent_activity: event.payload as DashboardData["agent_activity"],
-          };
-        });
         return;
       }
       setData((current) => {
@@ -312,7 +341,7 @@ export function DashboardPage() {
     };
   }, [load]);
 
-  const activityFeed = useMemo(() => (data ? buildActivityFeed(data) : []), [data]);
+  const activityFeed = useMemo(() => (data ? buildActivityFeed(data, agentActivity) : []), [data, agentActivity]);
 
   if (loading) return <SkeletonDashboard />;
 
@@ -323,7 +352,7 @@ export function DashboardPage() {
     return (
       <EmptyState
         title="Unable to load dashboard"
-        description={error ?? "Could not connect to the AegisNex backend. Please check if the backend is running on http://localhost:8000."}
+        description={error ?? "Could not connect to the AegisNex backend. Please check the configured backend API URL and service health."}
         actionLabel="Retry"
         onAction={() => { setLoading(true); void load(); }}
       />
@@ -341,32 +370,6 @@ export function DashboardPage() {
   const cpuTrend = getTrendDirection(data.metrics.chart_data.cpu);
   const memTrend = getTrendDirection(data.metrics.chart_data.memory);
   const diskTrend = getTrendDirection(data.metrics.chart_data.disk);
-
-  const sslWarnings = data.ssl_monitoring.warning_count;
-  const httpDown = data.http_monitoring.checks.filter(c => !c.available).length;
-  const tcpDown = data.tcp_monitoring.checks.filter(c => !c.reachable).length;
-
-  const recommendation = activeIncidents.length === 0
-    ? "All systems operational. No incidents to address."
-    : `Active incidents on ${Array.from(new Set(activeIncidents.map(i => i.service_name))).join(", ")}. Prioritize investigation.`;
-
-  const topRisk = sslWarnings > 0
-    ? `${sslWarnings} SSL certificate${sslWarnings > 1 ? "s" : ""} approaching expiration.`
-    : httpDown > 0
-      ? `${httpDown} HTTP endpoint${httpDown > 1 ? "s" : ""} currently unreachable.`
-      : tcpDown > 0
-        ? `${tcpDown} TCP service${tcpDown > 1 ? "s" : ""} not reachable.`
-        : health.score < 80
-          ? `Platform health score at ${health.score}% \u2014 below threshold.`
-          : "No significant risks detected. All services healthy.";
-
-  const nextAction = activeIncidents.length > 0
-    ? "Open incident response workflow to address active issues."
-    : sslWarnings > 0
-      ? "Review and renew expiring SSL certificates."
-      : httpDown > 0 || tcpDown > 0
-        ? "Investigate unreachable endpoints and restore connectivity."
-        : "Run a routine health check across all targets.";
 
   return (
     <ErrorBoundary>
@@ -432,37 +435,11 @@ export function DashboardPage() {
           />
         </div>
 
-        {/* Main grid: AI + Metrics + Incidents */}
+        {/* Main grid: Metrics + Incidents */}
         <div className="grid gap-4 lg:grid-cols-12">
 
-          {/* AI Recommendations panel */}
-          <div className="lg:col-span-4">
-            <PanelCard className="h-full">
-              <div className="flex items-center gap-2.5 mb-4">
-                <div className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary">
-                  <Brain className="size-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-text-primary">AI Insights</h3>
-                  <p className="text-[11px] text-text-tertiary">Automated analysis</p>
-                </div>
-              </div>
-              <div className="space-y-3">
-                <InsightPill icon={Zap} label="Recommendation" value={recommendation} color="primary" />
-                <InsightPill icon={AlertTriangle} label="Top Risk" value={topRisk} color="warning" />
-                <InsightPill icon={ArrowRight} label="Next Action" value={nextAction} color="info" />
-              </div>
-              <Link href="/ai" className="mt-4 block">
-                <Button variant="outline" size="sm" className="w-full">
-                  <Sparkles className="size-3.5" />
-                  Open AI Workspace
-                </Button>
-              </Link>
-            </PanelCard>
-          </div>
-
           {/* System metrics */}
-          <div className="lg:col-span-4">
+          <div className="lg:col-span-6">
             <PanelCard className="h-full">
               <div className="flex items-center gap-2.5 mb-4">
                 <div className="grid size-8 place-items-center rounded-lg bg-violet-500/10 text-violet-400">
@@ -489,7 +466,7 @@ export function DashboardPage() {
           </div>
 
           {/* Active Incidents */}
-          <div className="lg:col-span-4">
+          <div className="lg:col-span-6">
             <PanelCard className="h-full">
               <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2.5">
@@ -603,14 +580,14 @@ export function DashboardPage() {
                   View All <ChevronRight className="size-3" />
                 </Link>
               </div>
-              {(data.agent_activity?.recent_actions ?? []).length === 0 ? (
+              {(agentActivity?.recent_actions ?? []).length === 0 ? (
                 <div className="flex items-center gap-3 py-4">
                   <Bot className="size-4 text-text-tertiary" />
                   <p className="text-xs text-text-tertiary">No recent agent activity</p>
                 </div>
               ) : (
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {(data.agent_activity?.recent_actions ?? []).slice(0, 6).map((action) => (
+                  {(agentActivity?.recent_actions ?? []).slice(0, 6).map((action) => (
                     <div key={action.action_id} className="flex items-start gap-3 rounded-lg border border-border/30 bg-surface-elevated/30 p-3">
                       <div className="mt-0.5 size-2 shrink-0 rounded-full bg-emerald-400" />
                       <div className="min-w-0 flex-1">
@@ -627,20 +604,20 @@ export function DashboardPage() {
                   ))}
                 </div>
               )}
-              {data.agent_activity?.stats && (
+              {agentActivity?.stats && (
                 <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border/20">
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] text-text-tertiary">Total Actions:</span>
-                    <span className="text-xs font-semibold text-text-primary">{data.agent_activity.stats.total_actions}</span>
+                    <span className="text-xs font-semibold text-text-primary">{agentActivity.stats.total_actions}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-[10px] text-text-tertiary">Success Rate:</span>
-                    <span className="text-xs font-semibold text-text-primary">{(data.agent_activity.stats.success_rate * 100).toFixed(0)}%</span>
+                    <span className="text-xs font-semibold text-text-primary">{(agentActivity.stats.success_rate * 100).toFixed(0)}%</span>
                   </div>
-                  {data.agent_activity.stats.pending_approvals > 0 && (
+                  {agentActivity.stats.pending_approvals > 0 && (
                     <div className="flex items-center gap-1.5">
                       <span className="text-[10px] text-text-tertiary">Pending Approvals:</span>
-                      <Badge variant="warning-subtle" size="sm">{data.agent_activity.stats.pending_approvals}</Badge>
+                      <Badge variant="warning-subtle" size="sm">{agentActivity.stats.pending_approvals}</Badge>
                     </div>
                   )}
                 </div>
@@ -725,29 +702,6 @@ function MetricBar({
   );
 }
 
-function InsightPill({
-  icon: Icon, label, value, color,
-}: {
-  icon: LucideIcon; label: string; value: string; color: "primary" | "warning" | "info";
-}) {
-  const colorMap = {
-    primary: "bg-primary/10 text-primary",
-    warning: "bg-warning/10 text-warning",
-    info: "bg-info/10 text-info",
-  };
-  return (
-    <div className="rounded-lg border border-border/20 bg-surface/40 p-3">
-      <div className="flex items-center gap-2 mb-1">
-        <div className={cn("grid size-5 place-items-center rounded", colorMap[color])}>
-          <Icon className="size-2.5" />
-        </div>
-        <span className="text-[10px] font-semibold uppercase tracking-[0.06em] text-text-tertiary">{label}</span>
-      </div>
-      <p className="text-[12px] leading-relaxed text-text-primary pl-7">{value}</p>
-    </div>
-  );
-}
-
 function IncidentRowCompact({ incident }: { incident: IncidentRow }) {
   const isCritical = incident.severity === "critical" || incident.severity === "high";
   return (
@@ -828,14 +782,5 @@ function PlatformHealthBannerInline({ health }: { health: PlatformHealth | null 
         {health.required_healthy}/{health.required_total}
       </span>
     </div>
-  );
-}
-
-function Sparkles(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z" />
-      <path d="M20 3v4" /><path d="M22 5h-4" />
-    </svg>
   );
 }

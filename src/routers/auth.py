@@ -308,7 +308,8 @@ async def sso_callback(request: Request) -> Any:
         )
 
     frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "/").strip() or "/"
-    response = RedirectResponse(url=f"{frontend_url.rstrip('/')}/dashboard", status_code=302)
+    dashboard_url = "/dashboard" if frontend_url == "/" else f"{frontend_url.rstrip('/')}/dashboard"
+    response = RedirectResponse(url=dashboard_url, status_code=302)
     _clear_oidc_cookies(response)
     _set_auth_cookie(response, access_token, auth_manager.token_ttl_seconds)
     _set_refresh_cookie(response, refresh_token, auth_manager.refresh_token_ttl_seconds)

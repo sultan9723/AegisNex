@@ -26,6 +26,15 @@ import {
 
 type Tab = "overview" | "agents" | "playground";
 
+export const WORKFORCE_PROVIDERS: Array<{ value: string; label: string }> = [
+  { value: "openai", label: "OpenAI" },
+  { value: "anthropic", label: "Anthropic" },
+  { value: "google", label: "Google" },
+  { value: "groq", label: "Groq" },
+  { value: "mistral", label: "Mistral" },
+  { value: "local", label: "Local" },
+];
+
 const LIFECYCLE_COLORS: Record<string, string> = {
   draft: "bg-gray-50 text-gray-600 border-gray-200",
   active: "bg-green-50 text-green-700 border-green-200",
@@ -119,6 +128,16 @@ function WizardModal({ open, onClose, onCreated }: {
 
   const update = (k: string, v: string | number) => setForm(p => ({ ...p, [k]: v }));
 
+  const updateProvider = (v: string) => {
+    setForm(p => {
+      const next = { ...p, provider: v };
+      if (v === "groq" && p.model === "gpt-4o-mini") {
+        return { ...next, model: "openai/gpt-oss-20b" };
+      }
+      return next;
+    });
+  };
+
   const handleCreate = async () => {
     setSaving(true); setError("");
     try {
@@ -189,17 +208,15 @@ function WizardModal({ open, onClose, onCreated }: {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="mb-1 block text-xs font-medium text-text-secondary">Provider</label>
-              <select value={form.provider} onChange={e => update("provider", e.target.value)} className="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="google">Google</option>
-                <option value="mistral">Mistral</option>
-                <option value="local">Local</option>
+              <select value={form.provider} onChange={e => updateProvider(e.target.value)} className="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm">
+                {WORKFORCE_PROVIDERS.map(p => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
               </select>
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-text-secondary">Model</label>
-              <input value={form.model} onChange={e => update("model", e.target.value)} className="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm" placeholder="gpt-4o-mini" />
+              <input value={form.model} onChange={e => update("model", e.target.value)} className="w-full rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm" placeholder={form.provider === "groq" ? "openai/gpt-oss-20b" : "gpt-4o-mini"} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

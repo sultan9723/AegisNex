@@ -223,8 +223,12 @@ def test_plan_node_llm_fallback_on_json_error():
 # ─── run_workflow error handling ────────────────────────────────────────────
 
 
-def test_run_workflow_handles_create_provider_failure():
+def test_run_workflow_handles_create_provider_failure(monkeypatch):
     """run_workflow should not crash when create_provider raises."""
+    # provider_used falls back to the AEGIS_AI_PROVIDER env default ("openai")
+    # independent of the mocked create_provider - pin it explicitly so this
+    # test doesn't depend on whether a real .env sets a different provider.
+    monkeypatch.delenv("AEGIS_AI_PROVIDER", raising=False)
     from src.intelligence.graph import run_workflow, reset_graph
     reset_graph()
 

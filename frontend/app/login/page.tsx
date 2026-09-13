@@ -254,12 +254,13 @@ export default function LoginPage() {
     setDemoLoading(true);
     try {
       await demoLogin();
+      router.replace("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Demo login failed. Is the backend running?");
     } finally {
       setDemoLoading(false);
     }
-  }, [demoLogin]);
+  }, [demoLogin, router]);
 
   const handleSsoLogin = useCallback(() => {
     setError("");

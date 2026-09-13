@@ -162,7 +162,7 @@ export default function ClientsPage() {
       </div>
 
       {(error || notice) && (
-        <div className={`rounded-xl border px-4 py-3 text-sm ${error ? "border-danger-border bg-danger-bg text-danger-subtle" : "border-success-border bg-success-bg text-success-subtle"}`}>
+        <div className={`rounded-xl border px-4 py-3 text-sm ${error ? "border-danger-border bg-danger-bg text-danger" : "border-success-border bg-success-bg text-success"}`}>
           {error || notice}
         </div>
       )}

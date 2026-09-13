@@ -924,6 +924,23 @@ class GovernanceManager:
             ).fetchone()
         return self._row_to_action(row) if row else None
 
+    def update_action(self, action_id: str, tenant_id: str = "default", **fields: Any) -> bool:
+        """Update fields on an already-recorded action - e.g. policy_verdict
+        once a linked human approval decision is made. Does not touch the
+        tamper-evident hash chain (previous_hash/entry_hash), which reflects
+        the action as originally recorded.
+        """
+        if not fields:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [self._tenant(tenant_id), action_id]
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE agent_actions SET {set_clause} WHERE tenant_id = ? AND action_id = ?",
+                tuple(values),
+            )
+        return cursor.rowcount > 0
+
     def list_actions(
         self,
         agent_id: str | None = None,
