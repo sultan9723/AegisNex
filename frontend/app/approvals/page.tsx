@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState, EmptyStateError } from "@/components/common/EmptyState";
 
-function formatDate(value: string) {
+function formatDate(value: string | null | undefined) {
   if (!value) return "Not recorded";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Not recorded";
@@ -121,7 +121,7 @@ export default function ApprovalsPage() {
       </div>
 
       {(error || notice) && (
-        <div className={`rounded-xl border px-4 py-3 text-sm ${error ? "border-danger-border bg-danger-bg text-danger-subtle" : "border-success-border bg-success-bg text-success-subtle"}`}>
+        <div className={`rounded-xl border px-4 py-3 text-sm ${error ? "border-danger-border bg-danger-bg text-danger" : "border-success-border bg-success-bg text-success"}`}>
           {error || notice}
         </div>
       )}
@@ -180,25 +180,45 @@ export default function ApprovalsPage() {
                       </div>
                     )}
                   </div>
-                  <div className="flex shrink-0 gap-2">
-                    <Button
-                      variant="success"
-                      size="sm"
-                      disabled={!pending || savingId === approval.approval_id}
-                      onClick={() => handleDecision(approval.approval_id, "approved")}
-                    >
-                      <CheckCircle2 />
-                      Approve
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={!pending || savingId === approval.approval_id}
-                      onClick={() => handleDecision(approval.approval_id, "rejected")}
-                    >
-                      <XCircle />
-                      Reject
-                    </Button>
+                  <div className="shrink-0">
+                    {pending ? (
+                      <div className="flex gap-2">
+                        <Button
+                          variant="success"
+                          size="sm"
+                          disabled={savingId === approval.approval_id}
+                          onClick={() => handleDecision(approval.approval_id, "approved")}
+                        >
+                          <CheckCircle2 />
+                          Approve
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          disabled={savingId === approval.approval_id}
+                          onClick={() => handleDecision(approval.approval_id, "rejected")}
+                        >
+                          <XCircle />
+                          Reject
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-start gap-1 text-xs xl:items-end">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-text-secondary">
+                          {approval.status === "approved" ? (
+                            <CheckCircle2 className="size-3.5 text-success" />
+                          ) : (
+                            <XCircle className="size-3.5 text-danger" />
+                          )}
+                          Decision: {formatDate(approval.reviewed_at)}
+                        </span>
+                        {approval.reviewed_by && (
+                          <span className="text-text-tertiary">
+                            Reviewed by <span className="font-medium text-text-secondary">{approval.reviewed_by}</span>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>
@@ -210,7 +230,7 @@ export default function ApprovalsPage() {
       <div className="rounded-xl border border-border bg-surface p-5">
         <div className="flex gap-3">
           <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-warning-bg">
-            <ShieldAlert className="size-4 text-warning-subtle" />
+            <ShieldAlert className="size-4 text-warning" />
           </div>
           <div>
             <h2 className="text-sm font-semibold text-text-primary">What this page proves</h2>
