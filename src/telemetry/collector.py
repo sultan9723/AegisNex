@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import time
@@ -35,18 +36,12 @@ class TelemetryCollector:
         _logger.debug("TelemetryCollector opening connection to %s", self._db_path)
         conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            pass
         self._conn = conn
         return conn
 
@@ -154,7 +149,7 @@ class TelemetryCollector:
     # ---- Stats queries ----
 
     def get_api_stats(self, hours: int = 24) -> dict[str, Any]:
-        cutoff = (time.time() - hours * 3600) * 1000
+        (time.time() - hours * 3600) * 1000
         rows = self._fetch_all(
             "SELECT * FROM api_latency WHERE (julianday('now') - julianday(substr(timestamp,1,19))) * 86400 <= ?",
             (hours * 3600,),

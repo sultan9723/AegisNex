@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 
-class WorkflowNodeType(str, enum.Enum):
+class WorkflowNodeType(enum.StrEnum):
     TRIGGER = "TRIGGER"
     AI_PLANNING = "AI_PLANNING"
     TOOL_EXECUTION = "TOOL_EXECUTION"
@@ -217,7 +217,7 @@ class WorkflowDefinition:
             if node.type == WorkflowNodeType.END:
                 return
             if node.type == WorkflowNodeType.CONDITION:
-                for target_id, condition in adjacency.get(node_id, []):
+                for target_id, _condition in adjacency.get(node_id, []):
                     _traverse(target_id)
             else:
                 targets = adjacency.get(node_id, [])

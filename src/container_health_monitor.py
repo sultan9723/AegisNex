@@ -107,7 +107,7 @@ class ContainerHealthMonitor:
             if health_status and health_status != "healthy":
                 healthy = False
                 state = health_status
-            latency_ms = round((perf_counter() - started) * 1000, 2)
+            round((perf_counter() - started) * 1000, 2)
             return ContainerHealthCheck(
                 name=name,
                 container_name=container_name,
@@ -120,7 +120,7 @@ class ContainerHealthMonitor:
                 error="" if healthy else f"Container state: {state}",
             )
         except Exception as exc:
-            latency_ms = round((perf_counter() - started) * 1000, 2)
+            round((perf_counter() - started) * 1000, 2)
             return ContainerHealthCheck(
                 name=name,
                 container_name=container_name,

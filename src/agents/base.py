@@ -5,11 +5,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class AgentType(str, Enum):
+class AgentType(StrEnum):
     OPERATIONS = "operations"
     SECURITY = "security"
     COMPLIANCE = "compliance"

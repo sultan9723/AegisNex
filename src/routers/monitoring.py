@@ -19,10 +19,12 @@ OPERATOR_ROLES = ("super_admin", "administrator", "soc_analyst", "operator")
 def _require_role(request: Request, *roles: str) -> None:
     """Check if user has required role."""
     from src.dashboard import require_auth
+
     auth_manager = request.app.state.auth_manager
     user = require_auth(request, auth_manager)
     if not user.has_role(*roles):
         from fastapi import HTTPException
+
         raise HTTPException(
             status_code=403,
             detail=f"Role '{user.role}' not permitted. Required: {', '.join(roles)}",
@@ -64,6 +66,7 @@ async def api_incident_detail(incident_id: str, request: Request) -> Any:
         incident = incident_manager.get_incident(incident_id)
         if incident is None:
             from fastapi import HTTPException
+
             raise HTTPException(status_code=404, detail="Incident not found")
         return incident.to_dict()
     except HTTPException:
@@ -71,6 +74,7 @@ async def api_incident_detail(incident_id: str, request: Request) -> Any:
     except Exception as exc:
         logger.error("Failed to get incident %s: %s", incident_id, exc)
         from fastapi import HTTPException
+
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -83,6 +87,7 @@ async def api_acknowledge_incident(incident_id: str, request: Request) -> Any:
         incident = incident_manager.acknowledge_incident(incident_id)
         if incident is None:
             from fastapi import HTTPException
+
             raise HTTPException(status_code=404, detail="Incident not found")
         return incident.to_dict()
     except HTTPException:
@@ -90,6 +95,7 @@ async def api_acknowledge_incident(incident_id: str, request: Request) -> Any:
     except Exception as exc:
         logger.error("Failed to acknowledge incident %s: %s", incident_id, exc)
         from fastapi import HTTPException
+
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -111,6 +117,7 @@ async def api_system_health(request: Request) -> Any:
     _require_role(request, *VIEWER_ROLES)
     try:
         import psutil
+
         health = {
             "status": "healthy",
             "cpu_percent": psutil.cpu_percent(interval=0.1),
@@ -120,6 +127,7 @@ async def api_system_health(request: Request) -> Any:
         }
         try:
             import time
+
             health["uptime_seconds"] = int(time.time() - psutil.boot_time())
         except Exception:
             pass

@@ -43,7 +43,7 @@ class KubernetesProvider(IntegrationProvider):
         try:
             if self._use_kubectl:
                 result = subprocess.run(
-                    self._get_kubectl_cmd() + ["cluster-info", "--request-timeout=5s"],
+                    [*self._get_kubectl_cmd(), "cluster-info", "--request-timeout=5s"],
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -87,10 +87,10 @@ class KubernetesProvider(IntegrationProvider):
                 )
             client = getattr(kubernetes.client, f"{method}Api")()
             return getattr(client, kwargs.pop("api_method"))(*args, **kwargs)
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "kubernetes Python package not available, set use_kubectl=true or install kubernetes"
-            )
+            ) from exc
 
     def _action_list_pods(self, params: dict[str, Any]) -> Any:
         namespace = params.get("namespace", "default")
@@ -137,10 +137,9 @@ class KubernetesProvider(IntegrationProvider):
         tail_lines = params.get("tail_lines", 100)
         try:
             v1 = self._try_k8s_client("CoreV1", api_method="read_namespaced_pod_log")
-            log = v1.read_namespaced_pod_log(
+            return v1.read_namespaced_pod_log(
                 pod_name, namespace, container=container or None, tail_lines=tail_lines
             )
-            return log
         except ImportError:
             args = ["logs", pod_name, "-n", namespace, f"--tail={tail_lines}", "--output=json"]
             if container:
@@ -270,14 +269,20 @@ class KubernetesProvider(IntegrationProvider):
             return {"status": "restarted", "deployment": deployment_name}
         except ImportError:
             result = subprocess.run(
-                self._get_kubectl_cmd()
-                + ["rollout", "restart", f"deployment/{deployment_name}", "-n", namespace],
+                [
+                    *self._get_kubectl_cmd(),
+                    "rollout",
+                    "restart",
+                    f"deployment/{deployment_name}",
+                    "-n",
+                    namespace,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"rollout restart failed: {result.stderr.strip()}")
+                raise RuntimeError(f"rollout restart failed: {result.stderr.strip()}") from None
             return {
                 "status": "restarted",
                 "deployment": deployment_name,

@@ -46,8 +46,7 @@ class SecretManager:
                 salt=salt,
                 iterations=600_000,
             )
-            derived = base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
-            return derived
+            return base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
 
     def _get_fernet(self) -> Fernet:
         if self._fernet is None:

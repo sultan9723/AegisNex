@@ -147,7 +147,7 @@ class SearchEngine:
         cols = ["incident_id", "description", "service_name", "severity"]
         where = _like_clause(cols, self._repo.backend)
         sql = f"SELECT * FROM incidents WHERE {where} ORDER BY timestamp DESC LIMIT {p}"
-        rows = self._repo._fetch_all(sql, _like_params(query, cols) + [limit])
+        rows = self._repo._fetch_all(sql, [*_like_params(query, cols), limit])
         return [
             _make_result(
                 "incidents",
@@ -165,7 +165,7 @@ class SearchEngine:
         cols = ["name", "address", "target_type"]
         where = _like_clause(cols, self._repo.backend)
         sql = f"SELECT * FROM monitoring_targets WHERE {where} ORDER BY name LIMIT {p}"
-        rows = self._repo._fetch_all(sql, _like_params(query, cols) + [limit])
+        rows = self._repo._fetch_all(sql, [*_like_params(query, cols), limit])
         return [
             _make_result(
                 "targets", r, "id", "name", "address", route_template="/infrastructure", score=1.5
@@ -178,7 +178,7 @@ class SearchEngine:
         cols = ["report_type", "status", "summary", "path"]
         where = _like_clause(cols, self._repo.backend)
         sql = f"SELECT * FROM reports WHERE {where} ORDER BY timestamp DESC LIMIT {p}"
-        rows = self._repo._fetch_all(sql, _like_params(query, cols) + [limit])
+        rows = self._repo._fetch_all(sql, [*_like_params(query, cols), limit])
         return [
             _make_result(
                 "reports", r, "id", "summary", "report_type", route_template="/reports", score=1.5
@@ -191,7 +191,7 @@ class SearchEngine:
         cols = ["actor", "action", "resource_type", "resource_id", "details"]
         where = _like_clause(cols, self._repo.backend)
         sql = f"SELECT * FROM audit_logs WHERE {where} ORDER BY timestamp DESC LIMIT {p}"
-        rows = self._repo._fetch_all(sql, _like_params(query, cols) + [limit])
+        rows = self._repo._fetch_all(sql, [*_like_params(query, cols), limit])
         return [
             _make_result(
                 "audit_logs", r, "id", "action", "details", route_template="/audit", score=1.0
@@ -360,7 +360,7 @@ class SearchEngine:
             cols = ["name", "description", "target_type", "severity"]
             where = _like_clause(cols, self._repo.backend)
             sql = f"SELECT * FROM alert_rules WHERE {where} ORDER BY name LIMIT {p}"
-            rows = self._repo._fetch_all(sql, _like_params(query, cols) + [limit])
+            rows = self._repo._fetch_all(sql, [*_like_params(query, cols), limit])
             for r in rows:
                 results.append(
                     _make_result("compliance", r, "id", "name", "description", score=1.5)

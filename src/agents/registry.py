@@ -214,7 +214,7 @@ class AgentRegistry:
             return []
 
         group_results: list[AgentResult] = []
-        for group in plan.get("parallel_groups", [list(agent.agent_id for agent in agents)]):
+        for group in plan.get("parallel_groups", [[agent.agent_id for agent in agents]]):
             group_agents = [agent for agent in agents if agent.agent_id in group]
             if not group_agents:
                 continue
@@ -223,7 +223,7 @@ class AgentRegistry:
                 subtask = self._subtask_for_agent(agent.agent_id, task, plan)
                 jobs.append(agent.process(subtask, shared_state))
             batch = await asyncio.gather(*jobs, return_exceptions=True)
-            for agent, item in zip(group_agents, batch):
+            for agent, item in zip(group_agents, batch, strict=False):
                 if isinstance(item, AgentResult):
                     group_results.append(item)
                 else:

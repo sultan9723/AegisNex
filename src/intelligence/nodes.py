@@ -208,7 +208,7 @@ def tool_router_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Tool router error: {exc!s}"]
+        state["errors"] = [*list(state.get("errors", [])), f"Tool router error: {exc!s}"]
 
     return state
 
@@ -485,7 +485,7 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Planner node error: {exc!s}"]
+        state["errors"] = [*list(state.get("errors", [])), f"Planner node error: {exc!s}"]
 
     return state
 
@@ -557,7 +557,7 @@ def tool_executor_node(state: AgentState, repo: PlatformRepository | None = None
                 start_time = time.time()
                 try:
                     result = execute_tool(tool_name, repo=repo)
-                    duration_ms = (time.time() - start_time) * 1000
+                    (time.time() - start_time) * 1000
                     status = "ok" if result.get("status") == "ok" else "error"
                     batch_results[tool_name] = result
 
@@ -576,7 +576,7 @@ def tool_executor_node(state: AgentState, repo: PlatformRepository | None = None
                         logger.add_error(error_msg)
 
                 except Exception as exc:
-                    duration_ms = (time.time() - start_time) * 1000
+                    (time.time() - start_time) * 1000
                     error_msg = f"{tool_name}: {exc!s}"
                     errors.append(error_msg)
                     batch_results[tool_name] = {"status": "error", "error": str(exc)}
@@ -613,7 +613,7 @@ def tool_executor_node(state: AgentState, repo: PlatformRepository | None = None
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Tool executor error: {exc!s}"]
+        state["errors"] = [*list(state.get("errors", [])), f"Tool executor error: {exc!s}"]
 
     return state
 
@@ -745,7 +745,7 @@ def verifier_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Verifier error: {exc!s}"]
+        state["errors"] = [*list(state.get("errors", [])), f"Verifier error: {exc!s}"]
 
     return state
 
@@ -895,7 +895,7 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
         evidence = state.get("evidence", [])
         reasoning_summary = state.get("reasoning_summary", "")
         remaining_uncertainty = state.get("remaining_uncertainty", "")
-        retrieved_context = state.get("retrieved_context", "")
+        state.get("retrieved_context", "")
 
         has_data = bool(tool_results)
         has_critical_errors = any("database" in str(e).lower() for e in errors)
@@ -1023,7 +1023,7 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
         logger.add_error(str(exc))
         logger_final = logger.finalize("error")
         add_execution_log_to_state(state, logger_final)
-        state["errors"] = list(state.get("errors", [])) + [f"Goal evaluator error: {exc!s}"]
+        state["errors"] = [*list(state.get("errors", [])), f"Goal evaluator error: {exc!s}"]
 
     return state
 
@@ -1143,14 +1143,6 @@ def runbook_executor_node(state: AgentState, repo: PlatformRepository | None = N
 
     engine = RunbookEngine(registry)
     for step_model in runbook.steps:
-        step_dict = {
-            "name": step_model.name,
-            "action": step_model.action,
-            "tool": step_model.tool,
-            "params": step_model.params,
-            "description": step_model.description,
-            "requires_approval": step_model.requires_approval,
-        }
         if step_model.requires_approval:
             approval_id = f"runbook_approval_{utc_now()}_{step_model.name}"
             state["approval_required"] = True
@@ -1245,10 +1237,8 @@ def scheduler_node(state: AgentState) -> AgentState:
         )
     except Exception as exc:
         state["scheduler_tasks"] = []
-        state["errors"] = list(state.get("errors", [])) + [f"Scheduler unavailable: {exc}"]
-        executed_steps.append(
-            _make_step("scheduler", "warning", f"Scheduler unavailable: {exc}")
-        )
+        state["errors"] = [*list(state.get("errors", [])), f"Scheduler unavailable: {exc}"]
+        executed_steps.append(_make_step("scheduler", "warning", f"Scheduler unavailable: {exc}"))
     state["executed_steps"] = executed_steps
     return state
 

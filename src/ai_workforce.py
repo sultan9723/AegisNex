@@ -14,7 +14,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -50,7 +50,7 @@ def new_id() -> str:
 # ---------------------------------------------------------------------------
 
 
-class LifecycleStatus(str, Enum):
+class LifecycleStatus(StrEnum):
     DRAFT = "draft"
     ACTIVE = "active"
     PAUSED = "paused"
@@ -58,27 +58,27 @@ class LifecycleStatus(str, Enum):
     DECOMMISSIONED = "decommissioned"
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
     UNKNOWN = "unknown"
 
 
-class PromptRole(str, Enum):
+class PromptRole(StrEnum):
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
 
 
-class AccessLevel(str, Enum):
+class AccessLevel(StrEnum):
     READ = "read"
     WRITE = "write"
     READ_WRITE = "read_write"
 
 
-class ExecutionResult(str, Enum):
+class ExecutionResult(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     ERROR = "error"
@@ -125,14 +125,18 @@ class WorkforceAgent:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["tools"] = self.tools if isinstance(self.tools, list) else json.loads(self.tools)
-        d["permissions"] = self.permissions if isinstance(self.permissions, list) else json.loads(self.permissions)
-        d["metadata"] = self.metadata if isinstance(self.metadata, dict) else json.loads(self.metadata)
+        d["permissions"] = (
+            self.permissions if isinstance(self.permissions, list) else json.loads(self.permissions)
+        )
+        d["metadata"] = (
+            self.metadata if isinstance(self.metadata, dict) else json.loads(self.metadata)
+        )
         d["tags"] = self.tags if isinstance(self.tags, list) else json.loads(self.tags)
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkforceAgent:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         filtered = {k: v for k, v in data.items() if k in valid}
         return cls(**filtered)
 
@@ -153,7 +157,7 @@ class AgentVersion:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentVersion:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -172,12 +176,14 @@ class PromptVersion:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["variables"] = self.variables if isinstance(self.variables, list) else json.loads(self.variables)
+        d["variables"] = (
+            self.variables if isinstance(self.variables, list) else json.loads(self.variables)
+        )
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PromptVersion:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -198,7 +204,7 @@ class ToolPermission:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolPermission:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -217,7 +223,7 @@ class KnowledgeAssignment:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> KnowledgeAssignment:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -239,13 +245,17 @@ class WorkforceExecution:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["tools_used"] = self.tools_used if isinstance(self.tools_used, list) else json.loads(self.tools_used)
-        d["metadata"] = self.metadata if isinstance(self.metadata, dict) else json.loads(self.metadata)
+        d["tools_used"] = (
+            self.tools_used if isinstance(self.tools_used, list) else json.loads(self.tools_used)
+        )
+        d["metadata"] = (
+            self.metadata if isinstance(self.metadata, dict) else json.loads(self.metadata)
+        )
         return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> WorkforceExecution:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -266,7 +276,7 @@ class HealthRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HealthRecord:
-        valid = {k for k in cls.__dataclass_fields__}
+        valid = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
@@ -520,8 +530,12 @@ def _row_to_version(row: dict[str, Any]) -> AgentVersion:
         id=int(row.get("id", 0)),
         agent_id=str(row.get("agent_id", "")),
         version=int(row.get("version", 1)),
-        config_snapshot=json.loads(row["config_snapshot"]) if isinstance(row.get("config_snapshot"), str) else (row.get("config_snapshot") or {}),
-        prompt_ids=json.loads(row["prompt_ids"]) if isinstance(row.get("prompt_ids"), str) else (row.get("prompt_ids") or []),
+        config_snapshot=json.loads(row["config_snapshot"])
+        if isinstance(row.get("config_snapshot"), str)
+        else (row.get("config_snapshot") or {}),
+        prompt_ids=json.loads(row["prompt_ids"])
+        if isinstance(row.get("prompt_ids"), str)
+        else (row.get("prompt_ids") or []),
         change_summary=str(row.get("change_summary", "")),
         created_by=str(row.get("created_by", "")),
         created_at=str(row.get("created_at", "")),
@@ -536,7 +550,9 @@ def _row_to_prompt(row: dict[str, Any]) -> PromptVersion:
         content=str(row.get("content", "")),
         version=int(row.get("version", 1)),
         role=str(row.get("role", "system")),
-        variables=json.loads(row["variables"]) if isinstance(row.get("variables"), str) else (row.get("variables") or []),
+        variables=json.loads(row["variables"])
+        if isinstance(row.get("variables"), str)
+        else (row.get("variables") or []),
         hash=str(row.get("hash", "")),
         description=str(row.get("description", "")),
         created_at=str(row.get("created_at", "")),
@@ -549,7 +565,9 @@ def _row_to_tool_perm(row: dict[str, Any]) -> ToolPermission:
         agent_id=str(row.get("agent_id", "")),
         tool_name=str(row.get("tool_name", "")),
         allowed=bool(row.get("allowed", True)),
-        config=json.loads(row["config"]) if isinstance(row.get("config"), str) else (row.get("config") or {}),
+        config=json.loads(row["config"])
+        if isinstance(row.get("config"), str)
+        else (row.get("config") or {}),
         created_at=str(row.get("created_at", "")),
         updated_at=str(row.get("updated_at", "")),
     )
@@ -576,11 +594,15 @@ def _row_to_execution(row: dict[str, Any]) -> WorkforceExecution:
         latency_ms=float(row.get("latency_ms", 0.0)),
         cost=float(row.get("cost", 0.0)),
         confidence=float(row.get("confidence", 0.0)),
-        tools_used=json.loads(row["tools_used"]) if isinstance(row.get("tools_used"), str) else (row.get("tools_used") or []),
+        tools_used=json.loads(row["tools_used"])
+        if isinstance(row.get("tools_used"), str)
+        else (row.get("tools_used") or []),
         status=str(row.get("status", "success")),
         error=str(row.get("error", "")),
         prompt_version_id=str(row.get("prompt_version_id", "")),
-        metadata=json.loads(row["metadata"]) if isinstance(row.get("metadata"), str) else (row.get("metadata") or {}),
+        metadata=json.loads(row["metadata"])
+        if isinstance(row.get("metadata"), str)
+        else (row.get("metadata") or {}),
         created_at=str(row.get("created_at", "")),
     )
 
@@ -592,7 +614,9 @@ def _row_to_health(row: dict[str, Any]) -> HealthRecord:
         status=str(row.get("status", "healthy")),
         check_type=str(row.get("check_type", "heartbeat")),
         metric_value=float(row.get("metric_value", 0.0)),
-        details=json.loads(row["details"]) if isinstance(row.get("details"), str) else (row.get("details") or {}),
+        details=json.loads(row["details"])
+        if isinstance(row.get("details"), str)
+        else (row.get("details") or {}),
         checked_at=str(row.get("checked_at", "")),
     )
 
@@ -602,7 +626,9 @@ def _row_to_health(row: dict[str, Any]) -> HealthRecord:
 # ---------------------------------------------------------------------------
 
 
-def _calculate_trust_score(executions: list[WorkforceExecution], current_score: float = 50.0) -> float:
+def _calculate_trust_score(
+    executions: list[WorkforceExecution], current_score: float = 50.0
+) -> float:
     if not executions:
         return current_score
     total = len(executions)
@@ -732,11 +758,30 @@ class WorkforceManager:
 
     def _agent_insert_columns(self) -> list[str]:
         columns = [
-            "agent_id", "name", "description", "agent_type", "provider", "model", "version",
-            "lifecycle_status", "trust_score", "confidence", "daily_budget", "monthly_budget",
-            "total_cost", "success_rate", "average_latency_ms", "total_executions",
-            "health_status", "health_last_checked", "tools", "permissions", "metadata", "tags",
-            "owner", "team",
+            "agent_id",
+            "name",
+            "description",
+            "agent_type",
+            "provider",
+            "model",
+            "version",
+            "lifecycle_status",
+            "trust_score",
+            "confidence",
+            "daily_budget",
+            "monthly_budget",
+            "total_cost",
+            "success_rate",
+            "average_latency_ms",
+            "total_executions",
+            "health_status",
+            "health_last_checked",
+            "tools",
+            "permissions",
+            "metadata",
+            "tags",
+            "owner",
+            "team",
         ]
         if self._supports_column(TABLE_AGENTS, "org_id"):
             columns.append("org_id")
@@ -747,16 +792,30 @@ class WorkforceManager:
 
     def _agent_values(self, agent: WorkforceAgent) -> list[Any]:
         values: list[Any] = [
-            agent.agent_id, agent.name, agent.description, agent.agent_type,
-            agent.provider, agent.model, agent.version,
-            agent.lifecycle_status, agent.trust_score, agent.confidence,
-            agent.daily_budget, agent.monthly_budget,
-            agent.total_cost, agent.success_rate, agent.average_latency_ms,
+            agent.agent_id,
+            agent.name,
+            agent.description,
+            agent.agent_type,
+            agent.provider,
+            agent.model,
+            agent.version,
+            agent.lifecycle_status,
+            agent.trust_score,
+            agent.confidence,
+            agent.daily_budget,
+            agent.monthly_budget,
+            agent.total_cost,
+            agent.success_rate,
+            agent.average_latency_ms,
             agent.total_executions,
-            agent.health_status, agent.health_last_checked,
-            json.dumps(agent.tools), json.dumps(agent.permissions),
-            json.dumps(agent.metadata), json.dumps(agent.tags),
-            agent.owner, agent.team,
+            agent.health_status,
+            agent.health_last_checked,
+            json.dumps(agent.tools),
+            json.dumps(agent.permissions),
+            json.dumps(agent.metadata),
+            json.dumps(agent.tags),
+            agent.owner,
+            agent.team,
         ]
         if self._supports_column(TABLE_AGENTS, "org_id"):
             values.append(agent.org_id)
@@ -826,7 +885,7 @@ class WorkforceManager:
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         rows = self.repo._fetch_all(
             f"SELECT * FROM {TABLE_AGENTS}{where} ORDER BY updated_at DESC LIMIT {self.p} OFFSET {self.p}",
-            tuple(params + [limit, offset]),
+            (*params, limit, offset),
         )
         return [_row_to_agent(r) for r in rows]
 
@@ -860,16 +919,29 @@ class WorkforceManager:
         agent.updated_at = utc_now()
         org_update = ""
         values: list[Any] = [
-            agent.name, agent.description, agent.agent_type,
-            agent.provider, agent.model, agent.version,
-            agent.lifecycle_status, agent.trust_score, agent.confidence,
-            agent.daily_budget, agent.monthly_budget,
-            agent.total_cost, agent.success_rate, agent.average_latency_ms,
+            agent.name,
+            agent.description,
+            agent.agent_type,
+            agent.provider,
+            agent.model,
+            agent.version,
+            agent.lifecycle_status,
+            agent.trust_score,
+            agent.confidence,
+            agent.daily_budget,
+            agent.monthly_budget,
+            agent.total_cost,
+            agent.success_rate,
+            agent.average_latency_ms,
             agent.total_executions,
-            agent.health_status, agent.health_last_checked,
-            json.dumps(agent.tools), json.dumps(agent.permissions),
-            json.dumps(agent.metadata), json.dumps(agent.tags),
-            agent.owner, agent.team,
+            agent.health_status,
+            agent.health_last_checked,
+            json.dumps(agent.tools),
+            json.dumps(agent.permissions),
+            json.dumps(agent.metadata),
+            json.dumps(agent.tags),
+            agent.owner,
+            agent.team,
         ]
         if self._supports_column(TABLE_AGENTS, "org_id"):
             org_update += f", org_id={self.p}"
@@ -899,14 +971,16 @@ class WorkforceManager:
         existing = self.get_agent(agent_id)
         if not existing:
             return False
-        self.repo._execute(
-            f"DELETE FROM {TABLE_AGENTS} WHERE agent_id = {self.p}", (agent_id,)
-        )
+        self.repo._execute(f"DELETE FROM {TABLE_AGENTS} WHERE agent_id = {self.p}", (agent_id,))
         # Cascade clean related data
-        for table in (TABLE_VERSIONS, TABLE_TOOL_PERMS, TABLE_KNOWLEDGE, TABLE_EXECUTIONS, TABLE_HEALTH):
-            self.repo._execute(
-                f"DELETE FROM {table} WHERE agent_id = {self.p}", (agent_id,)
-            )
+        for table in (
+            TABLE_VERSIONS,
+            TABLE_TOOL_PERMS,
+            TABLE_KNOWLEDGE,
+            TABLE_EXECUTIONS,
+            TABLE_HEALTH,
+        ):
+            self.repo._execute(f"DELETE FROM {table} WHERE agent_id = {self.p}", (agent_id,))
         return True
 
     # ---- Lifecycle ----
@@ -915,7 +989,10 @@ class WorkforceManager:
         agent = self.get_agent(agent_id)
         if not agent:
             return None
-        if agent.lifecycle_status in (LifecycleStatus.ARCHIVED.value, LifecycleStatus.DECOMMISSIONED.value):
+        if agent.lifecycle_status in (
+            LifecycleStatus.ARCHIVED.value,
+            LifecycleStatus.DECOMMISSIONED.value,
+        ):
             return None
         agent.lifecycle_status = LifecycleStatus.ACTIVE.value
         agent.last_active_at = utc_now()
@@ -988,7 +1065,13 @@ class WorkforceManager:
 
         # Clone knowledge assignments
         for ka in self.list_knowledge_assignments(agent_id):
-            self.assign_knowledge(clone.agent_id, ka.knowledge_source_id, ka.knowledge_source_type, ka.access_level, ka.priority)
+            self.assign_knowledge(
+                clone.agent_id,
+                ka.knowledge_source_id,
+                ka.knowledge_source_type,
+                ka.access_level,
+                ka.priority,
+            )
 
         return clone
 
@@ -1024,9 +1107,13 @@ class WorkforceManager:
                 (agent_id, version, config_snapshot, prompt_ids, change_summary, created_by, created_at)
             VALUES ({self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p})""",
             (
-                version.agent_id, version.version,
-                json.dumps(version.config_snapshot), json.dumps(version.prompt_ids),
-                version.change_summary, version.created_by, version.created_at,
+                version.agent_id,
+                version.version,
+                json.dumps(version.config_snapshot),
+                json.dumps(version.prompt_ids),
+                version.change_summary,
+                version.created_by,
+                version.created_at,
             ),
         )
         return version
@@ -1100,9 +1187,16 @@ class WorkforceManager:
                 (prompt_id, agent_id, name, content, version, role, variables, hash, description, created_at)
             VALUES ({self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p})""",
             (
-                prompt.prompt_id, prompt.agent_id, prompt.name, prompt.content,
-                prompt.version, prompt.role, json.dumps(prompt.variables),
-                prompt.hash, prompt.description, prompt.created_at,
+                prompt.prompt_id,
+                prompt.agent_id,
+                prompt.name,
+                prompt.content,
+                prompt.version,
+                prompt.role,
+                json.dumps(prompt.variables),
+                prompt.hash,
+                prompt.description,
+                prompt.created_at,
             ),
         )
         return prompt
@@ -1116,7 +1210,9 @@ class WorkforceManager:
         return _row_to_prompt(rows[0])
 
     def list_prompt_versions(
-        self, agent_id: str | None = None, name: str | None = None,
+        self,
+        agent_id: str | None = None,
+        name: str | None = None,
     ) -> list[PromptVersion]:
         conditions: list[str] = []
         params: list[Any] = []
@@ -1136,7 +1232,11 @@ class WorkforceManager:
     # ---- Tool Permissions ----
 
     def set_tool_permission(
-        self, agent_id: str, tool_name: str, allowed: bool = True, config: dict | None = None,
+        self,
+        agent_id: str,
+        tool_name: str,
+        allowed: bool = True,
+        config: dict | None = None,
     ) -> ToolPermission:
         now = utc_now()
         existing = self.repo._fetch_all(
@@ -1144,8 +1244,12 @@ class WorkforceManager:
             (agent_id, tool_name),
         )
         perm = ToolPermission(
-            agent_id=agent_id, tool_name=tool_name, allowed=allowed,
-            config=config or {}, created_at=now, updated_at=now,
+            agent_id=agent_id,
+            tool_name=tool_name,
+            allowed=allowed,
+            config=config or {},
+            created_at=now,
+            updated_at=now,
         )
         if existing:
             self.repo._execute(
@@ -1198,8 +1302,14 @@ class WorkforceManager:
             f"""INSERT OR REPLACE INTO {TABLE_KNOWLEDGE}
                 (agent_id, knowledge_source_id, knowledge_source_type, access_level, priority, created_at)
             VALUES ({self.p},{self.p},{self.p},{self.p},{self.p},{self.p})""",
-            (ka.agent_id, ka.knowledge_source_id, ka.knowledge_source_type,
-             ka.access_level, ka.priority, ka.created_at),
+            (
+                ka.agent_id,
+                ka.knowledge_source_id,
+                ka.knowledge_source_type,
+                ka.access_level,
+                ka.priority,
+                ka.created_at,
+            ),
         )
         return ka
 
@@ -1233,11 +1343,19 @@ class WorkforceManager:
             VALUES ({self.p},{self.p},{self.p},{self.p},{self.p},{self.p},{self.p},
                     {self.p},{self.p},{self.p},{self.p},{self.p},{self.p})""",
             (
-                execution.execution_id, execution.agent_id, execution.task,
-                execution.response, execution.latency_ms, execution.cost,
-                execution.confidence, json.dumps(execution.tools_used),
-                execution.status, execution.error, execution.prompt_version_id,
-                json.dumps(execution.metadata), execution.created_at,
+                execution.execution_id,
+                execution.agent_id,
+                execution.task,
+                execution.response,
+                execution.latency_ms,
+                execution.cost,
+                execution.confidence,
+                json.dumps(execution.tools_used),
+                execution.status,
+                execution.error,
+                execution.prompt_version_id,
+                json.dumps(execution.metadata),
+                execution.created_at,
             ),
         )
 
@@ -1274,7 +1392,7 @@ class WorkforceManager:
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         rows = self.repo._fetch_all(
             f"SELECT * FROM {TABLE_EXECUTIONS}{where} ORDER BY created_at DESC LIMIT {self.p} OFFSET {self.p}",
-            tuple(params + [limit, offset]),
+            (*params, limit, offset),
         )
         return [_row_to_execution(r) for r in rows]
 
@@ -1285,8 +1403,9 @@ class WorkforceManager:
             where = f" WHERE agent_id = {self.p}"
             params.append(agent_id)
 
-        rows = self.repo._fetch_all(
-            f"""SELECT
+        rows = (
+            self.repo._fetch_all(
+                f"""SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as successes,
                 SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failures,
@@ -1295,9 +1414,11 @@ class WorkforceManager:
                 AVG(confidence) as avg_confidence,
                 SUM(cost) as total_cost
             FROM {TABLE_EXECUTIONS}{where}""",
-            tuple(params),
-        ) if agent_id else self.repo._fetch_all(
-            f"""SELECT
+                tuple(params),
+            )
+            if agent_id
+            else self.repo._fetch_all(
+                f"""SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) as successes,
                 SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failures,
@@ -1306,9 +1427,18 @@ class WorkforceManager:
                 AVG(confidence) as avg_confidence,
                 SUM(cost) as total_cost
             FROM {TABLE_EXECUTIONS}""",
+            )
         )
         if not rows:
-            return {"total": 0, "successes": 0, "failures": 0, "avg_latency": 0, "avg_cost": 0, "avg_confidence": 0, "total_cost": 0}
+            return {
+                "total": 0,
+                "successes": 0,
+                "failures": 0,
+                "avg_latency": 0,
+                "avg_cost": 0,
+                "avg_confidence": 0,
+                "total_cost": 0,
+            }
         r = rows[0]
         return {
             "total": r.get("total", 0),
@@ -1331,16 +1461,25 @@ class WorkforceManager:
         details: dict | None = None,
     ) -> HealthRecord:
         record = HealthRecord(
-            agent_id=agent_id, status=status, check_type=check_type,
-            metric_value=metric_value, details=details or {},
+            agent_id=agent_id,
+            status=status,
+            check_type=check_type,
+            metric_value=metric_value,
+            details=details or {},
             checked_at=utc_now(),
         )
         self.repo._execute(
             f"""INSERT INTO {TABLE_HEALTH}
                 (agent_id, status, check_type, metric_value, details, checked_at)
             VALUES ({self.p},{self.p},{self.p},{self.p},{self.p},{self.p})""",
-            (record.agent_id, record.status, record.check_type,
-             record.metric_value, json.dumps(record.details), record.checked_at),
+            (
+                record.agent_id,
+                record.status,
+                record.check_type,
+                record.metric_value,
+                json.dumps(record.details),
+                record.checked_at,
+            ),
         )
 
         # Update agent health status
@@ -1353,7 +1492,9 @@ class WorkforceManager:
         return record
 
     def get_health_history(
-        self, agent_id: str, limit: int = 50,
+        self,
+        agent_id: str,
+        limit: int = 50,
     ) -> list[HealthRecord]:
         rows = self.repo._fetch_all(
             f"SELECT * FROM {TABLE_HEALTH} WHERE agent_id = {self.p} ORDER BY checked_at DESC LIMIT {self.p}",
@@ -1375,7 +1516,14 @@ class WorkforceManager:
     def get_budget_usage(self, agent_id: str) -> dict[str, Any]:
         agent = self.get_agent(agent_id)
         if not agent:
-            return {"daily_used": 0, "monthly_used": 0, "daily_budget": 0, "monthly_budget": 0, "remaining_daily": 0, "remaining_monthly": 0}
+            return {
+                "daily_used": 0,
+                "monthly_used": 0,
+                "daily_budget": 0,
+                "monthly_budget": 0,
+                "remaining_daily": 0,
+                "remaining_monthly": 0,
+            }
 
         today = utc_now()[:10]
         month_start = utc_now()[:7]
@@ -1469,8 +1617,19 @@ class WorkforceManager:
                 scoped_execs.extend(self.list_executions(agent_id=agent.agent_id, limit=500))
             exec_stats = {
                 "total": len(scoped_execs),
-                "successes": sum(1 for e in scoped_execs if e.status == ExecutionResult.SUCCESS.value),
-                "failures": sum(1 for e in scoped_execs if e.status in {ExecutionResult.FAILED.value, ExecutionResult.ERROR.value, ExecutionResult.TIMEOUT.value}),
+                "successes": sum(
+                    1 for e in scoped_execs if e.status == ExecutionResult.SUCCESS.value
+                ),
+                "failures": sum(
+                    1
+                    for e in scoped_execs
+                    if e.status
+                    in {
+                        ExecutionResult.FAILED.value,
+                        ExecutionResult.ERROR.value,
+                        ExecutionResult.TIMEOUT.value,
+                    }
+                ),
                 "total_cost": round(sum(e.cost for e in scoped_execs), 6),
             }
 
@@ -1486,7 +1645,9 @@ class WorkforceManager:
             "total_successes": exec_stats["successes"],
             "total_failures": exec_stats["failures"],
             "total_cost": exec_stats["total_cost"],
-            "avg_success_rate": round(exec_stats["successes"] / max(exec_stats["total"], 1) * 100, 1),
+            "avg_success_rate": round(
+                exec_stats["successes"] / max(exec_stats["total"], 1) * 100, 1
+            ),
         }
 
     def _knowledge_doc_matches(self, assignment: KnowledgeAssignment, doc: Any) -> bool:
@@ -1563,8 +1724,14 @@ class WorkforceManager:
                     contexts = []
                     for source in readable_sources:
                         result = rag.retrieve_by_type(task, source.knowledge_source_type, limit=3)
-                        docs = [doc for doc in result.documents if self._knowledge_doc_matches(source, doc)]
-                        contexts.extend(f"[{doc.source_type}] {doc.source}\n{doc.content}" for doc in docs)
+                        docs = [
+                            doc
+                            for doc in result.documents
+                            if self._knowledge_doc_matches(source, doc)
+                        ]
+                        contexts.extend(
+                            f"[{doc.source_type}] {doc.source}\n{doc.content}" for doc in docs
+                        )
                     context = "\n\n".join(c for c in contexts if c)
                 response = rag.generate_with_context(
                     f"{system_prompt}\n\nTask: {task}" if system_prompt else task,
@@ -1640,7 +1807,7 @@ class WorkforceManager:
                 description="System prompt created during agent setup",
             )
 
-        for ks in (knowledge_sources or []):
+        for ks in knowledge_sources or []:
             self.assign_knowledge(agent.agent_id, ks, "collection", AccessLevel.READ_WRITE.value)
 
         if tools:
@@ -1650,6 +1817,8 @@ class WorkforceManager:
                 tool_config = t.get("config", {}) if isinstance(t, dict) else {}
                 self.set_tool_permission(agent.agent_id, tool_name, allowed, tool_config)
 
-        self.create_agent_version(agent.agent_id, "Initial version from setup wizard", owner or "wizard")
+        self.create_agent_version(
+            agent.agent_id, "Initial version from setup wizard", owner or "wizard"
+        )
 
         return agent

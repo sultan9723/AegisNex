@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from src.intelligence.policy import Policy
@@ -18,7 +18,7 @@ from src.intelligence.risk import RiskEngine, RiskLevel
 _logger = logging.getLogger(__name__)
 
 
-class ActionVerdict(str, Enum):
+class ActionVerdict(StrEnum):
     SAFE = "safe"
     APPROVAL_REQUIRED = "approval_required"
     FORBIDDEN = "forbidden"
@@ -58,7 +58,7 @@ AUTONOMOUS_ACTIONS_FORBIDDEN: list[str] = [
 SENSITIVE_TARGET_MARKERS = {"critical", "production", "prod"}
 
 
-def _as_list(value: Any) -> List[Any]:
+def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, (list, tuple, set)):
@@ -66,8 +66,8 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
-def _context_values(context: Dict[str, Any]) -> List[str]:
-    values: List[str] = []
+def _context_values(context: dict[str, Any]) -> list[str]:
+    values: list[str] = []
     for key in ("environment", "env", "criticality", "service_criticality", "tier"):
         value = context.get(key)
         if value is not None:
@@ -97,7 +97,7 @@ def _context_values(context: Dict[str, Any]) -> List[str]:
     return [value for value in values if value]
 
 
-def _restart_count(context: Dict[str, Any]) -> int:
+def _restart_count(context: dict[str, Any]) -> int:
     for key in ("restart_count", "recent_restart_count", "restart_attempts"):
         try:
             return int(context.get(key, 0))
@@ -105,10 +105,7 @@ def _restart_count(context: Dict[str, Any]) -> int:
             continue
 
     container = context.get("container")
-    if isinstance(container, dict):
-        name = container.get("name")
-    else:
-        name = container
+    name = container.get("name") if isinstance(container, dict) else container
 
     history = context.get("restart_history")
     if isinstance(history, dict):
@@ -124,7 +121,7 @@ def _restart_count(context: Dict[str, Any]) -> int:
     return 0
 
 
-def _sensitive_target_reason(context: Dict[str, Any]) -> str:
+def _sensitive_target_reason(context: dict[str, Any]) -> str:
     values = set(_context_values(context))
     matched = sorted(values & SENSITIVE_TARGET_MARKERS)
     if matched:

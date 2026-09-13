@@ -186,7 +186,7 @@ class TenantManager:
         if "is_active" in fields:
             fields["is_active"] = 1 if fields["is_active"] else 0
         set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [org_id]
+        values = [*list(fields.values()), org_id]
         p = self._p()
         self._execute(f"UPDATE organizations SET {set_clause} WHERE id = {p}", tuple(values))
         self._repo.record_audit_log("system", "update", "organization", str(org_id), fields)

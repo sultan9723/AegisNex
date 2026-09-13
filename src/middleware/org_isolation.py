@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import HTTPException, Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-
-from src.multitenant.isolation import get_isolation_filter
 
 _logger = logging.getLogger(__name__)
 
@@ -50,10 +50,8 @@ class OrgIsolationMiddleware(BaseHTTPMiddleware):
                 # Try to get org_id from request header (set by frontend)
                 header_org = request.headers.get("X-Org-Id", "")
                 if header_org:
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         org_id = int(header_org)
-                    except (ValueError, TypeError):
-                        pass
 
                 if org_id is None:
                     # Derive from user object
@@ -86,7 +84,9 @@ def require_org_access(resource_type: str) -> Callable:
     async def dependency(request: Request) -> None:
         user = getattr(request.state, "user", None)
         if user is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+            )
 
         role = getattr(user, "role", "")
         if role in ("super_admin", "administrator"):
@@ -143,7 +143,9 @@ def apply_org_filter(
         clause = f" AND {filter_clause}" if has_where else f" WHERE {filter_clause}"
         query = query[:insertion_point] + clause + query[insertion_point:]
     else:
-        query = f"{query} AND {filter_clause}" if "WHERE" in query else f"{query} WHERE {filter_clause}"
+        query = (
+            f"{query} AND {filter_clause}" if "WHERE" in query else f"{query} WHERE {filter_clause}"
+        )
 
     return query
 

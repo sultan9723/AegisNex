@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class PluginType(str, Enum):
+class PluginType(StrEnum):
     TOOL = "tool"
     WORKFLOW = "workflow"
     AI_CAPABILITY = "ai_capability"
@@ -18,7 +18,7 @@ class PluginType(str, Enum):
     SKILL = "skill"
 
 
-class PluginStatus(str, Enum):
+class PluginStatus(StrEnum):
     LOADED = "loaded"
     ENABLED = "enabled"
     DISABLED = "disabled"

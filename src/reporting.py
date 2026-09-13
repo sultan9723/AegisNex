@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import json
 import logging
@@ -118,10 +119,8 @@ class OperationalReporter:
         _logger.debug("OperationalReporter opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _incident_summary(self, window: ReportWindow) -> dict[str, Any]:

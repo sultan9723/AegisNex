@@ -99,7 +99,7 @@ class SystemResourceMonitor:
                 ram_percent=ram_percent,
                 disk_percent=disk_percent,
             )
-            payload = {
+            return {
                 "status": "warning" if warnings else "ok",
                 "cpu_percent": cpu_percent,
                 "cpu_load_1m": cpu_load[0] if cpu_load else None,
@@ -118,7 +118,6 @@ class SystemResourceMonitor:
                 "temperature_celsius": temperature,
                 "warnings": warnings,
             }
-            return payload
         except Exception as exc:
             self.logger.exception("SystemResourceMonitor failed: %s", exc)
             return {"status": "failed", "error": str(exc)}

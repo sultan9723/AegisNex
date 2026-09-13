@@ -9,6 +9,7 @@ Event → Create Incident → Planner Agent → Assign AI coworkers
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -183,9 +184,8 @@ class AutonomousPipeline:
         )
 
         # Track in execution history
-        exec_id = None
         if self._history:
-            exec_id = self._history.start_execution(
+            self._history.start_execution(
                 trigger=f"incident:{incident_id or '?'}", incident_id=incident_id
             )
 
@@ -489,7 +489,7 @@ class AutonomousPipeline:
             policy = self._policy.evaluate(action_name, plan)
             if policy.verdict == ActionVerdict.FORBIDDEN:
                 _logger.warning("Action '%s' is forbidden by policy", action_name)
-                plan["forbidden_actions"] = plan.get("forbidden_actions", []) + [action_name]
+                plan["forbidden_actions"] = [*plan.get("forbidden_actions", []), action_name]
                 return False
             if policy.verdict == ActionVerdict.APPROVAL_REQUIRED:
                 plan["requires_approval"] = True
@@ -606,12 +606,10 @@ class AutonomousPipeline:
                     current.rollback = {"pipeline_id": pipeline_id, "triggered_at": _utc_now()}
                     self._history.fail_execution("Pipeline failed — rollback triggered")
             if self._incidents and incident_id:
-                try:
+                with contextlib.suppress(KeyError):
                     self._incidents.update_incident(
                         incident_id, remediation_attempted=True, remediation_successful=False
                     )
-                except KeyError:
-                    pass
             await self._bus.publish(
                 EventType.AUTONOMOUS_ACTION,
                 {

@@ -46,9 +46,25 @@ select = [
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
+    "E402",   # module-level import not at top (intentional lazy imports throughout codebase)
     "B008",   # do not perform function calls in argument defaults
+    "B024",   # abstract class without abstract methods
+    "B027",   # empty method in abstract class
     "ARG001", # unused function argument (often needed for interfaces)
     "ARG002", # unused method argument
+    "SLF",    # private member access (intentional intra-package usage throughout codebase)
+    "N806",   # variable in function should be lowercase
+    "N818",   # exception name should end with Error
+    "PTH",    # pathlib suggestions (codebase uses os.path correctly where needed)
+    "SIM102", # collapsible if
+    "SIM117", # multiple with statements
+    "A002",   # argument shadows builtin
+    "A005",   # module shadows builtin
+    "E741",   # ambiguous variable name
+    "RUF006", # store a reference to the return value of a function call
+    "RUF012", # mutable class attributes should be annotated with ClassVar
+    "RUF034", # useless expression
+    "UP035",  # deprecated imports
 ]
 
 [tool.ruff.lint.per-file-ignores]

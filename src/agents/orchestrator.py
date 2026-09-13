@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.agents.base import BaseAgent
+from src.agents.base import AgentResult, BaseAgent
 from src.agents.registry import AgentRegistry
 from src.agents.state import SharedAgentState
 

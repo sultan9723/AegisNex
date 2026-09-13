@@ -6,6 +6,7 @@ PlatformRepository. AegisNexRepository (src/storage.py) is deprecated.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -210,9 +211,23 @@ DATABASE_MODELS = {
     ),
     "api_keys": DatabaseModel(
         "api_keys",
-        ("id", "name", "key_hash", "key_prefix", "role", "scopes", "org_id", "expires_at",
-         "revoked_at", "allowed_ips", "rate_limit_max", "is_active", "created_at",
-         "last_used_at", "request_count"),
+        (
+            "id",
+            "name",
+            "key_hash",
+            "key_prefix",
+            "role",
+            "scopes",
+            "org_id",
+            "expires_at",
+            "revoked_at",
+            "allowed_ips",
+            "rate_limit_max",
+            "is_active",
+            "created_at",
+            "last_used_at",
+            "request_count",
+        ),
     ),
     "alert_rules": DatabaseModel(
         "alert_rules",
@@ -273,6 +288,9 @@ class PlatformRepository:
         if self.backend == "sqlite":
             path = self._sqlite_path()
             path.parent.mkdir(parents=True, exist_ok=True)
+            self.database_path = path
+        else:
+            self.database_path = Path(self.settings.url)
         self._initialized = False
 
     def _sqlite_path(self) -> Path:
@@ -325,22 +343,14 @@ class PlatformRepository:
             _logger.warning(
                 "Could not enable WAL mode on %s (another connection may be active)", path
             )
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA cache_size=-8000")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA foreign_keys=ON")
-        except sqlite3.OperationalError:
-            pass
         self._sqlite_conn = connection
         return connection
 
@@ -356,7 +366,6 @@ class PlatformRepository:
                 pool.close()
                 self._pg_pool = None
         try:
-            import psycopg
             from psycopg.rows import dict_row
             from psycopg_pool import ConnectionPool
         except ModuleNotFoundError as exc:
@@ -813,7 +822,8 @@ class PlatformRepository:
                 f"ALTER TABLE incidents ADD COLUMN IF NOT EXISTS {name} {column_type}"
                 for name, column_type in incident_columns.items()
             ]
-            return monitoring_migrations + [
+            return [
+                *monitoring_migrations,
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS before_state TEXT",
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS after_state TEXT",
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS execution_id TEXT",
@@ -845,10 +855,14 @@ class PlatformRepository:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN after_state TEXT")
         if "execution_id" not in audit_columns:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN execution_id TEXT")
-        api_key_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(api_keys)").fetchall()}
+        api_key_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(api_keys)").fetchall()
+        }
         api_key_migrations = []
         if "scopes" not in api_key_columns:
-            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"*\"]'")
+            api_key_migrations.append(
+                "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"*\"]'"
+            )
         if "org_id" not in api_key_columns:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN org_id INTEGER")
         if "expires_at" not in api_key_columns:
@@ -858,7 +872,9 @@ class PlatformRepository:
         if "allowed_ips" not in api_key_columns:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT")
         if "rate_limit_max" not in api_key_columns:
-            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100")
+            api_key_migrations.append(
+                "ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100"
+            )
         # Migrate legacy incident data
         updates = [
             "UPDATE incidents SET incident_status = status",
@@ -1059,7 +1075,7 @@ class PlatformRepository:
         now = utc_timestamp()
         p = self.placeholder
         with self._connect() as connection:
-            cursor = connection.execute(
+            connection.execute(
                 f"""
                 INSERT INTO monitoring_targets (
                     name, target_type, address, expected_status, timeout_seconds,
@@ -1251,7 +1267,6 @@ class PlatformRepository:
         if existing is None:
             return False
         name = existing["name"]
-        p = self.placeholder
         self._execute("DELETE FROM notification_channels WHERE id = ?", (channel_id,))
         self.record_audit_log(actor, "delete", "notification_channel", name, {})
         return True
@@ -1284,12 +1299,12 @@ class PlatformRepository:
         key_prefix: str,
         role: str = "viewer",
         actor: str = "system",
-        scopes: List[str] | None = None,
+        scopes: list[str] | None = None,
         org_id: int | None = None,
         expires_at: str | None = None,
-        allowed_ips: List[str] | None = None,
+        allowed_ips: list[str] | None = None,
         rate_limit_max: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         now = utc_timestamp()
         p = self.placeholder
         scopes_json = json.dumps(scopes or ["*"], sort_keys=True)
@@ -1299,9 +1314,27 @@ class PlatformRepository:
             INSERT INTO api_keys (name, key_hash, key_prefix, role, scopes, org_id, expires_at, allowed_ips, rate_limit_max, is_active, created_at)
             VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
-            (name, key_hash, key_prefix, role, scopes_json, org_id, expires_at, allowed_ips_json, rate_limit_max, 1, now),
+            (
+                name,
+                key_hash,
+                key_prefix,
+                role,
+                scopes_json,
+                org_id,
+                expires_at,
+                allowed_ips_json,
+                rate_limit_max,
+                1,
+                now,
+            ),
         )
-        self.record_audit_log(actor, "create", "api_key", name, {"role": role, "scopes": scopes or ["*"], "org_id": org_id})
+        self.record_audit_log(
+            actor,
+            "create",
+            "api_key",
+            name,
+            {"role": role, "scopes": scopes or ["*"], "org_id": org_id},
+        )
         if self.backend != "postgresql":
             key = self.get_api_key_by_hash(key_hash)
         else:
@@ -1337,14 +1370,21 @@ class PlatformRepository:
             parsed_scopes = scopes
         if not isinstance(parsed_scopes, list):
             parsed_scopes = ["*"]
-        scopes_json = json.dumps([str(scope).strip() for scope in parsed_scopes if str(scope).strip()] or ["*"], sort_keys=True)
+        scopes_json = json.dumps(
+            [str(scope).strip() for scope in parsed_scopes if str(scope).strip()] or ["*"],
+            sort_keys=True,
+        )
         org_id = payload.get("org_id", existing.get("org_id"))
         expires_at = payload.get("expires_at", existing.get("expires_at"))
         is_active = payload.get("is_active", existing.get("is_active", True))
         if isinstance(is_active, bool):
             is_active = 1 if is_active else 0
         allowed_ips = payload.get("allowed_ips", existing.get("allowed_ips"))
-        allowed_ips_json = json.dumps(allowed_ips) if isinstance(allowed_ips, list) else (allowed_ips or existing.get("allowed_ips"))
+        allowed_ips_json = (
+            json.dumps(allowed_ips)
+            if isinstance(allowed_ips, list)
+            else (allowed_ips or existing.get("allowed_ips"))
+        )
         rate_limit_max = int(payload.get("rate_limit_max", existing.get("rate_limit_max", 100)))
         p = self.placeholder
         self._execute(
@@ -1355,11 +1395,23 @@ class PlatformRepository:
                 revoked_at = CASE WHEN {p} = 0 THEN COALESCE(revoked_at, {p}) ELSE NULL END
             WHERE id = {p}
             """,
-            (name, normalized_role, scopes_json, org_id, expires_at,
-             allowed_ips_json, rate_limit_max, int(is_active),
-             int(is_active), utc_timestamp(), key_id),
+            (
+                name,
+                normalized_role,
+                scopes_json,
+                org_id,
+                expires_at,
+                allowed_ips_json,
+                rate_limit_max,
+                int(is_active),
+                int(is_active),
+                utc_timestamp(),
+                key_id,
+            ),
         )
-        self.record_audit_log(actor, "update", "api_key", name, {"scopes": json.loads(scopes_json), "org_id": org_id})
+        self.record_audit_log(
+            actor, "update", "api_key", name, {"scopes": json.loads(scopes_json), "org_id": org_id}
+        )
         return self.get_api_key(key_id)
 
     def delete_api_key(self, key_id: int, actor: str = "system") -> bool:
