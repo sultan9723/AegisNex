@@ -1,12 +1,12 @@
 from pathlib import Path
 
 from src.incidents import IncidentManager
-from src.storage import AegisNexRepository
+from src.platform_db import PlatformRepository
 from src.tcp_monitor import TcpTargetMonitor
 
 
 def test_tcp_monitor_records_reachable_target(tmp_path: Path) -> None:
-    repository = AegisNexRepository(tmp_path / "aegisnex.db")
+    repository = PlatformRepository(str(tmp_path / "aegisnex.db"))
     incident_manager = IncidentManager(
         tmp_path / "incident_history.json",
         storage_repository=repository,
@@ -26,7 +26,9 @@ def test_tcp_monitor_records_reachable_target(tmp_path: Path) -> None:
     assert check["host"] == "localhost"
     assert check["port"] == 5432
     assert check["reachable"] is True
-    assert repository.fetch_all("tcp_checks")[0]["target_name"] == "db"
+    results = repository.fetch_all("check_results")
+    tcp_results = [r for r in results if r.get("target_type") == "tcp"]
+    assert tcp_results[0]["target_name"] == "db"
 
 
 def test_tcp_monitor_generates_and_resolves_incidents(tmp_path: Path) -> None:

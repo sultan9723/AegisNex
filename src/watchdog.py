@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from logging.handlers import RotatingFileHandler
 import signal
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +16,10 @@ from src.guardian import Guardian
 from src.health_checks import DockerHealthCheck, HttpHealthCheck, TcpHealthCheck
 from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
-from src.notifier import Notifier
 from src.notifications.factory import build_notification_providers
+from src.notifications_compat import NotifierCompat
 from src.orchestrator import SystemHealthChecker
 from src.platform_db import PlatformRepository, load_database_settings
-
 
 _running = True
 
@@ -99,21 +98,10 @@ def build_guardian(handler: RotatingFileHandler, config: Config) -> Guardian:
         docker_scanner=docker_scanner,
         logger=health_logger,
     )
-    notifier = Notifier(
-        enabled=config.smtp.enabled,
-        smtp_host=config.smtp.host,
-        smtp_port=config.smtp.port,
-        smtp_timeout_seconds=config.smtp.timeout_seconds,
-        starttls=config.smtp.starttls,
-        email_user=config.smtp.username,
-        email_pass=config.smtp.password,
-        email_to=config.smtp.recipient,
-        subject=config.smtp.subject,
-        logger=notifier_logger,
-    )
+    notification_providers = build_notification_providers(config)
+    notifier = NotifierCompat(notification_providers)
     platform_repository = PlatformRepository(
-        config.storage.database_url
-        or load_database_settings(config.storage.database_path)
+        config.storage.database_url or load_database_settings(config.storage.database_path)
     )
     guardian = Guardian(
         health_checker=health_checker,

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 from src.config import Config
 from src.http_monitor import HttpEndpointMonitor
 from src.incidents import IncidentManager
 from src.monitor import SystemResourceMonitor
 from src.orchestrator import SystemHealthChecker
+from src.platform_db import PlatformRepository, load_database_settings
 from src.reporting import OperationalReporter
 from src.ssl_monitor import SslCertificateMonitor
 from src.tcp_monitor import TcpTargetMonitor
-from src.platform_db import PlatformRepository, load_database_settings
-
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -42,19 +42,18 @@ class AegisNexMCPTools:
     def __init__(self, services: AegisNexMCPServices) -> None:
         self.services = services
 
-    def get_system_health(self) -> Dict[str, Any]:
+    def get_system_health(self) -> dict[str, Any]:
         """Return the current system and Docker health report."""
         return dict(self.services.health_checker.run({}))
 
-    def list_containers(self, include_all: bool = True) -> Dict[str, Any]:
+    def list_containers(self, include_all: bool = True) -> dict[str, Any]:
         """List Docker containers known to AegisNex."""
         return dict(self.services.docker_scanner.run({"include_all": include_all}))
 
-    def list_incidents(self, status: Optional[str] = None) -> Dict[str, Any]:
+    def list_incidents(self, status: str | None = None) -> dict[str, Any]:
         """List incidents, optionally filtered by status."""
         incidents = [
-            incident.to_dict()
-            for incident in self.services.incident_manager.list_incidents()
+            incident.to_dict() for incident in self.services.incident_manager.list_incidents()
         ]
         if status:
             normalized = status.lower()
@@ -73,10 +72,10 @@ class AegisNexMCPTools:
             ]
         return {"status": "ok", "incidents": incidents, "count": len(incidents)}
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self) -> dict[str, Any]:
         """Return current system metrics and latest persisted metrics snapshot."""
         current = dict(self.services.monitor.run({}))
-        latest_snapshot: Dict[str, Any] | None = None
+        latest_snapshot: dict[str, Any] | None = None
         repository = self.services.platform_repository
         if repository is not None:
             try:
@@ -95,7 +94,7 @@ class AegisNexMCPTools:
             "latest_snapshot": latest_snapshot,
         }
 
-    def get_http_monitoring(self, endpoint_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_http_monitoring(self, endpoint_name: str | None = None) -> dict[str, Any]:
         """Check configured HTTP endpoints and return availability results."""
         if self.services.http_monitor is None:
             return {
@@ -108,7 +107,7 @@ class AegisNexMCPTools:
         params = {"endpoint_name": endpoint_name} if endpoint_name else {}
         return dict(self.services.http_monitor.run(params))
 
-    def get_ssl_monitoring(self, target_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_ssl_monitoring(self, target_name: str | None = None) -> dict[str, Any]:
         """Check configured SSL certificates and return expiry results."""
         if self.services.ssl_monitor is None:
             return {
@@ -120,7 +119,7 @@ class AegisNexMCPTools:
         params = {"target_name": target_name} if target_name else {}
         return dict(self.services.ssl_monitor.run(params))
 
-    def get_tcp_monitoring(self, target_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_tcp_monitoring(self, target_name: str | None = None) -> dict[str, Any]:
         """Check configured TCP host:port targets and return reachability results."""
         if self.services.tcp_monitor is None:
             return {
@@ -136,8 +135,8 @@ class AegisNexMCPTools:
     def generate_report(
         self,
         report_type: str = "weekly",
-        service_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        service_name: str | None = None,
+    ) -> dict[str, Any]:
         """Generate a weekly, monthly, or service health operational report."""
         normalized = report_type.lower()
         if normalized == "weekly":
@@ -151,7 +150,7 @@ class AegisNexMCPTools:
             "message": "report_type must be weekly, monthly, or service_health",
         }
 
-    def restart_container(self, container_name: str) -> Dict[str, Any]:
+    def restart_container(self, container_name: str) -> dict[str, Any]:
         """Restart a Docker container by name."""
         if not container_name.strip():
             return {"status": "error", "message": "container_name is required"}
@@ -167,7 +166,7 @@ class FastMCPShim:
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self.tools: Dict[str, Callable[..., Any]] = {}
+        self.tools: dict[str, Callable[..., Any]] = {}
 
     def tool(self, name: str | None = None) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -198,8 +197,7 @@ def create_services(config_path: str | Path = "config.yaml") -> AegisNexMCPServi
         docker_scanner=docker_scanner,
     )
     platform_repository = PlatformRepository(
-        config.storage.database_url
-        or load_database_settings(config.storage.database_path)
+        config.storage.database_url or load_database_settings(config.storage.database_path)
     )
     incident_manager = IncidentManager(
         config.incidents.history_path,
@@ -267,42 +265,42 @@ def create_mcp_server(
     tools = AegisNexMCPTools(services or create_services(config_path))
 
     @mcp.tool()
-    def get_system_health() -> Dict[str, Any]:
+    def get_system_health() -> dict[str, Any]:
         return tools.get_system_health()
 
     @mcp.tool()
-    def list_containers(include_all: bool = True) -> Dict[str, Any]:
+    def list_containers(include_all: bool = True) -> dict[str, Any]:
         return tools.list_containers(include_all=include_all)
 
     @mcp.tool()
-    def list_incidents(status: Optional[str] = None) -> Dict[str, Any]:
+    def list_incidents(status: str | None = None) -> dict[str, Any]:
         return tools.list_incidents(status=status)
 
     @mcp.tool()
-    def get_metrics() -> Dict[str, Any]:
+    def get_metrics() -> dict[str, Any]:
         return tools.get_metrics()
 
     @mcp.tool()
-    def get_http_monitoring(endpoint_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_http_monitoring(endpoint_name: str | None = None) -> dict[str, Any]:
         return tools.get_http_monitoring(endpoint_name=endpoint_name)
 
     @mcp.tool()
-    def get_ssl_monitoring(target_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_ssl_monitoring(target_name: str | None = None) -> dict[str, Any]:
         return tools.get_ssl_monitoring(target_name=target_name)
 
     @mcp.tool()
-    def get_tcp_monitoring(target_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_tcp_monitoring(target_name: str | None = None) -> dict[str, Any]:
         return tools.get_tcp_monitoring(target_name=target_name)
 
     @mcp.tool()
     def generate_report(
         report_type: str = "weekly",
-        service_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        service_name: str | None = None,
+    ) -> dict[str, Any]:
         return tools.generate_report(report_type=report_type, service_name=service_name)
 
     @mcp.tool()
-    def restart_container(container_name: str) -> Dict[str, Any]:
+    def restart_container(container_name: str) -> dict[str, Any]:
         return tools.restart_container(container_name=container_name)
 
     return mcp

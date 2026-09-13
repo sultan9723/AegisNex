@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import socket
+from collections.abc import Mapping
+from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Dict, Mapping
+from typing import Any
 
 from src.incidents import IncidentManager, utc_timestamp
 
@@ -22,7 +23,7 @@ class TcpTargetCheck:
     latency_ms: float | None
     error: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "target": self.target,
@@ -53,7 +54,7 @@ class TcpTargetMonitor:
         self.storage_repository = storage_repository
         self.connector = connector
 
-    def run(self, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         targets = self._selected_targets(params)
         checks = [self._check_target(name, target) for name, target in targets.items()]
@@ -73,7 +74,7 @@ class TcpTargetMonitor:
             "checks": [check.to_dict() for check in checks],
         }
 
-    def _selected_targets(self, params: Dict[str, Any]) -> Dict[str, str]:
+    def _selected_targets(self, params: dict[str, Any]) -> dict[str, str]:
         target_name = str(params.get("target_name", "")).strip()
         if target_name:
             target = self.targets.get(target_name)

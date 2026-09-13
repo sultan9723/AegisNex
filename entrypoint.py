@@ -190,10 +190,9 @@ def build_docker_agent(config: Config) -> Any:
     from src.guardian import Guardian
     from src.incidents import IncidentManager
     from src.monitor import SystemResourceMonitor
-    from src.notifier import Notifier
     from src.notifications.factory import build_notification_providers
     from src.orchestrator import SystemHealthChecker
-    from src.storage import AegisNexRepository
+    from src.platform_db import PlatformRepository, load_database_settings
 
     agent = AgentX(logger=logging.getLogger("agentx"))
     monitor = SystemResourceMonitor(
@@ -215,19 +214,12 @@ def build_docker_agent(config: Config) -> Any:
         logger=logging.getLogger("agentx.health"),
     )
     agent.register_command("health", health_checker)
-    notifier = Notifier(
-        enabled=config.smtp.enabled,
-        smtp_host=config.smtp.host,
-        smtp_port=config.smtp.port,
-        smtp_timeout_seconds=config.smtp.timeout_seconds,
-        starttls=config.smtp.starttls,
-        email_user=config.smtp.username,
-        email_pass=config.smtp.password,
-        email_to=config.smtp.recipient,
-        subject=config.smtp.subject,
-        logger=logging.getLogger("agentx.notifier"),
+    notification_providers = build_notification_providers(config)
+    storage_repository = PlatformRepository(
+        config.storage.database_url or load_database_settings(config.storage.database_path)
     )
-    storage_repository = AegisNexRepository(config.storage.database_path)
+    from src.notifications_compat import NotifierCompat
+    notifier = NotifierCompat(notification_providers)
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
@@ -238,7 +230,7 @@ def build_docker_agent(config: Config) -> Any:
         health_checks=build_health_checks(config, docker_scanner),
         incident_manager=IncidentManager(
             config.incidents.history_path,
-            notification_providers=build_notification_providers(config),
+            notification_providers=notification_providers,
             storage_repository=storage_repository,
         ),
         storage_repository=storage_repository,

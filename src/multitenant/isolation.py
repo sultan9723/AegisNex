@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class TenantAwareQuery:
@@ -12,7 +12,7 @@ class TenantAwareQuery:
         self.org_id = org_id
         self.table_column = table_column
 
-    def filter(self, sql: str, params: Optional[tuple] = None) -> tuple[str, tuple]:
+    def filter(self, sql: str, params: tuple | None = None) -> tuple[str, tuple]:
         """Inject an org_id WHERE clause into a SQL query."""
         if params is None:
             params = ()
@@ -24,7 +24,11 @@ class TenantAwareQuery:
             else:
                 clause = f" WHERE {filter_clause}"
             idx = sql.rfind("ORDER BY") if "ORDER BY" in sql else len(sql)
-            idx = min(idx, sql.rfind("LIMIT") if "LIMIT" in sql else len(sql)) if "ORDER BY" not in sql else idx
+            idx = (
+                min(idx, sql.rfind("LIMIT") if "LIMIT" in sql else len(sql))
+                if "ORDER BY" not in sql
+                else idx
+            )
             sql = sql[:idx] + clause + sql[idx:]
         else:
             sql = f"{sql} AND {filter_clause}" if "WHERE" in sql else f"{sql} WHERE {filter_clause}"
@@ -37,7 +41,7 @@ def isolate_query(query: str, org_id: int, table_column: str = "org_id") -> tupl
     return aw.filter(query)
 
 
-def get_isolation_filter(user: Any, resource_type: str) -> Dict[str, Any]:
+def get_isolation_filter(user: Any, resource_type: str) -> dict[str, Any]:
     """Return a filter dict for scoping resource queries to the user's org.
 
     The user object must have an 'org_id' attribute (or one can be derived

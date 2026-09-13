@@ -7,7 +7,7 @@ import sqlite3
 
 from src.incidents import Incident
 from src.reporting import OperationalReporter
-from src.storage import AegisNexRepository
+from src.platform_db import PlatformRepository
 
 
 NOW = datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc)
@@ -36,7 +36,7 @@ def make_incident(
 
 
 def seed_history(db_path: Path) -> None:
-    repository = AegisNexRepository(db_path)
+    repository = PlatformRepository(str(db_path))
     repository.save_incident(
         make_incident(
             "INC-1",
@@ -192,7 +192,7 @@ def test_weekly_report_counts_inserted_rows_with_future_clock_skew(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "aegisnex.db"
-    AegisNexRepository(db_path)
+    PlatformRepository(str(db_path)).initialize()
     with sqlite3.connect(db_path) as connection:
         connection.execute(
             """
@@ -252,7 +252,7 @@ def test_weekly_report_counts_inserted_rows_with_future_clock_skew(
         )
         connection.execute(
             """
-            INSERT INTO remediations (
+            INSERT INTO remediation_actions (
                 timestamp,
                 service_name,
                 action,
@@ -285,7 +285,7 @@ def test_monthly_report_counts_inserted_rows_using_incident_timestamp_column(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "aegisnex.db"
-    AegisNexRepository(db_path)
+    PlatformRepository(str(db_path)).initialize()
     with sqlite3.connect(db_path) as connection:
         columns = [
             row[1]

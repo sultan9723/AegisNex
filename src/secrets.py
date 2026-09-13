@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
 import base64
+import os
 from typing import Any
 
 from cryptography.fernet import Fernet
@@ -59,7 +58,9 @@ class SecretManager:
         f = self._get_fernet()
         return f.decrypt(ciphertext.encode("ascii")).decode("utf-8")
 
-    def store_secret(self, name: str, value: str, category: str = "generic", actor: str = "system") -> dict[str, Any]:
+    def store_secret(
+        self, name: str, value: str, category: str = "generic", actor: str = "system"
+    ) -> dict[str, Any]:
         """Encrypt and store a secret in the database."""
         encrypted = self.encrypt(value)
         if self._repo is not None and hasattr(self._repo, "upsert_secret"):

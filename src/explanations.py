@@ -10,20 +10,20 @@ Every autonomous action includes:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
 class ActionExplanation:
     action: str
     why: str
-    evidence: List[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
     confidence: float = 0.0
-    alternatives: List[Dict[str, Any]] = field(default_factory=list)
-    risk_level: Optional[str] = None
-    duration_ms: Optional[float] = None
+    alternatives: list[dict[str, Any]] = field(default_factory=list)
+    risk_level: str | None = None
+    duration_ms: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
             "why": self.why,
@@ -43,10 +43,10 @@ class ExplanationEngine:
         action: str,
         incident_type: str,
         service_name: str,
-        evidence: List[str],
+        evidence: list[str],
         confidence: float,
-        alternatives: Optional[List[str]] = None,
-        risk_level: Optional[str] = None,
+        alternatives: list[str] | None = None,
+        risk_level: str | None = None,
     ) -> ActionExplanation:
         return ActionExplanation(
             action=action,
@@ -57,7 +57,9 @@ class ExplanationEngine:
             risk_level=risk_level,
         )
 
-    def explain_restart(self, service_name: str, reason: str, health_data: Dict[str, Any]) -> ActionExplanation:
+    def explain_restart(
+        self, service_name: str, reason: str, health_data: dict[str, Any]
+    ) -> ActionExplanation:
         evidence = [
             f"Service '{service_name}' reported unhealthy status",
             f"Reason: {reason}",
@@ -65,7 +67,9 @@ class ExplanationEngine:
         if health_data.get("health_checks"):
             for check in health_data["health_checks"]:
                 if not check.get("healthy", True):
-                    evidence.append(f"Health check '{check.get('name', '?')}' failed: {check.get('message', '')}")
+                    evidence.append(
+                        f"Health check '{check.get('name', '?')}' failed: {check.get('message', '')}"
+                    )
 
         return ActionExplanation(
             action="restart_container",
@@ -73,13 +77,21 @@ class ExplanationEngine:
             evidence=evidence,
             confidence=0.85,
             alternatives=[
-                {"action": "manual_inspection", "reason": "Slower but allows human analysis before action"},
-                {"action": "escalate_to_operator", "reason": "Recommended if restart cooldown is active"},
+                {
+                    "action": "manual_inspection",
+                    "reason": "Slower but allows human analysis before action",
+                },
+                {
+                    "action": "escalate_to_operator",
+                    "reason": "Recommended if restart cooldown is active",
+                },
             ],
             risk_level="low",
         )
 
-    def explain_notification_retry(self, provider: str, error: str, attempt: int) -> ActionExplanation:
+    def explain_notification_retry(
+        self, provider: str, error: str, attempt: int
+    ) -> ActionExplanation:
         return ActionExplanation(
             action="retry_notification",
             why=f"Notification via '{provider}' failed on attempt {attempt}: {error}",
@@ -99,7 +111,10 @@ class ExplanationEngine:
             evidence=[f"Target: {target_name}", f"Type: {target_type}"],
             confidence=0.9,
             alternatives=[
-                {"action": "escalate_to_incident", "reason": "Treat as confirmed failure immediately"},
+                {
+                    "action": "escalate_to_incident",
+                    "reason": "Treat as confirmed failure immediately",
+                },
             ],
             risk_level="none",
         )
@@ -132,9 +147,12 @@ class ExplanationEngine:
             "re_run_health_check": f"Target '{service_name}' showed '{incident_type}' — re-running to confirm if transient",
             "restart_monitoring_job": f"Monitoring job for '{service_name}' stopped — restarting to maintain observability",
         }
-        return templates.get(action, f"Autonomous action '{action}' triggered by '{incident_type}' on '{service_name}'")
+        return templates.get(
+            action,
+            f"Autonomous action '{action}' triggered by '{incident_type}' on '{service_name}'",
+        )
 
-    def _build_alternatives(self, action: str, custom: Optional[List[str]]) -> List[Dict[str, Any]]:
+    def _build_alternatives(self, action: str, custom: list[str] | None) -> list[dict[str, Any]]:
         if custom:
             return [{"action": c, "reason": "Considered alternative"} for c in custom]
         return [

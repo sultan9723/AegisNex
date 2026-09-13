@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Dict, Mapping
+from typing import Any
 
 from src.failsafe import failsafe, safe_import
 from src.incidents import IncidentManager, utc_timestamp
@@ -22,7 +23,7 @@ class ContainerHealthCheck:
     restart_count: int
     error: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
             "container_name": self.container_name,
@@ -62,10 +63,12 @@ class ContainerHealthMonitor:
         return docker.from_env(timeout=self.timeout_seconds)
 
     @failsafe(fallback={"status": "error", "checks": [], "error": "Docker unavailable"})
-    def run(self, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         targets = self._selected_targets(params)
-        checks = [self._check_container(name, container_name) for name, container_name in targets.items()]
+        checks = [
+            self._check_container(name, container_name) for name, container_name in targets.items()
+        ]
         for check in checks:
             self._persist_check(check)
             self._sync_incident(check)
@@ -82,7 +85,7 @@ class ContainerHealthMonitor:
             "checks": [check.to_dict() for check in checks],
         }
 
-    def _selected_targets(self, params: Dict[str, Any]) -> Dict[str, str]:
+    def _selected_targets(self, params: dict[str, Any]) -> dict[str, str]:
         target_name = str(params.get("target_name", "")).strip()
         if target_name:
             t = self.targets.get(target_name)

@@ -3,7 +3,7 @@ from src.search.indexer import SearchIndexer
 
 __all__ = [
     "SearchEngine",
+    "SearchIndexer",
     "SearchResult",
     "SearchResults",
-    "SearchIndexer",
 ]

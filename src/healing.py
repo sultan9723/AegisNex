@@ -9,19 +9,17 @@ by the Policy Engine before execution.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 from src.event_bus import EventType, get_bus
 from src.explanations import ActionExplanation, ExplanationEngine
-from src.failsafe import failsafe
 from src.policy_engine import ActionVerdict, AppPolicyEngine, PolicyEvaluation
 
 _logger = logging.getLogger(__name__)
 
-HEALING_ACTIONS_REGISTRY: Dict[str, str] = {
+HEALING_ACTIONS_REGISTRY: dict[str, str] = {
     "restart_container": "Restart an unhealthy container",
     "retry_notification": "Retry a failed notification delivery",
     "re_run_health_check": "Re-run a monitoring health check",
@@ -38,13 +36,13 @@ class HealingActionResult:
     action: str
     target: str
     status: str
-    explanation: Optional[ActionExplanation] = None
-    policy: Optional[PolicyEvaluation] = None
-    details: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    duration_ms: Optional[float] = None
+    explanation: ActionExplanation | None = None
+    policy: PolicyEvaluation | None = None
+    details: dict[str, Any] | None = None
+    error: str | None = None
+    duration_ms: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "action_id": self.action_id,
             "action": self.action,
@@ -68,7 +66,7 @@ class SelfHealingEngine:
 
     def __init__(
         self,
-        policy_engine: Optional[AppPolicyEngine] = None,
+        policy_engine: AppPolicyEngine | None = None,
         docker_scanner: Any = None,
         notifier: Any = None,
         repository: Any = None,
@@ -80,13 +78,15 @@ class SelfHealingEngine:
         self._repository = repository
         self._bus = event_bus or get_bus()
         self._explainer = ExplanationEngine()
-        self._history: List[HealingActionResult] = []
+        self._history: list[HealingActionResult] = []
 
     @property
-    def history(self) -> List[Dict[str, Any]]:
+    def history(self) -> list[dict[str, Any]]:
         return [r.to_dict() for r in self._history]
 
-    async def handle_event(self, event_type: EventType, payload: Dict[str, Any]) -> Optional[HealingActionResult]:
+    async def handle_event(
+        self, event_type: EventType, payload: dict[str, Any]
+    ) -> HealingActionResult | None:
         match event_type:
             case EventType.CONTAINER_DOWN:
                 return await self._heal_container(payload.get("name", "unknown"))
@@ -95,21 +95,27 @@ class SelfHealingEngine:
             case EventType.NOTIFICATION_FAILED:
                 return await self._retry_notification(payload)
             case EventType.TARGET_DOWN:
-                return await self._rerun_health_check(payload.get("name", "unknown"), payload.get("target_type", "unknown"))
+                return await self._rerun_health_check(
+                    payload.get("name", "unknown"), payload.get("target_type", "unknown")
+                )
             case EventType.HIGH_CPU | EventType.MEMORY_PRESSURE | EventType.DISK_FULL:
                 return await self._restart_monitoring(payload.get("resource", "system"))
             case _:
                 return None
 
-    async def _heal_container(self, container_name: str) -> Optional[HealingActionResult]:
+    async def _heal_container(self, container_name: str) -> HealingActionResult | None:
         action_name = "restart_container"
         policy = self._policy.evaluate(action_name, {"container": container_name})
         if policy.verdict != ActionVerdict.SAFE:
-            _logger.info("Container restart for '%s' blocked by policy: %s", container_name, policy.reason)
+            _logger.info(
+                "Container restart for '%s' blocked by policy: %s", container_name, policy.reason
+            )
             return self._record(policy, action_name, container_name, "skipped", error=policy.reason)
 
         explanation = self._explainer.explain_restart(container_name, "Container down", {})
-        result = self._record(policy, action_name, container_name, "running", explanation=explanation)
+        result = self._record(
+            policy, action_name, container_name, "running", explanation=explanation
+        )
 
         if not self._docker:
             return self._fail(result, "Docker scanner not available")
@@ -135,7 +141,7 @@ class SelfHealingEngine:
             self._repository.save_healing_action(result.to_dict())
         return result
 
-    async def _retry_notification(self, payload: Dict[str, Any]) -> Optional[HealingActionResult]:
+    async def _retry_notification(self, payload: dict[str, Any]) -> HealingActionResult | None:
         action_name = "retry_notification"
         policy = self._policy.evaluate(action_name, payload)
         if policy.verdict != ActionVerdict.SAFE:
@@ -143,7 +149,9 @@ class SelfHealingEngine:
 
         provider = payload.get("provider", "unknown")
         attempt = int(payload.get("attempt", 0))
-        explanation = self._explainer.explain_notification_retry(provider, payload.get("error", ""), attempt)
+        explanation = self._explainer.explain_notification_retry(
+            provider, payload.get("error", ""), attempt
+        )
         result = self._record(policy, action_name, provider, "running", explanation=explanation)
 
         if not self._notifier:
@@ -162,7 +170,9 @@ class SelfHealingEngine:
 
         return result
 
-    async def _rerun_health_check(self, target_name: str, target_type: str) -> Optional[HealingActionResult]:
+    async def _rerun_health_check(
+        self, target_name: str, target_type: str
+    ) -> HealingActionResult | None:
         action_name = "re_run_health_check"
         policy = self._policy.evaluate(action_name, {"target": target_name, "type": target_type})
         if policy.verdict != ActionVerdict.SAFE:
@@ -174,13 +184,15 @@ class SelfHealingEngine:
         result.details = {"target": target_name, "type": target_type}
         return result
 
-    async def _restart_monitoring(self, resource: str) -> Optional[HealingActionResult]:
+    async def _restart_monitoring(self, resource: str) -> HealingActionResult | None:
         action_name = "restart_monitoring_job"
         policy = self._policy.evaluate(action_name, {"resource": resource})
         if policy.verdict != ActionVerdict.SAFE:
             return None
 
-        explanation = self._explainer.explain_monitoring_job_restart(f"monitor_{resource}", "Resource pressure detected")
+        explanation = self._explainer.explain_monitoring_job_restart(
+            f"monitor_{resource}", "Resource pressure detected"
+        )
         result = self._record(policy, action_name, resource, "running", explanation=explanation)
         result.status = "completed"
         result.details = {"resource": resource}
@@ -192,8 +204,8 @@ class SelfHealingEngine:
         action: str,
         target: str,
         status: str,
-        explanation: Optional[ActionExplanation] = None,
-        error: Optional[str] = None,
+        explanation: ActionExplanation | None = None,
+        error: str | None = None,
     ) -> HealingActionResult:
         result = HealingActionResult(
             action_id=str(uuid4()),

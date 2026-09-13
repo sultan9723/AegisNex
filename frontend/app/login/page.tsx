@@ -185,6 +185,171 @@ function FeatureHighlights() {
   );
 }
 
+const TOPOLOGY_NODES = [
+  { x: 20, y: 28, label: "API Gateway", status: "healthy" as const },
+  { x: 50, y: 12, label: "Auth Service", status: "healthy" as const },
+  { x: 80, y: 28, label: "AI Engine", status: "healthy" as const },
+  { x: 35, y: 52, label: "Database", status: "healthy" as const },
+  { x: 65, y: 52, label: "Cache", status: "healthy" as const },
+  { x: 50, y: 72, label: "Monitor", status: "healthy" as const },
+];
+
+const TOPOLOGY_EDGES: [number, number][] = [
+  [0, 1], [1, 2], [0, 3], [2, 4], [3, 5], [4, 5], [1, 5],
+];
+
+const FEATURES = [
+  { icon: BrainCircuit, label: "AI Copilot", desc: "Natural language ops" },
+  { icon: Radar, label: "Auto-Remediation", desc: "Self-healing infra" },
+  { icon: Activity, label: "Live Monitoring", desc: "Real-time health" },
+  { icon: Shield, label: "Enterprise Security", desc: "RBAC + audit log" },
+];
+
+function Spinner({ className = "size-4" }: { className?: string }) {
+  return (
+    <svg className={`animate-spin ${className}`} viewBox="0 0 24 24" fill="none">
+      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+    </svg>
+  );
+}
+
+function TopologyVisualization() {
+  return (
+    <div className="relative size-full overflow-hidden rounded-2xl border border-border bg-surface/80 backdrop-blur-sm">
+      <div className="absolute inset-0 bg-grid-fine opacity-20" />
+      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[200px] w-[300px] rounded-full bg-blue-500/[0.03] blur-[60px]" />
+      <div className="absolute bottom-1/3 left-1/3 h-[150px] w-[200px] rounded-full bg-violet-500/[0.02] blur-[50px]" />
+
+      <svg viewBox="0 0 100 84" className="relative size-full">
+        <defs>
+          <radialGradient id="nodeGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="hsl(217 91% 60%)" stopOpacity="0.15" />
+            <stop offset="100%" stopColor="hsl(217 91% 60%)" stopOpacity="0" />
+          </radialGradient>
+          <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="hsl(217 91% 60%)" stopOpacity="0.12" />
+            <stop offset="50%" stopColor="hsl(217 91% 60%)" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="hsl(217 91% 60%)" stopOpacity="0.12" />
+          </linearGradient>
+        </defs>
+
+        {TOPOLOGY_EDGES.map(([from, to], i) => (
+          <line
+            key={`edge-${i}`}
+            x1={TOPOLOGY_NODES[from].x}
+            y1={TOPOLOGY_NODES[from].y}
+            x2={TOPOLOGY_NODES[to].x}
+            y2={TOPOLOGY_NODES[to].y}
+            stroke="url(#edgeGrad)"
+            strokeWidth="0.25"
+            strokeDasharray="1.5 1.5"
+          >
+            <animate
+              attributeName="stroke-dashoffset"
+              from="0"
+              to="-3"
+              dur={`${3 + i * 0.4}s`}
+              repeatCount="indefinite"
+            />
+          </line>
+        ))}
+
+        {TOPOLOGY_EDGES.slice(0, 5).map(([from, to], i) => (
+          <g key={`packet-${i}`}>
+            <circle r="0.5" fill="hsl(217 91% 60%)" opacity="0.6">
+              <animateMotion
+                dur={`${2.2 + i * 0.25}s`}
+                repeatCount="indefinite"
+                begin={`${i * 0.4}s`}
+                path={`M${TOPOLOGY_NODES[from].x},${TOPOLOGY_NODES[from].y} L${TOPOLOGY_NODES[to].x},${TOPOLOGY_NODES[to].y}`}
+              />
+            </circle>
+            <circle r="1.5" fill="hsl(217 91% 60%)" opacity="0.06">
+              <animateMotion
+                dur={`${2.2 + i * 0.25}s`}
+                repeatCount="indefinite"
+                begin={`${i * 0.4}s`}
+                path={`M${TOPOLOGY_NODES[from].x},${TOPOLOGY_NODES[from].y} L${TOPOLOGY_NODES[to].x},${TOPOLOGY_NODES[to].y}`}
+              />
+            </circle>
+          </g>
+        ))}
+
+        {TOPOLOGY_NODES.map((node, i) => (
+          <g key={`node-${i}`}>
+            <circle cx={node.x} cy={node.y} r="6" fill="url(#nodeGlow)" opacity="0.4">
+              <animate
+                attributeName="opacity"
+                values="0.2;0.5;0.2"
+                dur="4s"
+                repeatCount="indefinite"
+                begin={`${i * 0.6}s`}
+              />
+            </circle>
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r="2.8"
+              fill="none"
+              stroke="hsl(217 91% 60% / 0.15)"
+              strokeWidth="0.2"
+            />
+            <circle
+              cx={node.x}
+              cy={node.y}
+              r="2"
+              fill="hsl(0 0% 100%)"
+              stroke="hsl(217 91% 60% / 0.25)"
+              strokeWidth="0.3"
+            />
+            <circle cx={node.x} cy={node.y} r="0.7" fill="hsl(217 91% 60%)">
+              <animate
+                attributeName="opacity"
+                values="0.5;1;0.5"
+                dur="3s"
+                repeatCount="indefinite"
+                begin={`${i * 0.5}s`}
+              />
+            </circle>
+            <text
+              x={node.x}
+              y={node.y + 4.8}
+              textAnchor="middle"
+              fill="hsl(220 9% 46%)"
+              fontSize="1.8"
+              fontFamily="Inter, sans-serif"
+              fontWeight="500"
+            >
+              {node.label}
+            </text>
+          </g>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+function FeatureHighlights() {
+  return (
+    <div className="grid grid-cols-2 gap-2.5">
+      {FEATURES.map((f, i) => (
+        <div
+          key={f.label}
+          className="group rounded-xl border border-border bg-surface/60 p-3.5 backdrop-blur-sm transition-all duration-300 hover:border-border-strong hover:bg-surface"
+          style={{ animationDelay: `${i * 0.1}s` }}
+        >
+          <div className="mb-2.5 grid size-8 place-items-center rounded-lg bg-blue-50 ring-1 ring-blue-100 transition-all group-hover:bg-blue-100 group-hover:ring-blue-200">
+            <f.icon className="size-4 text-blue-500 transition-colors group-hover:text-blue-600" />
+          </div>
+          <p className="text-[11px] font-semibold text-text-primary">{f.label}</p>
+          <p className="mt-0.5 text-[10px] text-text-tertiary leading-relaxed">{f.desc}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const { login, demoLogin, user } = useAuth();
