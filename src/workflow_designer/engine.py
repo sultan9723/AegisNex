@@ -101,7 +101,7 @@ class WorkflowEngine:
                 "started_at": _utc_now(),
             }
 
-        node_map = {n.id: n for n in workflow.nodes}
+        {n.id: n for n in workflow.nodes}
         trigger = next((n for n in workflow.nodes if n.type == WorkflowNodeType.TRIGGER), None)
         if trigger is None:
             return {
@@ -338,7 +338,7 @@ class WorkflowEngine:
         if not runbook_source:
             return {"status": "error", "error": "No runbook_source specified"}
 
-        if runbook_source.endswith(".yaml") or runbook_source.endswith(".yml"):
+        if runbook_source.endswith((".yaml", ".yml")):
             try:
                 path = node.config.get("base_path", ".")
                 from pathlib import Path

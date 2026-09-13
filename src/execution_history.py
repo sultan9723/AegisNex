@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
 _logger = logging.getLogger(__name__)
@@ -38,40 +38,40 @@ class ExecutionStep:
     name: str
     status: str
     started_at: str
-    completed_at: Optional[str] = None
-    agent: Optional[str] = None
-    tool: Optional[str] = None
-    input: Optional[Dict[str, Any]] = None
-    output: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    duration_ms: Optional[float] = None
+    completed_at: str | None = None
+    agent: str | None = None
+    tool: str | None = None
+    input: dict[str, Any] | None = None
+    output: dict[str, Any] | None = None
+    error: str | None = None
+    duration_ms: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
 
 @dataclass
 class ExecutionRecord:
     execution_id: str
-    incident_id: Optional[str]
+    incident_id: str | None
     trigger: str
     status: str
     started_at: str
-    completed_at: Optional[str] = None
-    steps: List[ExecutionStep] = field(default_factory=list)
-    planner: Optional[Dict[str, Any]] = None
-    agents: List[Dict[str, Any]] = field(default_factory=list)
-    evidence: List[Dict[str, Any]] = field(default_factory=list)
-    decisions: List[Dict[str, Any]] = field(default_factory=list)
-    approvals: List[Dict[str, Any]] = field(default_factory=list)
-    root_cause: Optional[str] = None
-    remediation_plan: Optional[Dict[str, Any]] = None
-    verification: Optional[Dict[str, Any]] = None
-    explanation: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    rollback: Optional[Dict[str, Any]] = None
+    completed_at: str | None = None
+    steps: list[ExecutionStep] = field(default_factory=list)
+    planner: dict[str, Any] | None = None
+    agents: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
+    approvals: list[dict[str, Any]] = field(default_factory=list)
+    root_cause: str | None = None
+    remediation_plan: dict[str, Any] | None = None
+    verification: dict[str, Any] | None = None
+    explanation: dict[str, Any] | None = None
+    error: str | None = None
+    rollback: dict[str, Any] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "execution_id": self.execution_id,
             "incident_id": self.incident_id,
@@ -104,8 +104,8 @@ class ExecutionHistory:
     ) -> None:
         self.history_path = Path(history_path)
         self._repository = repository
-        self._records: List[ExecutionRecord] = []
-        self._active: Optional[ExecutionRecord] = None
+        self._records: list[ExecutionRecord] = []
+        self._active: ExecutionRecord | None = None
         self._load()
 
     # ---- Lifecycle ----
@@ -113,7 +113,7 @@ class ExecutionHistory:
     def start_execution(
         self,
         trigger: str,
-        incident_id: Optional[str] = None,
+        incident_id: str | None = None,
     ) -> str:
         record = ExecutionRecord(
             execution_id=str(uuid4()),
@@ -150,7 +150,7 @@ class ExecutionHistory:
         self,
         step_type: str,
         name: str,
-        input: Optional[Dict[str, Any]] = None,
+        input: dict[str, Any] | None = None,
     ) -> str:
         step = ExecutionStep(
             step_id=str(uuid4()),
@@ -168,9 +168,9 @@ class ExecutionHistory:
     def complete_step(
         self,
         step_id: str,
-        output: Optional[Dict[str, Any]] = None,
-        agent: Optional[str] = None,
-        tool: Optional[str] = None,
+        output: dict[str, Any] | None = None,
+        agent: str | None = None,
+        tool: str | None = None,
     ) -> None:
         if not self._active:
             return
@@ -202,27 +202,27 @@ class ExecutionHistory:
 
     # ---- Metadata ----
 
-    def set_planner(self, planner_data: Dict[str, Any]) -> None:
+    def set_planner(self, planner_data: dict[str, Any]) -> None:
         if self._active:
             self._active.planner = planner_data
             self._save()
 
-    def add_agent(self, agent_data: Dict[str, Any]) -> None:
+    def add_agent(self, agent_data: dict[str, Any]) -> None:
         if self._active:
             self._active.agents.append(agent_data)
             self._save()
 
-    def add_evidence(self, evidence: Dict[str, Any]) -> None:
+    def add_evidence(self, evidence: dict[str, Any]) -> None:
         if self._active:
             self._active.evidence.append(evidence)
             self._save()
 
-    def add_decision(self, decision: Dict[str, Any]) -> None:
+    def add_decision(self, decision: dict[str, Any]) -> None:
         if self._active:
             self._active.decisions.append(decision)
             self._save()
 
-    def add_approval(self, approval: Dict[str, Any]) -> None:
+    def add_approval(self, approval: dict[str, Any]) -> None:
         if self._active:
             self._active.approvals.append(approval)
             self._save()
@@ -232,38 +232,38 @@ class ExecutionHistory:
             self._active.root_cause = root_cause
             self._save()
 
-    def set_remediation_plan(self, plan: Dict[str, Any]) -> None:
+    def set_remediation_plan(self, plan: dict[str, Any]) -> None:
         if self._active:
             self._active.remediation_plan = plan
             self._save()
 
-    def set_verification(self, verification: Dict[str, Any]) -> None:
+    def set_verification(self, verification: dict[str, Any]) -> None:
         if self._active:
             self._active.verification = verification
             self._save()
 
-    def set_explanation(self, explanation: Dict[str, Any]) -> None:
+    def set_explanation(self, explanation: dict[str, Any]) -> None:
         if self._active:
             self._active.explanation = explanation
             self._save()
 
-    def set_rollback(self, rollback: Dict[str, Any]) -> None:
+    def set_rollback(self, rollback: dict[str, Any]) -> None:
         if self._active:
             self._active.rollback = rollback
             self._save()
 
-    def set_remediation_plan_from_dict(self, plan: Optional[Dict[str, Any]]) -> None:
+    def set_remediation_plan_from_dict(self, plan: dict[str, Any] | None) -> None:
         self.set_remediation_plan(plan)
 
-    def set_verification_from_dict(self, verification: Optional[Dict[str, Any]]) -> None:
+    def set_verification_from_dict(self, verification: dict[str, Any] | None) -> None:
         self.set_verification(verification)
 
     # ---- Query ----
 
-    def get_active(self) -> Optional[ExecutionRecord]:
+    def get_active(self) -> ExecutionRecord | None:
         return self._active
 
-    def get_record(self, execution_id: str) -> Optional[ExecutionRecord]:
+    def get_record(self, execution_id: str) -> ExecutionRecord | None:
         for record in self._records:
             if record.execution_id == execution_id:
                 return record
@@ -272,9 +272,9 @@ class ExecutionHistory:
     def get_records(
         self,
         limit: int = 50,
-        status: Optional[str] = None,
-        incident_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        status: str | None = None,
+        incident_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         results = list(self._records)
         if status:
             results = [r for r in results if r.status == status]
@@ -283,7 +283,7 @@ class ExecutionHistory:
         results.sort(key=lambda r: r.started_at, reverse=True)
         return [r.to_dict() for r in results[:limit]]
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         total = len(self._records)
         completed = sum(1 for r in self._records if r.status == ExecutionStatus.COMPLETED)
         failed = sum(1 for r in self._records if r.status == ExecutionStatus.FAILED)
@@ -337,10 +337,12 @@ class ExecutionHistory:
             _logger.exception("Failed to save execution history: %s", exc)
 
 
-def _record_from_dict(data: Dict[str, Any]) -> ExecutionRecord:
+def _record_from_dict(data: dict[str, Any]) -> ExecutionRecord:
     steps = []
     for s in data.get("steps", []):
-        steps.append(ExecutionStep(**{k: v for k, v in s.items() if k in ExecutionStep.__dataclass_fields__}))
+        steps.append(
+            ExecutionStep(**{k: v for k, v in s.items() if k in ExecutionStep.__dataclass_fields__})
+        )
     allowed = set(ExecutionRecord.__dataclass_fields__)
     kwargs = {k: v for k, v in data.items() if k in allowed}
     kwargs["steps"] = steps
@@ -348,10 +350,10 @@ def _record_from_dict(data: Dict[str, Any]) -> ExecutionRecord:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _parse_iso(value: str) -> Optional[datetime]:
+def _parse_iso(value: str) -> datetime | None:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError):

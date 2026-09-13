@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
@@ -55,14 +56,10 @@ class Scheduler:
         with self._lock:
             _logger.debug("Scheduler ensuring tables in %s", self._db_path)
             conn = sqlite3.connect(self._db_path, timeout=30)
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute("PRAGMA journal_mode=WAL")
-            except sqlite3.OperationalError:
-                pass
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute("PRAGMA busy_timeout=30000")
-            except sqlite3.OperationalError:
-                pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS scheduled_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,14 +91,10 @@ class Scheduler:
         _logger.debug("Scheduler opening connection to %s", self._db_path)
         conn = sqlite3.connect(self._db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
         return conn
 
     def add_task(
@@ -274,10 +267,8 @@ class Scheduler:
 
     def _run_loop(self, interval: int) -> None:
         while self._running:
-            try:
+            with contextlib.suppress(Exception):
                 self.tick()
-            except Exception:
-                pass
             time.sleep(interval)
 
     def get_stats(self) -> dict[str, Any]:

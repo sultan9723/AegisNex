@@ -8,22 +8,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Dict, List, Optional
+from enum import StrEnum
+from typing import Any
 
-from src.intelligence.policy import PolicyEngine as _InnerPolicyEngine, Policy
+from src.intelligence.policy import Policy
+from src.intelligence.policy import PolicyEngine as _InnerPolicyEngine
 from src.intelligence.risk import RiskEngine, RiskLevel
 
 _logger = logging.getLogger(__name__)
 
 
-class ActionVerdict(str, Enum):
+class ActionVerdict(StrEnum):
     SAFE = "safe"
     APPROVAL_REQUIRED = "approval_required"
     FORBIDDEN = "forbidden"
 
 
-AUTONOMOUS_ACTIONS_SAFE: List[str] = [
+AUTONOMOUS_ACTIONS_SAFE: list[str] = [
     "restart_container",
     "retry_notification",
     "re_run_health_check",
@@ -34,7 +35,7 @@ AUTONOMOUS_ACTIONS_SAFE: List[str] = [
     "rotate_logs",
 ]
 
-AUTONOMOUS_ACTIONS_APPROVAL: List[str] = [
+AUTONOMOUS_ACTIONS_APPROVAL: list[str] = [
     "delete_container",
     "stop_container",
     "delete_target",
@@ -44,7 +45,7 @@ AUTONOMOUS_ACTIONS_APPROVAL: List[str] = [
     "rollback_deployment",
 ]
 
-AUTONOMOUS_ACTIONS_FORBIDDEN: List[str] = [
+AUTONOMOUS_ACTIONS_FORBIDDEN: list[str] = [
     "delete_database",
     "delete_volume",
     "delete_cluster",
@@ -57,7 +58,7 @@ AUTONOMOUS_ACTIONS_FORBIDDEN: List[str] = [
 SENSITIVE_TARGET_MARKERS = {"critical", "production", "prod"}
 
 
-def _as_list(value: Any) -> List[Any]:
+def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
     if isinstance(value, (list, tuple, set)):
@@ -65,8 +66,8 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
-def _context_values(context: Dict[str, Any]) -> List[str]:
-    values: List[str] = []
+def _context_values(context: dict[str, Any]) -> list[str]:
+    values: list[str] = []
     for key in ("environment", "env", "criticality", "service_criticality", "tier"):
         value = context.get(key)
         if value is not None:
@@ -96,7 +97,7 @@ def _context_values(context: Dict[str, Any]) -> List[str]:
     return [value for value in values if value]
 
 
-def _restart_count(context: Dict[str, Any]) -> int:
+def _restart_count(context: dict[str, Any]) -> int:
     for key in ("restart_count", "recent_restart_count", "restart_attempts"):
         try:
             return int(context.get(key, 0))
@@ -104,10 +105,7 @@ def _restart_count(context: Dict[str, Any]) -> int:
             continue
 
     container = context.get("container")
-    if isinstance(container, dict):
-        name = container.get("name")
-    else:
-        name = container
+    name = container.get("name") if isinstance(container, dict) else container
 
     history = context.get("restart_history")
     if isinstance(history, dict):
@@ -123,7 +121,7 @@ def _restart_count(context: Dict[str, Any]) -> int:
     return 0
 
 
-def _sensitive_target_reason(context: Dict[str, Any]) -> str:
+def _sensitive_target_reason(context: dict[str, Any]) -> str:
     values = set(_context_values(context))
     matched = sorted(values & SENSITIVE_TARGET_MARKERS)
     if matched:
@@ -139,11 +137,11 @@ class PolicyEvaluation:
     verdict: ActionVerdict
     reason: str
     confidence: float = 1.0
-    policy_name: Optional[str] = None
-    risk_level: Optional[str] = None
+    policy_name: str | None = None
+    risk_level: str | None = None
     risk_score: float = 0.0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action,
             "verdict": self.verdict.value,
@@ -178,19 +176,21 @@ class AppPolicyEngine:
         try:
             if hasattr(self._repository, "list_policies"):
                 for row in self._repository.list_policies():
-                    self._inner.add_policy(Policy(
-                        name=row.get("name", "custom"),
-                        description=row.get("description", ""),
-                        action_pattern=row.get("action_pattern", "*"),
-                        condition=row.get("condition", "always"),
-                        effect=row.get("effect", "deny"),
-                        priority=int(row.get("priority", 0)),
-                        enabled=bool(row.get("enabled", True)),
-                    ))
+                    self._inner.add_policy(
+                        Policy(
+                            name=row.get("name", "custom"),
+                            description=row.get("description", ""),
+                            action_pattern=row.get("action_pattern", "*"),
+                            condition=row.get("condition", "always"),
+                            effect=row.get("effect", "deny"),
+                            priority=int(row.get("priority", 0)),
+                            enabled=bool(row.get("enabled", True)),
+                        )
+                    )
         except Exception:
             _logger.exception("Failed to load persisted policies")
 
-    def evaluate(self, action: str, context: Optional[Dict[str, Any]] = None) -> PolicyEvaluation:
+    def evaluate(self, action: str, context: dict[str, Any] | None = None) -> PolicyEvaluation:
         ctx = context or {}
         action_lower = action.strip().lower()
 
@@ -271,14 +271,14 @@ class AppPolicyEngine:
             risk_score=risk.score,
         )
 
-    def get_safe_actions(self) -> List[str]:
+    def get_safe_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_SAFE)
 
-    def get_approval_actions(self) -> List[str]:
+    def get_approval_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_APPROVAL)
 
-    def get_forbidden_actions(self) -> List[str]:
+    def get_forbidden_actions(self) -> list[str]:
         return list(AUTONOMOUS_ACTIONS_FORBIDDEN)
 
-    def list_policies(self) -> List[Dict[str, Any]]:
+    def list_policies(self) -> list[dict[str, Any]]:
         return self._inner.list_policies()

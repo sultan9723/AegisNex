@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-import src.integrations.providers  # noqa: F401 — ensures all integrations are registered
+import src.integrations.providers  # noqa: F401  ensures all integrations are registered
 from src.integrations.base import (
     INTEGRATION_REGISTRY,
-    IntegrationConfig,
     IntegrationProvider,
     get_integration,
-    list_integrations,
 )
 from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
 

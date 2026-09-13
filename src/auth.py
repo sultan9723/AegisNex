@@ -2,33 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import enum
 import hashlib
 import hmac
 import json
 import logging
 import os
-from pathlib import Path
 import secrets
 import sqlite3
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 _logger = logging.getLogger(__name__)
 
+import contextlib
+
 import jwt as pyjwt
 
 from src.enterprise_auth import is_production_environment
 from src.session import SessionStore
-
-try:
-    import hashlib as _hashlib
-    import secrets as _secrets
-    _HAVE_HASH = True
-except ImportError:
-    _HAVE_HASH = False
 
 
 def generate_api_key() -> tuple[str, str, str]:
@@ -39,19 +35,19 @@ def generate_api_key() -> tuple[str, str, str]:
         to the user, key_hash is the stored hash, and key_prefix is a
         human-readable prefix for identification.
     """
-    raw = _secrets.token_hex(32)
+    raw = secrets.token_hex(32)
     key_prefix = raw[:8]
     full_key = f"anx_{raw}"
-    key_hash = _hashlib.sha256(full_key.encode()).hexdigest()
+    key_hash = hashlib.sha256(full_key.encode()).hexdigest()
     return full_key, key_hash, key_prefix
 
 
 def hash_api_key(key: str) -> str:
-    return _hashlib.sha256(key.encode()).hexdigest()
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class Role(enum.Enum):
@@ -73,7 +69,7 @@ class Role(enum.Enum):
         }[self.value]
 
     @staticmethod
-    def from_str(value: str) -> "Role":
+    def from_str(value: str) -> Role:
         normalized = value.strip().lower()
         mapping = {
             "admin": Role.ADMINISTRATOR,
@@ -144,40 +140,53 @@ class AuthError(ValueError):
 class TokenBlacklist:
     """In-memory token blacklist with DB persistence for revocations."""
 
-    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
+    def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
         self.database_path = Path(database_path)
         self._cache: set[str] = set()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
-        connection = sqlite3.connect(self.database_path, timeout=10)
+        connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        try:
-            connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
+        with contextlib.suppress(sqlite3.OperationalError):
+            connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS token_blacklist (
-                    jti TEXT PRIMARY KEY,
-                    expires_at INTEGER NOT NULL,
-                    revoked_at TEXT NOT NULL
-                )
-                """
-            )
-        # Warm the cache from DB
-        with self._connect() as connection:
-            now = int(datetime.now(timezone.utc).timestamp())
-            connection.execute("DELETE FROM token_blacklist WHERE expires_at < ?", (now,))
-            rows = connection.execute(
-                "SELECT jti FROM token_blacklist WHERE expires_at >= ?", (now,)
-            ).fetchall()
-            self._cache = {str(row["jti"]) for row in rows}
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                with self._connect() as connection:
+                    connection.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS token_blacklist (
+                            jti TEXT PRIMARY KEY,
+                            expires_at INTEGER NOT NULL,
+                            revoked_at TEXT NOT NULL
+                        )
+                        """
+                    )
+                with self._connect() as connection:
+                    now = int(datetime.now(UTC).timestamp())
+                    try:
+                        connection.execute(
+                            "DELETE FROM token_blacklist WHERE expires_at < ?", (now,)
+                        )
+                    except sqlite3.OperationalError as exc:
+                        _logger.warning("Token blacklist cleanup skipped: %s", exc)
+                    rows = connection.execute(
+                        "SELECT jti FROM token_blacklist WHERE expires_at >= ?", (now,)
+                    ).fetchall()
+                    self._cache = {str(row["jti"]) for row in rows}
+                return
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                if "locked" not in str(exc).lower() or attempt == 2:
+                    break
+                time.sleep(0.25 * (2**attempt))
+        _logger.warning("Token blacklist unavailable during startup: %s", last_error)
+        self._cache = set()
 
     def revoke(self, jti: str, expires_at: int) -> None:
         with self._connect() as connection:
@@ -204,7 +213,7 @@ class TokenBlacklist:
 class UserStore:
     """SQLite user repository with role support."""
 
-    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
+    def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -213,10 +222,8 @@ class UserStore:
         _logger.debug("UserStore opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -239,15 +246,24 @@ class UserStore:
                 """
             )
             # Add columns if migrating from old schema
-            existing = {str(row["name"]) for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+            existing = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(users)").fetchall()
+            }
             if "role" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'"
+                )
             if "display_name" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+                )
             if "last_login" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
             if "mfa_enabled" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS external_identities (
@@ -268,8 +284,8 @@ class UserStore:
         normalized_email = normalize_email(email)
         if not normalized_email:
             raise AuthError("Email is required.")
-        if len(password) < 8:
-            raise AuthError("Password must be at least 8 characters.")
+        if len(password) < 12:
+            raise AuthError("Password must be at least 12 characters.")
         normalized_role = Role.from_str(role).value
         try:
             with self._connect() as connection:
@@ -335,8 +351,8 @@ class UserStore:
             return cursor.rowcount > 0
 
     def update_password(self, user_id: int, new_password: str) -> bool:
-        if len(new_password) < 8:
-            raise AuthError("Password must be at least 8 characters.")
+        if len(new_password) < 12:
+            raise AuthError("Password must be at least 12 characters.")
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET hashed_password = ? WHERE id = ?",
@@ -478,10 +494,17 @@ class UserStore:
             return cursor.rowcount > 0
 
     def seed_default_admin(self) -> None:
-        admin = self.get_user_by_email("admin")
+        """Seed the default admin user if AEGISNEX_DEMO_PASSWORD is set.
+
+        In production, admin accounts should be created via the invite system.
+        This method only runs when the demo password environment variable is present.
+        """
+        demo_password = os.getenv("AEGISNEX_DEMO_PASSWORD")
+        if not demo_password:
+            return
+        admin_email = os.getenv("AEGISNEX_DEMO_USERNAME", "admin")
+        admin = self.get_user_by_email(admin_email)
         if admin is not None:
-            if verify_password("admin", admin.hashed_password):
-                self.update_password(admin.id, "AegisNex!Demo2026")
             return
         with self._connect() as connection:
             connection.execute(
@@ -489,7 +512,7 @@ class UserStore:
                 INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
                 VALUES (?, ?, 1, 1, 1, 'administrator', ?)
                 """,
-                ("admin", hash_password("AegisNex!Demo2026"), utc_timestamp()),
+                (admin_email, hash_password(demo_password), utc_timestamp()),
             )
 
 
@@ -529,7 +552,7 @@ class AuthManager:
         self.session_store = session_store
 
     def create_access_token(self, user: User) -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         jti = secrets.token_hex(16)
         payload = {
             "sub": str(user.id),
@@ -545,7 +568,7 @@ class AuthManager:
         return pyjwt.encode(payload, self.jwt_secret, algorithm="HS256")
 
     def create_refresh_token(self, user: User) -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         jti = secrets.token_hex(16)
         payload = {
             "sub": str(user.id),
@@ -721,7 +744,9 @@ class AuthManager:
             )
             new_jti = new_payload.get("jti", "")
             new_exp = new_payload.get("exp", 0)
-            new_expires_at = datetime.fromtimestamp(new_exp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            new_expires_at = (
+                datetime.fromtimestamp(new_exp, tz=UTC).isoformat().replace("+00:00", "Z")
+            )
             self.session_store.rotate_refresh_token(jti, new_jti, new_expires_at)
 
         return new_access, new_refresh
@@ -827,10 +852,12 @@ async def parse_form_body(request: Any) -> dict[str, str]:
 
 def b64url_encode(value: bytes) -> str:
     import base64
+
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
 def b64url_decode(value: str) -> bytes:
     import base64
+
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode(value + padding)

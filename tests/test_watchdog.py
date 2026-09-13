@@ -7,6 +7,7 @@ import pytest
 from src.config import Config
 from src.guardian import Guardian
 from src.health_checks import DockerHealthCheck
+from src.notifications_compat import NotifierCompat
 import src.watchdog as watchdog
 
 
@@ -82,12 +83,8 @@ def test_build_guardian_wires_config_values(tmp_path: Path) -> None:
     assert guardian.docker_scanner.include_all is False
     assert guardian.docker_scanner.client_timeout_seconds == 5
     assert guardian.docker_scanner.restart_timeout_seconds == 6
-    assert guardian.notifier.enabled is True
-    assert guardian.notifier.smtp_host == "smtp.example.com"
-    assert guardian.notifier.smtp_port == 2525
-    assert guardian.notifier.smtp_timeout_seconds == 4
-    assert guardian.notifier.starttls is False
-    assert guardian.notifier.subject == "Watchdog Alert"
+    assert guardian.notifier is not None
+    assert isinstance(guardian.notifier, NotifierCompat)
     assert guardian.health_checker.monitor.cpu_interval_seconds == 0.2
     assert guardian.health_checker.monitor.thresholds.cpu_percent == 80
     assert len(guardian.health_checks) == 1

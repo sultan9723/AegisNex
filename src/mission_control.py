@@ -8,10 +8,9 @@ supports replay mode, execution history, audit links, and multi-agent tracking.
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 TABLE_NAME = "mc_executions"
@@ -21,14 +20,14 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-class ExecutionStatus(str, Enum):
+class ExecutionStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
 
 
-class StageStatus(str, Enum):
+class StageStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -36,7 +35,7 @@ class StageStatus(str, Enum):
     SKIPPED = "skipped"
 
 
-class ExecutionType(str, Enum):
+class ExecutionType(StrEnum):
     CHAT = "chat"
     ANALYZE = "analyze"
     PLAN = "plan"
@@ -260,7 +259,6 @@ def _org_membership_filter(user: Any, repo: Any) -> str | None:
     if hasattr(user, "role") and user.role == "super_admin":
         return None
     try:
-        from src.multitenant.manager import TenantManager
         tm = getattr(repo, "_tenant_manager", None)
         if tm is None and hasattr(repo, "_get_tenant_manager"):
             tm = repo._get_tenant_manager()
@@ -427,6 +425,7 @@ def list_executions(
     if days is not None:
         try:
             from datetime import timedelta
+
             cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
             conditions.append(f"timestamp >= {p}")
             params.append(cutoff)
@@ -470,6 +469,7 @@ def count_executions(
     if days is not None:
         try:
             from datetime import timedelta
+
             cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
             conditions.append(f"timestamp >= {p}")
             params.append(cutoff)
@@ -499,9 +499,17 @@ def get_execution_stats(repo: Any) -> dict[str, Any]:
     """)
     if not rows:
         return {
-            "total": 0, "completed": 0, "failed": 0, "running": 0, "queued": 0,
-            "avg_latency": 0, "avg_cost": 0, "avg_confidence": 0, "total_cost": 0,
-            "type_count": 0, "user_count": 0,
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "running": 0,
+            "queued": 0,
+            "avg_latency": 0,
+            "avg_cost": 0,
+            "avg_confidence": 0,
+            "total_cost": 0,
+            "type_count": 0,
+            "user_count": 0,
         }
     r = rows[0]
     return {
@@ -535,14 +543,16 @@ def get_execution_type_stats(repo: Any) -> list[dict[str, Any]]:
     """)
     result = []
     for r in rows:
-        result.append({
-            "execution_type": r.get("execution_type", "unknown"),
-            "count": r.get("count", 0),
-            "completed": r.get("completed", 0),
-            "avg_latency": round(r.get("avg_latency") or 0, 1),
-            "avg_confidence": round(r.get("avg_confidence") or 0, 3),
-            "total_cost": round(r.get("total_cost") or 0, 6),
-        })
+        result.append(
+            {
+                "execution_type": r.get("execution_type", "unknown"),
+                "count": r.get("count", 0),
+                "completed": r.get("completed", 0),
+                "avg_latency": round(r.get("avg_latency") or 0, 1),
+                "avg_confidence": round(r.get("avg_confidence") or 0, 3),
+                "total_cost": round(r.get("total_cost") or 0, 6),
+            }
+        )
     return result
 
 
@@ -683,7 +693,7 @@ def update_stage(
 ) -> bool:
     for i, s in enumerate(execution.stages):
         if s.stage_id == stage_id:
-            updated = {k: v for k, v in asdict(s).items()}
+            updated = dict(asdict(s).items())
             updated.update(kwargs)
             execution.stages[i] = StageResult.from_dict(updated)
             return True
