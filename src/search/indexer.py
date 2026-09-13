@@ -5,9 +5,7 @@ import logging
 import os
 import sqlite3
 import threading
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 
@@ -59,7 +57,7 @@ def _ensure_fts(conn: sqlite3.Connection) -> None:
     """)
 
 
-def _rebuild_fts(conn: sqlite3.Connection, rows: List[Dict[str, Any]]) -> int:
+def _rebuild_fts(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> int:
     conn.execute("DELETE FROM search_fts WHERE domain = ?", (rows[0].get("_domain", ""),))
     count = 0
     for row in rows:
@@ -79,7 +77,7 @@ def _rebuild_fts(conn: sqlite3.Connection, rows: List[Dict[str, Any]]) -> int:
     return count
 
 
-_DOMAIN_INDEXERS: Dict[str, str] = {
+_DOMAIN_INDEXERS: dict[str, str] = {
     "incidents": "incidents",
     "targets": "monitoring_targets",
     "reports": "reports",
@@ -94,155 +92,212 @@ _DOMAIN_INDEXERS: Dict[str, str] = {
 }
 
 
-def _collect_incidents(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_incidents(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM incidents ORDER BY timestamp DESC LIMIT 5000")
-    docs: List[Dict[str, Any]] = []
+    docs: list[dict[str, Any]] = []
     for r in rows:
         desc = r.get("description", "") or ""
         sid = r.get("service_name", "") or ""
-        docs.append({
-            "_domain": "incidents", "_doc_id": f"inc-{r.get('incident_id')}",
-            "_title": f"[{r.get('severity')}] {sid} — {desc[:120]}",
-            "_body": json.dumps({k: v for k, v in r.items() if k not in ('health_check_results',)}),
-            **{k: v for k, v in r.items() if k not in ('health_check_results',)},
-        })
+        docs.append(
+            {
+                "_domain": "incidents",
+                "_doc_id": f"inc-{r.get('incident_id')}",
+                "_title": f"[{r.get('severity')}] {sid} — {desc[:120]}",
+                "_body": json.dumps(
+                    {k: v for k, v in r.items() if k not in ("health_check_results",)}
+                ),
+                **{k: v for k, v in r.items() if k not in ("health_check_results",)},
+            }
+        )
     return docs
 
 
-def _collect_targets(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_targets(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM monitoring_targets ORDER BY name")
-    return [{
-        "_domain": "targets", "_doc_id": f"tgt-{r.get('id')}",
-        "_title": r.get("name", ""),
-        "_body": f"{r.get('name')} {r.get('address')} {r.get('target_type')}",
-        **dict(r),
-    } for r in rows]
+    return [
+        {
+            "_domain": "targets",
+            "_doc_id": f"tgt-{r.get('id')}",
+            "_title": r.get("name", ""),
+            "_body": f"{r.get('name')} {r.get('address')} {r.get('target_type')}",
+            **dict(r),
+        }
+        for r in rows
+    ]
 
 
-def _collect_reports(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_reports(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM reports ORDER BY timestamp DESC LIMIT 2000")
-    return [{
-        "_domain": "reports", "_doc_id": f"rpt-{r.get('id')}",
-        "_title": f"{r.get('report_type')} — {r.get('summary', '')[:120]}",
-        "_body": r.get("summary", ""),
-        **dict(r),
-    } for r in rows]
+    return [
+        {
+            "_domain": "reports",
+            "_doc_id": f"rpt-{r.get('id')}",
+            "_title": f"{r.get('report_type')} — {r.get('summary', '')[:120]}",
+            "_body": r.get("summary", ""),
+            **dict(r),
+        }
+        for r in rows
+    ]
 
 
-def _collect_audit_logs(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_audit_logs(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 5000")
-    return [{
-        "_domain": "audit_logs", "_doc_id": f"aud-{r.get('id')}",
-        "_title": f"{r.get('actor')} — {r.get('action')} on {r.get('resource_type')}",
-        "_body": str(r.get("details", "")),
-        **dict(r),
-    } for r in rows]
+    return [
+        {
+            "_domain": "audit_logs",
+            "_doc_id": f"aud-{r.get('id')}",
+            "_title": f"{r.get('actor')} — {r.get('action')} on {r.get('resource_type')}",
+            "_body": str(r.get("details", "")),
+            **dict(r),
+        }
+        for r in rows
+    ]
 
 
-def _collect_settings(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_settings(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM app_settings")
-    return [{
-        "_domain": "settings", "_doc_id": f"set-{r.get('key')}",
-        "_title": r.get("key", ""),
-        "_body": r.get("value", ""),
-        **dict(r),
-    } for r in rows]
+    return [
+        {
+            "_domain": "settings",
+            "_doc_id": f"set-{r.get('key')}",
+            "_title": r.get("key", ""),
+            "_body": r.get("value", ""),
+            **dict(r),
+        }
+        for r in rows
+    ]
 
 
-def _collect_compliance(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_compliance(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = repo._fetch_all("SELECT * FROM alert_rules ORDER BY name")
-    return [{
-        "_domain": "compliance", "_doc_id": f"cmp-{r.get('id')}",
-        "_title": r.get("name", ""),
-        "_body": f"{r.get('description')} {r.get('condition')} {r.get('threshold')}",
-        **dict(r),
-    } for r in rows]
+    return [
+        {
+            "_domain": "compliance",
+            "_doc_id": f"cmp-{r.get('id')}",
+            "_title": r.get("name", ""),
+            "_body": f"{r.get('description')} {r.get('condition')} {r.get('threshold')}",
+            **dict(r),
+        }
+        for r in rows
+    ]
 
 
-def _collect_containers(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_containers(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
         from src.docker_scanner import DockerScanner
+
         scanner = DockerScanner()
         report = scanner.run({"include_all": True})
         if report.get("status") != "ok":
             return []
         containers = report.get("containers", [])
-        return [{
-            "_domain": "containers", "_doc_id": f"ctn-{c.get('name', 'unknown')}",
-            "_title": c.get("name", "unknown"),
-            "_body": f"{c.get('image', '')} {c.get('status', '')} {c.get('health_status', '')}",
-            **c,
-        } for c in containers]
+        return [
+            {
+                "_domain": "containers",
+                "_doc_id": f"ctn-{c.get('name', 'unknown')}",
+                "_title": c.get("name", "unknown"),
+                "_body": f"{c.get('image', '')} {c.get('status', '')} {c.get('health_status', '')}",
+                **c,
+            }
+            for c in containers
+        ]
     except Exception:
         return []
 
 
-def _collect_runbooks(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_runbooks(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
         from src.intelligence.runbooks.registry import get_registry
+
         registry = get_registry()
-        docs: List[Dict[str, Any]] = []
+        docs: list[dict[str, Any]] = []
         for rb in registry.list_all():
             d = rb.to_dict()
-            docs.append({
-                "_domain": "runbooks", "_doc_id": f"rb-{d.get('name', 'unknown')}",
-                "_title": d.get("name", ""),
-                "_body": f"{d.get('description', '')} {' '.join(d.get('tags', []))}",
-                **d,
-            })
+            docs.append(
+                {
+                    "_domain": "runbooks",
+                    "_doc_id": f"rb-{d.get('name', 'unknown')}",
+                    "_title": d.get("name", ""),
+                    "_body": f"{d.get('description', '')} {' '.join(d.get('tags', []))}",
+                    **d,
+                }
+            )
         return docs
     except Exception:
         return []
 
 
-def _collect_ai_conversations(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_ai_conversations(
+    repo: PlatformRepository, conn: sqlite3.Connection
+) -> list[dict[str, Any]]:
     try:
-        from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
         import os as _os
-        db_path = _os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+        from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+
+        db_path = _os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
         store = SQLiteMemoryStore(db_path=db_path)
-        rows = store._conn().execute(
-            "SELECT * FROM ai_conversations ORDER BY created_at DESC LIMIT 2000"
-        ).fetchall()
-        return [{
-            "_domain": "ai_conversations", "_doc_id": f"aiconv-{r['id']}",
-            "_title": str(r["request"])[:200],
-            "_body": str(r["response"]),
-            **dict(r),
-        } for r in rows]
+        rows = (
+            store._conn()
+            .execute("SELECT * FROM ai_conversations ORDER BY created_at DESC LIMIT 2000")
+            .fetchall()
+        )
+        return [
+            {
+                "_domain": "ai_conversations",
+                "_doc_id": f"aiconv-{r['id']}",
+                "_title": str(r["request"])[:200],
+                "_body": str(r["response"]),
+                **dict(r),
+            }
+            for r in rows
+        ]
     except Exception:
         return []
 
 
-def _collect_knowledge(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_knowledge(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
-        from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
         import os as _os
-        db_path = _os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
+
+        from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
+
+        db_path = _os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
         store = SQLiteMemoryStore(db_path=db_path)
-        rows = store._conn().execute(
-            "SELECT * FROM ai_learnings ORDER BY created_at DESC LIMIT 2000"
-        ).fetchall()
-        return [{
-            "_domain": "knowledge", "_doc_id": f"know-{r['id']}",
-            "_title": str(r["root_cause"])[:200],
-            "_body": f"{r['resolution']} {r['service']} {r['category']}",
-            **dict(r),
-        } for r in rows]
+        rows = (
+            store._conn()
+            .execute("SELECT * FROM ai_learnings ORDER BY created_at DESC LIMIT 2000")
+            .fetchall()
+        )
+        return [
+            {
+                "_domain": "knowledge",
+                "_doc_id": f"know-{r['id']}",
+                "_title": str(r["root_cause"])[:200],
+                "_body": f"{r['resolution']} {r['service']} {r['category']}",
+                **dict(r),
+            }
+            for r in rows
+        ]
     except Exception:
         return []
 
 
-def _collect_workflows(repo: PlatformRepository, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _collect_workflows(repo: PlatformRepository, conn: sqlite3.Connection) -> list[dict[str, Any]]:
     try:
         from src.intelligence.history import list_history
+
         histories = list_history(repo, limit=2000)
-        return [{
-            "_domain": "workflows", "_doc_id": f"wf-{h.get('id', '')}",
-            "_title": str(h.get("objective", "") or h.get("request", ""))[:200],
-            "_body": str(h.get("result_text", "")),
-            **h,
-        } for h in histories]
+        return [
+            {
+                "_domain": "workflows",
+                "_doc_id": f"wf-{h.get('id', '')}",
+                "_title": str(h.get("objective", "") or h.get("request", ""))[:200],
+                "_body": str(h.get("result_text", "")),
+                **h,
+            }
+            for h in histories
+        ]
     except Exception:
         return []
 
@@ -266,14 +321,14 @@ class SearchIndexer:
     def __init__(self, repo: PlatformRepository) -> None:
         self._repo = repo
 
-    def build_index(self, domains: List[str] | None = None) -> Dict[str, Any]:
+    def build_index(self, domains: list[str] | None = None) -> dict[str, Any]:
         with _INDEX_LOCK:
             conn = _get_conn()
             try:
                 _ensure_fts(conn)
                 if domains is None:
                     domains = list(_DOMAIN_COLLECTORS.keys())
-                results: Dict[str, Any] = {}
+                results: dict[str, Any] = {}
                 for domain in domains:
                     if domain not in _DOMAIN_COLLECTORS:
                         results[domain] = {"status": "skipped", "reason": "unknown_domain"}
@@ -308,7 +363,9 @@ class SearchIndexer:
 
     def index_domain(self, domain: str) -> int:
         if domain not in _DOMAIN_COLLECTORS:
-            raise ValueError(f"Unknown domain: {domain}. Available: {list(_DOMAIN_COLLECTORS.keys())}")
+            raise ValueError(
+                f"Unknown domain: {domain}. Available: {list(_DOMAIN_COLLECTORS.keys())}"
+            )
         with _INDEX_LOCK:
             conn = _get_conn()
             try:
@@ -318,7 +375,7 @@ class SearchIndexer:
             finally:
                 conn.close()
 
-    def get_index_stats(self) -> Dict[str, Any]:
+    def get_index_stats(self) -> dict[str, Any]:
         with _INDEX_LOCK:
             conn = _get_conn()
             try:
@@ -326,7 +383,7 @@ class SearchIndexer:
                 meta_rows = conn.execute(
                     "SELECT domain, doc_count, last_indexed FROM search_index_meta ORDER BY domain"
                 ).fetchall()
-                domains: Dict[str, Any] = {}
+                domains: dict[str, Any] = {}
                 total_docs = 0
                 for row in meta_rows:
                     d = dict(row)
@@ -364,8 +421,9 @@ class SearchIndexer:
             finally:
                 conn.close()
 
-    def search_fts(self, query: str, domain: str | None = None,
-                   limit: int = 20) -> List[Dict[str, Any]]:
+    def search_fts(
+        self, query: str, domain: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
         with _INDEX_LOCK:
             conn = _get_conn()
             try:

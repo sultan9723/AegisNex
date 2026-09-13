@@ -54,7 +54,7 @@ def test_role_requires_level() -> None:
 
 def test_user_model_new_role(tmp_path: Path) -> None:
     store = UserStore(tmp_path / "test_roles.db")
-    user = store.create_user("soc@example.com", "password123", role="soc_analyst")
+    user = store.create_user("soc@example.com", "password12345", role="soc_analyst")
     assert user.role == "soc_analyst"
     assert user.display_role == "SOC Analyst"
     assert user.display_name == ""
@@ -64,11 +64,11 @@ def test_user_model_new_role(tmp_path: Path) -> None:
 
 def test_user_has_minimum_role(tmp_path: Path) -> None:
     store = UserStore(tmp_path / "test_min_role.db")
-    admin = store.create_user("admin@example.com", "password123", role="administrator")
+    admin = store.create_user("admin@example.com", "password12345", role="administrator")
     assert admin.has_minimum_role("operator") is True
     assert admin.has_minimum_role("super_admin") is False
 
-    viewer = store.create_user("viewer@example.com", "password123", role="read_only")
+    viewer = store.create_user("viewer@example.com", "password12345", role="read_only")
     assert viewer.has_minimum_role("read_only") is True
     assert viewer.has_minimum_role("operator") is False
 
@@ -76,7 +76,7 @@ def test_user_has_minimum_role(tmp_path: Path) -> None:
 def test_user_store_creates_all_new_roles(tmp_path: Path) -> None:
     store = UserStore(tmp_path / "test_all_roles.db")
     for role_name in ("super_admin", "administrator", "soc_analyst", "operator", "read_only", "auditor"):
-        user = store.create_user(f"{role_name}@example.com", "password123", role=role_name)
+        user = store.create_user(f"{role_name}@example.com", "password12345", role=role_name)
         assert user.role == role_name
 
 
@@ -85,8 +85,8 @@ def test_auth_manager_login_records_last_login(tmp_path: Path) -> None:
         user_store=UserStore(tmp_path / "test_last_login.db"),
         jwt_secret="test-secret-for-testing",
     )
-    user, _, _ = manager.register("login@example.com", "password123")
-    result = manager.login("login@example.com", "password123")
+    user, _, _ = manager.register("login@example.com", "password12345")
+    result = manager.login("login@example.com", "password12345")
     assert result is not None
     assert result[0].last_login is not None
 
@@ -149,7 +149,7 @@ def test_platform_db_create_and_accept_invite(tmp_path: Path) -> None:
 def test_platform_db_password_reset_flow(tmp_path: Path) -> None:
     from src.auth import UserStore
     store = UserStore(tmp_path / "pw_users.db")
-    user = store.create_user("pw@example.com", "password123")
+    user = store.create_user("pw@example.com", "password12345")
     repo = PlatformRepository(f"sqlite:///{tmp_path / 'pw_resets.db'}")
     reset = repo.create_password_reset(user.id, "reset-token-456")
     assert reset["user_id"] == user.id

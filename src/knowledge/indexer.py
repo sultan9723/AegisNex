@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
 from src.intelligence.retrieval.rag import RAGEngine
 from src.knowledge.loader import (
-    DocumentChunk,
-    load_directory as _load_directory,
     load_document as _load_document,
 )
 
@@ -61,7 +59,9 @@ class KnowledgeIndexer:
             for file in files:
                 fp = os.path.join(root, file)
                 ext = Path(file).suffix.lower()
-                if ext in {".md", ".mdx", ".txt", ".log", ".pdf"} or file.endswith((".sop.md", ".retro.md", ".sop", ".retro")):
+                if ext in {".md", ".mdx", ".txt", ".log", ".pdf"} or file.endswith(
+                    (".sop.md", ".retro.md", ".sop", ".retro")
+                ):
                     try:
                         total += self.index_document(fp)
                     except Exception:
@@ -83,32 +83,43 @@ class KnowledgeIndexer:
     def remove_document(self, source: str) -> bool:
         return self._store._delete_knowledge_doc_by_source(source)
 
-    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
         if not query.strip():
             return []
         result = self._store.search_knowledge(query, limit=limit)
-        entries: List[Dict[str, Any]] = []
+        entries: list[dict[str, Any]] = []
         for entry in result.entries:
             try:
                 import json
-                h = json.loads(entry.get("headings", "[]")) if isinstance(entry.get("headings"), str) else (entry.get("headings") or [])
-                m = json.loads(entry.get("metadata", "{}")) if isinstance(entry.get("metadata"), str) else (entry.get("metadata") or {})
+
+                h = (
+                    json.loads(entry.get("headings", "[]"))
+                    if isinstance(entry.get("headings"), str)
+                    else (entry.get("headings") or [])
+                )
+                m = (
+                    json.loads(entry.get("metadata", "{}"))
+                    if isinstance(entry.get("metadata"), str)
+                    else (entry.get("metadata") or {})
+                )
             except (json.JSONDecodeError, TypeError):
                 h = []
                 m = {}
             doc = self._store.get_knowledge_doc_by_source(m.get("source", ""))
-            entries.append({
-                "id": entry.get("id"),
-                "chunk_index": entry.get("chunk_index", 0),
-                "content": entry.get("content", ""),
-                "headings": h,
-                "metadata": m,
-                "doc_source": m.get("source", ""),
-                "doc_title": m.get("title", ""),
-                "doc_type": m.get("format", ""),
-                "created_at": entry.get("created_at", ""),
-            })
+            entries.append(
+                {
+                    "id": entry.get("id"),
+                    "chunk_index": entry.get("chunk_index", 0),
+                    "content": entry.get("content", ""),
+                    "headings": h,
+                    "metadata": m,
+                    "doc_source": m.get("source", ""),
+                    "doc_title": m.get("title", ""),
+                    "doc_type": m.get("format", ""),
+                    "created_at": entry.get("created_at", ""),
+                }
+            )
         return entries
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         return self._store.get_knowledge_stats()

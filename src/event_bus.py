@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any
 from uuid import uuid4
 
 _logger = logging.getLogger(__name__)
@@ -54,10 +55,10 @@ class Event:
     event_type: EventType
     timestamp: str
     source: str
-    payload: Dict[str, Any]
-    correlation_id: Optional[str] = None
+    payload: dict[str, Any]
+    correlation_id: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "event_id": self.event_id,
             "event_type": self.event_type.value,
@@ -75,8 +76,8 @@ class EventBus:
     """In-process pub/sub event bus with async subscribers."""
 
     def __init__(self) -> None:
-        self._subscribers: Dict[EventType, List[EventHandler]] = {}
-        self._wildcard_subscribers: List[EventHandler] = []
+        self._subscribers: dict[EventType, list[EventHandler]] = {}
+        self._wildcard_subscribers: list[EventHandler] = []
 
     def subscribe(self, event_type: EventType, handler: EventHandler) -> None:
         if event_type not in self._subscribers:
@@ -91,7 +92,13 @@ class EventBus:
         if handler in handlers:
             handlers.remove(handler)
 
-    async def publish(self, event_type: EventType, payload: Dict[str, Any], source: str = "system", correlation_id: Optional[str] = None) -> Event:
+    async def publish(
+        self,
+        event_type: EventType,
+        payload: dict[str, Any],
+        source: str = "system",
+        correlation_id: str | None = None,
+    ) -> Event:
         event = Event(
             event_id=str(uuid4()),
             event_type=event_type,
@@ -114,10 +121,14 @@ class EventBus:
         try:
             await handler(event)
         except Exception:
-            _logger.exception("Event handler %s failed for %s", getattr(handler, "__name__", "?"), event.event_type.value)
+            _logger.exception(
+                "Event handler %s failed for %s",
+                getattr(handler, "__name__", "?"),
+                event.event_type.value,
+            )
 
 
-_bus: Optional[EventBus] = None
+_bus: EventBus | None = None
 
 
 def get_bus() -> EventBus:
@@ -133,4 +144,4 @@ def reset_bus() -> None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

@@ -7,47 +7,35 @@ from src.agents.base import (
     AgentType,
     BaseAgent,
 )
-from src.agents.orchestrator import AgentOrchestrator
-from src.agents.registry import AgentRegistry, create_default_registry
-from src.agents.state import SharedAgentState
 from src.agents.domain_agents import (
     ComplianceAgent,
     DockerAgent,
-    InfrastructureAgent,
     IncidentAgent,
+    InfrastructureAgent,
     KnowledgeAgent,
     MonitoringAgent,
     ReportingAgent,
     SupervisorAgent,
 )
-
-# Backward-compatible supervisor aliases.
-from src.agents.supervisors import (
-    ComplianceSupervisor,
-    InfrastructureSupervisor,
-    OperationsSupervisor,
-    SecuritySupervisor,
-)
+from src.agents.orchestrator import AgentOrchestrator
+from src.agents.registry import AgentRegistry, create_default_registry
+from src.agents.state import SharedAgentState
 
 __all__ = [
     "AgentConfig",
     "AgentMessage",
+    "AgentOrchestrator",
+    "AgentRegistry",
     "AgentResult",
     "AgentType",
-    "AgentRegistry",
-    "AgentOrchestrator",
     "BaseAgent",
     "ComplianceAgent",
-    "ComplianceSupervisor",
     "DockerAgent",
-    "InfrastructureAgent",
-    "InfrastructureSupervisor",
     "IncidentAgent",
+    "InfrastructureAgent",
     "KnowledgeAgent",
     "MonitoringAgent",
-    "OperationsSupervisor",
     "ReportingAgent",
-    "SecuritySupervisor",
     "SharedAgentState",
     "SupervisorAgent",
     "create_default_registry",

@@ -6,7 +6,7 @@ import importlib
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 from src.config import ThresholdConfig
 
@@ -14,7 +14,7 @@ from src.config import ThresholdConfig
 class SystemResourceMonitor:
     def __init__(
         self,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
         log_file: str = "logs/agentx.log",
         cpu_interval_seconds: float = 0.1,
         thresholds: ThresholdConfig | None = None,
@@ -38,9 +38,7 @@ class SystemResourceMonitor:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        formatter = logging.Formatter(
-            "%(asctime)s %(levelname)s %(name)s - %(message)s"
-        )
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
 
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setFormatter(formatter)
@@ -55,7 +53,7 @@ class SystemResourceMonitor:
     def _load_psutil(self) -> Any:
         return importlib.import_module("psutil")
 
-    def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             params = params or {}
             psutil = self._load_psutil()
@@ -63,7 +61,11 @@ class SystemResourceMonitor:
             cpu_percent = float(psutil.cpu_percent(interval=interval))
             cpu_count = psutil.cpu_count() if hasattr(psutil, "cpu_count") else 1
             cpu_count = cpu_count or 1
-            cpu_load = [round(x / cpu_count * 100, 1) for x in psutil.getloadavg()] if hasattr(psutil, "getloadavg") else None
+            cpu_load = (
+                [round(x / cpu_count * 100, 1) for x in psutil.getloadavg()]
+                if hasattr(psutil, "getloadavg")
+                else None
+            )
             ram = psutil.virtual_memory()
             ram_percent = float(ram.percent)
             disk = psutil.disk_usage("/")
@@ -73,14 +75,21 @@ class SystemResourceMonitor:
             disk_free_gb = round(disk_free / (1024**3), 2) if disk_free is not None else None
             disk_total_gb = round(disk_total / (1024**3), 2) if disk_total is not None else None
             net = psutil.net_io_counters() if hasattr(psutil, "net_io_counters") else None
-            uptime_seconds = int(time.time() - psutil.boot_time()) if hasattr(psutil, "boot_time") else None
+            uptime_seconds = (
+                int(time.time() - psutil.boot_time()) if hasattr(psutil, "boot_time") else None
+            )
             process_count = len(psutil.pids()) if hasattr(psutil, "pids") else None
             temperature = None
             if hasattr(psutil, "sensors_temperatures"):
                 try:
                     temps = psutil.sensors_temperatures()
                     if temps:
-                        core = temps.get("coretemp") or temps.get("cpu-thermal") or temps.get("cpu_thermal") or []
+                        core = (
+                            temps.get("coretemp")
+                            or temps.get("cpu-thermal")
+                            or temps.get("cpu_thermal")
+                            or []
+                        )
                         if core:
                             temperature = round(core[0].current, 1)
                 except Exception:
