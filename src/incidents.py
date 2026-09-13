@@ -33,6 +33,14 @@ class Incident:
     resolved_by: Optional[str] = None
     resolved_timestamp: Optional[str] = None
     resolution_notes: Optional[str] = None
+    proposed_remediation: Optional[Dict[str, Any]] = None
+    remediation_proposed_by: Optional[str] = None
+    remediation_proposed_at: Optional[str] = None
+    remediation_approval_status: Optional[str] = None
+    remediation_plan_confidence: Optional[float] = None
+    org_id: Optional[int] = None
+    org_name: Optional[str] = None
+    remediation_history: List[Dict[str, Any]] | None = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "Incident":
@@ -53,6 +61,14 @@ class Incident:
             resolved_by=payload.get("resolved_by"),
             resolved_timestamp=payload.get("resolved_at", payload.get("resolved_timestamp")),
             resolution_notes=payload.get("resolution_notes"),
+            proposed_remediation=payload.get("proposed_remediation"),
+            remediation_proposed_by=payload.get("remediation_proposed_by"),
+            remediation_proposed_at=payload.get("remediation_proposed_at"),
+            remediation_approval_status=payload.get("remediation_approval_status"),
+            remediation_plan_confidence=payload.get("remediation_plan_confidence"),
+            org_id=payload.get("org_id"),
+            org_name=payload.get("org_name"),
+            remediation_history=list(payload.get("remediation_history") or []),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -200,6 +216,123 @@ class IncidentManager:
         self._save_incidents()
         self._save_incident_to_storage(incident)
         self._record_transition(incident, previous_status, incident.status, actor, {"reason": "reopened"})
+        return incident
+
+    def propose_remediation(
+        self,
+        incident_id: str,
+        plan: Dict[str, Any],
+        proposed_by: str = "system",
+        confidence: float = 0.0,
+    ) -> Incident:
+        """Store a diagnostic/remediation plan on the incident as pending approval.
+
+        This never executes anything - it only records the proposal so an
+        operator can review and approve/reject it later. Governance
+        classification of the plan's individual actions happens separately
+        via AppPolicyEngine before this is called.
+        """
+        incident = self._get_required(incident_id)
+        incident.proposed_remediation = plan
+        incident.remediation_proposed_by = proposed_by
+        incident.remediation_proposed_at = utc_timestamp()
+        incident.remediation_approval_status = "pending"
+        incident.remediation_plan_confidence = confidence
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                proposed_by,
+                "incident.remediation_proposed",
+                "incident",
+                incident.incident_id,
+                {"mode": plan.get("mode"), "action_count": len(plan.get("actions", []) or [])},
+            )
+        return incident
+
+    def record_remediation_decision(
+        self, incident_id: str, decision: str, reviewed_by: str = "system",
+    ) -> Incident:
+        """Reflect a real human approve/reject decision on the incident.
+
+        This only updates the incident's own remediation_approval_status;
+        execution of an approved diagnostics-only plan is orchestrated by
+        the approval route after this state synchronization.
+        """
+        incident = self._get_required(incident_id)
+        incident.remediation_approval_status = decision
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                reviewed_by,
+                f"incident.remediation_{decision}",
+                "incident",
+                incident.incident_id,
+                {},
+            )
+        return incident
+
+    def record_diagnostic_evidence(
+        self,
+        incident_id: str,
+        evidence_packet: Dict[str, Any],
+        actor: str = "system",
+        incident_snapshot: Dict[str, Any] | None = None,
+        approval_id: str | None = None,
+    ) -> Incident:
+        """Persist one approved, read-only diagnostic evidence packet."""
+        try:
+            incident = self._get_required(incident_id)
+        except KeyError:
+            if not incident_snapshot:
+                raise
+            incident = Incident.from_dict(incident_snapshot)
+            self.incidents.append(incident)
+
+        history = list(incident.remediation_history or [])
+        if approval_id and any(
+            entry.get("approval_id") == approval_id
+            for entry in history
+            if isinstance(entry, dict)
+        ):
+            return incident
+        history.append(
+            {
+                "executed_at": utc_timestamp(),
+                "action": "prepare_evidence_packet",
+                "actor": actor,
+                "approval_id": approval_id,
+                "mode": "diagnostics_only",
+                "successful": True,
+                "details": {"evidence_packet": evidence_packet},
+            }
+        )
+        incident.remediation_history = history
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                actor,
+                "incident.diagnostic_evidence_collected",
+                "incident",
+                incident.incident_id,
+                {"mode": "diagnostics_only", "action": "prepare_evidence_packet"},
+            )
+        return incident
+
+    def assign_client(
+        self,
+        incident_id: str,
+        org_id: int | None,
+        org_name: str | None = None,
+    ) -> Incident:
+        """Keep the incident manager's durable snapshot aligned with the client index."""
+        incident = self._get_required(incident_id)
+        incident.org_id = org_id
+        incident.org_name = org_name
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
         return incident
 
     def delete_incident(self, incident_id: str) -> None:

@@ -477,20 +477,59 @@ class UserStore:
             )
             return cursor.rowcount > 0
 
-    def seed_default_admin(self) -> None:
-        admin = self.get_user_by_email("admin")
-        if admin is not None:
-            if verify_password("admin", admin.hashed_password):
-                self.update_password(admin.id, "AegisNex!Demo2026")
-            return
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
-                VALUES (?, ?, 1, 1, 1, 'administrator', ?)
-                """,
-                ("admin", hash_password("AegisNex!Demo2026"), utc_timestamp()),
+    def seed_default_admin(self, password: str | None = None) -> None:
+        env_password = password or os.getenv("AEGISNEX_BOOTSTRAP_ADMIN_PASSWORD", "")
+        if not env_password:
+            raise AuthError(
+                "AEGISNEX_BOOTSTRAP_ADMIN_PASSWORD environment variable is required to seed the default admin."
             )
+        admin = self.get_user_by_email("admin")
+        if admin is None:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                    VALUES (?, ?, 1, 1, 1, 'administrator', ?)
+                    """,
+                    ("admin", hash_password(env_password), utc_timestamp()),
+                )
+            return
+        # Upgrade the legacy known-insecure bootstrap password if it is still in use.
+        # A real, operator-set password is never overwritten.
+        if any(
+            verify_password(legacy, admin.hashed_password)
+            for legacy in ("admin", "AegisNex!Demo2026")
+        ):
+            self.update_password(admin.id, env_password)
+
+    def seed_demo_user(self, username: str, password: str) -> None:
+        """Create (or resync) a restricted, non-admin demo account.
+
+        Unlike seed_default_admin, this never grants is_superuser or an
+        elevated role: the demo identity is always read_only, regardless of
+        how AEGISNEX_DEMO_USERNAME is configured, so demo login can never
+        hand out admin, secrets, Docker, or mutation access.
+        """
+        if not password:
+            raise AuthError(
+                "AEGISNEX_DEMO_PASSWORD environment variable is required to seed the demo user."
+            )
+        existing = self.get_user_by_email(username)
+        if existing is None:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                    VALUES (?, ?, 1, 0, 1, 'read_only', ?)
+                    """,
+                    (username, hash_password(password), utc_timestamp()),
+                )
+            return
+        # Internal automation account, not a real user's credential: keep it
+        # in sync with the configured secret so rotating AEGISNEX_DEMO_PASSWORD
+        # doesn't permanently lock demo login out.
+        if not verify_password(password, existing.hashed_password):
+            self.update_password(existing.id, password)
 
 
 class AuthManager:

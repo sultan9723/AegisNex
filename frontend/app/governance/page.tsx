@@ -263,12 +263,12 @@ export default function GovernancePage() {
     setLoading(true);
     try {
       const [statsRes, agentsRes, actionsRes, policiesRes, approvalsRes, anomaliesRes] = await Promise.allSettled([
-        fetch(buildApiUrl("/governance/stats")).then((r) => r.json()),
-        fetch(buildApiUrl("/governance/agents")).then((r) => r.json()),
-        fetch(buildApiUrl("/governance/actions?limit=200")).then((r) => r.json()),
-        fetch(buildApiUrl("/governance/policies")).then((r) => r.json()),
-        fetch(buildApiUrl("/approvals?status=pending&limit=25")).then((r) => r.json()),
-        fetch(buildApiUrl("/governance/anomalies?limit=100")).then((r) => r.json()),
+        getJson("/governance/stats"),
+        getJson("/governance/agents"),
+        getJson("/governance/actions?limit=200"),
+        getJson("/governance/policies"),
+        getJson("/approvals?status=pending&limit=25"),
+        getJson("/governance/anomalies?limit=100"),
       ]);
       if (statsRes.status === "fulfilled") setStats(statsRes.value);
       if (agentsRes.status === "fulfilled") setAgents(agentsRes.value.agents || []);
@@ -292,11 +292,11 @@ export default function GovernancePage() {
     setSelectedAgent(fallbackAgent);
     try {
       const [detailRes, historyRes, policiesRes, toolsRes, metricsRes] = await Promise.all([
-        fetch(buildApiUrl(`/governance/agents/${encodeURIComponent(agentId)}`)).then((r) => r.json()),
-        fetch(buildApiUrl(`/governance/agents/${encodeURIComponent(agentId)}/history?limit=8`)).then((r) => r.json()),
-        fetch(buildApiUrl(`/governance/agents/${encodeURIComponent(agentId)}/policies`)).then((r) => r.json()),
-        fetch(buildApiUrl(`/governance/agents/${encodeURIComponent(agentId)}/tools`)).then((r) => r.json()),
-        fetch(buildApiUrl(`/governance/agents/${encodeURIComponent(agentId)}/metrics`)).then((r) => r.json()),
+        getJson(`/governance/agents/${encodeURIComponent(agentId)}`),
+        getJson(`/governance/agents/${encodeURIComponent(agentId)}/history?limit=8`),
+        getJson(`/governance/agents/${encodeURIComponent(agentId)}/policies`),
+        getJson(`/governance/agents/${encodeURIComponent(agentId)}/tools`),
+        getJson(`/governance/agents/${encodeURIComponent(agentId)}/metrics`),
       ]);
       setSelectedAgent(detailRes);
       setSelectedAgentHistory(historyRes.history || []);
@@ -326,6 +326,17 @@ export default function GovernancePage() {
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
     });
+    if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+    return response.json();
+  };
+
+  // GET counterpart to postJson above. The bare fetch(buildApiUrl(...)) calls
+  // this replaces sent no cookies cross-origin (frontend on :3000, backend on
+  // :8000) and never checked response.ok, so every 401 body was silently
+  // parsed as if it were real data - this is why the page always showed
+  // zeroed-out stats regardless of real backend/governance.db state.
+  const getJson = async (path: string) => {
+    const response = await fetch(buildApiUrl(path), { credentials: "include" });
     if (!response.ok) throw new Error(`Request failed with ${response.status}`);
     return response.json();
   };

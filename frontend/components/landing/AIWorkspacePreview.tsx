@@ -86,13 +86,12 @@ export function AIWorkspacePreview() {
                     Goal achieved
                   </span>
                   <span className="ml-auto rounded bg-muted px-1 py-0.5 text-[8px] text-text-tertiary">
-                    98%
+                    Grounded
                   </span>
                 </div>
                 <p className="text-[10px] leading-relaxed text-text-secondary">
-                  System health analysis complete. Found 3 optimization opportunities:
-                  worker replica scaling, SSL certificate renewal, and DB connection pool tuning.
-                  All changes are low-risk with rollback capability.
+                  System health analysis complete. Evidence-grounded findings are ready for review,
+                  with policy context, governed next steps, and rollback-aware execution controls.
                 </p>
               </div>
 
@@ -107,10 +106,10 @@ export function AIWorkspacePreview() {
                 <div className="mb-1.5 flex items-center gap-1.5">
                   <Library className="size-2.5 text-info/50" />
                   <span className="text-[9px] font-semibold text-text-secondary">Evidence</span>
-                  <span className="rounded bg-muted px-1 text-[8px] text-text-tertiary">5</span>
+                  <span className="rounded bg-muted px-1 text-[8px] text-text-tertiary">Linked</span>
                 </div>
                 <div className="space-y-1">
-                  {["Container cpu_usage_avg: 78%", "SSL cert expires in 14 days", "DB pool utilization: 92%"].map((e, i) => (
+                  {["Container health context", "SSL certificate context", "Database utilization context"].map((e, i) => (
                     <div key={i} className="flex items-center gap-1.5 text-[9px] text-text-tertiary">
                       <div className="size-1 rounded-full bg-info/30" />
                       {e}
@@ -134,7 +133,7 @@ export function AIWorkspacePreview() {
                 <div className="space-y-1">
                   {[
                     { node: "health_check", summary: "Collected system metrics", ok: true },
-                    { node: "analyzer", summary: "Identified 3 optimization targets", ok: true },
+                    { node: "analyzer", summary: "Identified evidence-backed targets", ok: true },
                     { node: "planner", summary: "Generated action plan with rollback", ok: true },
                   ].map((step, i) => (
                     <motion.div
@@ -163,11 +162,11 @@ export function AIWorkspacePreview() {
               >
                 <div className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1">
                   <Brain className="size-2.5 text-chart-2/40" />
-                  <span className="text-[8px] text-text-tertiary">Reasoning: 3 optimization strategies analyzed</span>
+                  <span className="text-[8px] text-text-tertiary">Reasoning: policy-aware strategies analyzed</span>
                 </div>
                 <div className="flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1">
                   <Zap className="size-2.5 text-primary/40" />
-                  <span className="text-[8px] text-text-tertiary">120ms</span>
+                  <span className="text-[8px] text-text-tertiary">Tool-executed</span>
                 </div>
               </motion.div>
             </motion.div>

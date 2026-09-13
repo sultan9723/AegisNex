@@ -151,30 +151,38 @@ def _incident_tool(
     incident_id: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    try:
-        from src.incidents import IncidentManager
+    """Query real, current incidents from PlatformRepository - the same
+    store the /api/incidents UI route reads from.
 
-        im = IncidentManager("", storage_repository=repo)
-        if action == "list":
-            incidents = im.list_incidents()
-            status_filter = kwargs.get("status")
-            if status_filter:
-                incidents = [i for i in incidents if i.status == status_filter]
-            return {
-                "incidents": [i.to_dict() for i in incidents],
-                "count": len(incidents),
-            }
+    Previously this constructed a throwaway IncidentManager("", ...): its
+    read path (list_incidents/get_active_incidents) only ever consults the
+    JSON history file at that literal path (here, none - an empty
+    history_path resolves to the current directory, which .exists() but
+    isn't a valid incident file, so every read silently returned []),
+    never the storage_repository passed to it - storage_repository is
+    write-only in that class. That guaranteed 0 incidents regardless of
+    real incident state. Reading directly from `repo` (already the live
+    PlatformRepository every other real-data tool uses) fixes that.
+    """
+    try:
+        if repo is None:
+            return {"status": "error", "error": "Repository not available", "incidents": [], "count": 0}
         if action == "get" and incident_id:
-            incident = im.get_incident(incident_id)
+            incident = repo.get_incident(incident_id)
             if incident:
-                return {"incident": incident.to_dict()}
+                return {"incident": incident}
             return {"status": "error", "error": "Incident not found"}
         if action == "active":
-            active = im.get_active_incidents()
-            return {
-                "incidents": [i.to_dict() for i in active],
-                "count": len(active),
-            }
+            active = repo.list_incidents(incident_status="active")
+            acknowledged = repo.list_incidents(incident_status="acknowledged")
+            incidents = sorted(
+                active + acknowledged, key=lambda i: str(i.get("timestamp", "")), reverse=True,
+            )
+            return {"incidents": incidents, "count": len(incidents)}
+        if action == "list":
+            status_filter = kwargs.get("status")
+            incidents = repo.list_incidents(incident_status=status_filter)
+            return {"incidents": incidents, "count": len(incidents)}
         return {"status": "error", "error": f"Unknown action: {action}"}
     except Exception as exc:
         return {"status": "error", "error": str(exc), "incidents": [], "count": 0}

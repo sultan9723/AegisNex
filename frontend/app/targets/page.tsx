@@ -23,9 +23,12 @@ const DEFAULT_PAYLOAD: MonitoringTargetPayload = {
 function targetStatus(target: MonitoringTarget): { label: string; variant: "success-subtle" | "warning-subtle" | "danger-subtle" } {
   const latest = target.latest_result;
   if (latest && typeof latest === "object" && "status" in latest) {
+    // Backend monitors (http/tcp/ssl/dns) report "ok" on success and "warning"
+    // for near-expiry SSL certs - anything else ("failed", "expired", ...) is a
+    // real failure. "healthy"/"reachable"/"valid" are never actually emitted.
     const s = String(latest.status);
-    if (s === "healthy" || s === "reachable" || s === "valid") return { label: "healthy", variant: "success-subtle" };
-    if (s === "warning" || s === "expiring") return { label: "warning", variant: "warning-subtle" };
+    if (s === "ok") return { label: "healthy", variant: "success-subtle" };
+    if (s === "warning") return { label: "warning", variant: "warning-subtle" };
     return { label: "error", variant: "danger-subtle" };
   }
   if (target.last_error) return { label: "error", variant: "danger-subtle" };

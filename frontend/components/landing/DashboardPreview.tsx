@@ -85,7 +85,7 @@ export function DashboardPreview() {
           >
             <div className="flex items-center gap-2">
               <PulseDot />
-              <span className="text-[10px] font-medium text-text-secondary">All Systems Operational</span>
+              <span className="text-[10px] font-medium text-text-secondary">Product Preview</span>
             </div>
             <div className="hidden items-center gap-2 sm:flex">
               <StatusChip label="API" ok />
@@ -97,10 +97,10 @@ export function DashboardPreview() {
           {/* Metric cards */}
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
             {[
-              { icon: Cpu, label: "CPU", value: "34", unit: "%", color: "text-primary", progress: 34, pColor: "bg-primary" },
-              { icon: HardDrive, label: "Memory", value: "6.2", unit: "GB", color: "text-chart-2", progress: 62, pColor: "bg-chart-2" },
-              { icon: Network, label: "Network", value: "847", unit: "Mbps", color: "text-success", progress: 84, pColor: "bg-success" },
-              { icon: Server, label: "Containers", value: "24", unit: "up", color: "text-warning", progress: 100, pColor: "bg-warning" },
+              { icon: Cpu, label: "CPU", value: "Real-time", unit: "", color: "text-primary", progress: 60, pColor: "bg-primary" },
+              { icon: HardDrive, label: "Memory", value: "Real-time", unit: "", color: "text-chart-2", progress: 60, pColor: "bg-chart-2" },
+              { icon: Network, label: "Network", value: "Real-time", unit: "", color: "text-success", progress: 60, pColor: "bg-success" },
+              { icon: Server, label: "Containers", value: "Health-checked", unit: "", color: "text-warning", progress: 100, pColor: "bg-warning" },
             ].map((m, i) => (
               <motion.div
                 key={m.label}
@@ -138,9 +138,9 @@ export function DashboardPreview() {
               </div>
               <div className="space-y-1.5">
                 {[
-                  { title: "SSL cert expiring", severity: "warning", time: "2m ago" },
-                  { title: "Container restart", severity: "info", time: "14m ago" },
-                  { title: "High CPU spike", severity: "success", time: "1h ago" },
+                  { title: "SSL certificate review", severity: "warning", time: "Tracked" },
+                  { title: "Container restart workflow", severity: "info", time: "Tracked" },
+                  { title: "Resource health analysis", severity: "success", time: "Tracked" },
                 ].map((inc, i) => (
                   <motion.div
                     key={inc.title}
@@ -175,9 +175,9 @@ export function DashboardPreview() {
               </div>
               <div className="space-y-1.5">
                 {[
-                  { text: "Scale worker replicas to 3", conf: 94 },
-                  { text: "Update SSL certificate", conf: 98 },
-                  { text: "Optimize DB connection pool", conf: 87 },
+                  { text: "Scale worker replicas", badge: "Evidence-based" },
+                  { text: "Renew SSL certificate", badge: "Evidence-based" },
+                  { text: "Tune DB connection pool", badge: "Evidence-based" },
                 ].map((rec, i) => (
                   <motion.div
                     key={rec.text}
@@ -189,7 +189,7 @@ export function DashboardPreview() {
                   >
                     <Zap className="size-2.5 text-primary/50" />
                     <span className="flex-1 truncate text-[10px] text-text-secondary">{rec.text}</span>
-                    <span className="text-[9px] text-primary/60">{rec.conf}%</span>
+                    <span className="text-[9px] text-primary/60">{rec.badge}</span>
                   </motion.div>
                 ))}
               </div>
@@ -207,9 +207,9 @@ export function DashboardPreview() {
             <Activity className="size-3 text-primary/40" />
             <div className="flex-1 overflow-hidden">
               <div className="flex items-center gap-4 text-[9px] text-text-tertiary">
-                <span className="flex items-center gap-1"><TrendingUp className="size-2.5" /> 10,247 events/s</span>
-                <span className="flex items-center gap-1"><Clock className="size-2.5" /> &lt;50ms p99</span>
-                <span className="flex items-center gap-1"><CheckCircle2 className="size-2.5" /> 99.97% uptime</span>
+                <span className="flex items-center gap-1"><TrendingUp className="size-2.5" /> Continuous monitoring</span>
+                <span className="flex items-center gap-1"><Clock className="size-2.5" /> Real-time processing</span>
+                <span className="flex items-center gap-1"><CheckCircle2 className="size-2.5" /> Operational</span>
               </div>
             </div>
             <div className="hidden items-center gap-1 sm:flex">

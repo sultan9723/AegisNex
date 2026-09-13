@@ -16,6 +16,19 @@ from src.failsafe import failsafe, safe_import
 
 
 class MonitoringEngine:
+    # Consecutive non-breaching checks required before a system-metric
+    # incident (high_cpu/high_memory/high_disk) auto-resolves. Without this,
+    # a metric hovering right around its threshold (e.g. CPU bouncing
+    # 88%/92%/89%/93%...) resolves the incident on every single dip below
+    # 90%, then immediately recreates it on the next spike - one ongoing
+    # noisy condition turning into hundreds of create/resolve cycles instead
+    # of one correlated incident. Requiring a short sustained recovery
+    # (unaffected: creation is still immediate on the first breach) keeps
+    # the incident open through the noise while still allowing a genuine,
+    # later, unrelated breach to open a new incident once the earlier one
+    # has actually resolved.
+    RECOVERY_STREAK_REQUIRED = 3
+
     def __init__(
         self,
         platform_repository: PlatformRepository,
@@ -27,6 +40,7 @@ class MonitoringEngine:
         self.interval_seconds = max(5, int(interval_seconds))
         self._monitor_cache: dict[str, Any] = {}
         self._last_check_time: dict[int, float] = {}
+        self._recovery_streak: dict[str, int] = {}
 
     async def run_forever(self) -> None:
         """Background loop with per-target interval scheduling.
@@ -94,11 +108,26 @@ class MonitoringEngine:
 
     def _sync_system_incident(self, incident_type: str, is_breached: bool, severity: str, description: str) -> None:
         active = [i for i in self.incident_manager.get_active_incidents() if i.incident_type == incident_type and i.service_name == "system"]
-        if is_breached and not active:
-            self.incident_manager.create_incident(severity=severity, service_name="system", incident_type=incident_type, description=description)
-        elif not is_breached and active:
-            for incident in active:
-                self.incident_manager.resolve_incident(incident.incident_id, actor="system", resolution_notes="System metric recovered.")
+        if is_breached:
+            # Any breach resets the recovery streak - the condition is
+            # still ongoing, even if it briefly dipped below threshold
+            # before spiking again.
+            self._recovery_streak[incident_type] = 0
+            if not active:
+                self.incident_manager.create_incident(severity=severity, service_name="system", incident_type=incident_type, description=description)
+            return
+
+        if not active:
+            self._recovery_streak[incident_type] = 0
+            return
+
+        streak = self._recovery_streak.get(incident_type, 0) + 1
+        self._recovery_streak[incident_type] = streak
+        if streak < self.RECOVERY_STREAK_REQUIRED:
+            return
+        for incident in active:
+            self.incident_manager.resolve_incident(incident.incident_id, actor="system", resolution_notes="System metric recovered.")
+        self._recovery_streak[incident_type] = 0
 
     def run_target(self, target_id: int, actor: str = "system") -> Dict[str, Any] | None:
         target = self.platform_repository.get_monitoring_target(target_id)
@@ -120,6 +149,25 @@ class MonitoringEngine:
         return result
 
     def _get_or_create_monitor(self, target_type: str, name: str, address: str, target: Mapping[str, Any]) -> Any:
+        # incident_manager is deliberately NOT passed to these protocol
+        # monitors here: each of them (HttpEndpointMonitor, TcpTargetMonitor,
+        # SslCertificateMonitor, DnsMonitor, ContainerHealthMonitor) is
+        # self-sufficient and runs its OWN incident create/resolve inside
+        # .run() when given an incident_manager - that's the correct
+        # behavior for their standalone/static-config use (see
+        # create_services()'s http_monitor). But MonitoringEngine._sync_incident
+        # (called explicitly in _process_target, right after .run()) already
+        # does the same create/resolve for every target type here, uniformly,
+        # AND additionally records the incident.created transition/audit log
+        # entry that the protocol monitors don't. Passing incident_manager to
+        # both meant whichever ran first (always the protocol monitor, since
+        # it runs inside .run()) silently won the race every time - the
+        # incident lifecycle still worked, but always with the protocol
+        # monitor's plainer resolution_notes/no transition-audit-log, and
+        # MonitoringEngine._sync_incident's richer branch never actually
+        # fired. Each protocol monitor already no-ops its own incident sync
+        # when incident_manager is None, so leaving it unset here makes
+        # MonitoringEngine._sync_incident the single, uncontested handler.
         cache_key = f"{target_type}:{name}:{address}"
         if cache_key in self._monitor_cache:
             return self._monitor_cache[cache_key]
@@ -129,14 +177,12 @@ class MonitoringEngine:
                 {name: address},
                 timeout_seconds=timeout,
                 expected_status=int(target.get("expected_status") or 200),
-                incident_manager=self.incident_manager,
                 storage_repository=self.platform_repository,
             )
         elif target_type == "tcp":
             monitor = TcpTargetMonitor(
                 {name: address},
                 timeout_seconds=timeout,
-                incident_manager=self.incident_manager,
                 storage_repository=self.platform_repository,
             )
         elif target_type == "ssl":
@@ -144,14 +190,12 @@ class MonitoringEngine:
                 {name: address},
                 timeout_seconds=timeout,
                 warning_days=int(target.get("warning_days") or 30),
-                incident_manager=self.incident_manager,
                 storage_repository=self.platform_repository,
             )
         elif target_type == "dns":
             monitor = DnsMonitor(
                 {name: address},
                 timeout_seconds=timeout,
-                incident_manager=self.incident_manager,
                 storage_repository=self.platform_repository,
             )
         elif target_type == "container":
@@ -160,7 +204,6 @@ class MonitoringEngine:
                 monitor = ContainerHealthMonitor(
                     {name: address},
                     timeout_seconds=timeout,
-                    incident_manager=self.incident_manager,
                     storage_repository=self.platform_repository,
                 )
             else:

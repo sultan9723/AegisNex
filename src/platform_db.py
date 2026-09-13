@@ -478,7 +478,15 @@ class PlatformRepository:
                 resolved_by {text},
                 resolved_at {text},
                 resolved_timestamp {text},
-                resolution_notes {text}
+                resolution_notes {text},
+                org_id {integer},
+                org_name {text},
+                proposed_remediation {text},
+                remediation_proposed_by {text},
+                remediation_proposed_at {text},
+                remediation_approval_status {text},
+                remediation_plan_confidence {real},
+                remediation_history {text}
             )
             """,
             f"""
@@ -746,6 +754,14 @@ class PlatformRepository:
                 "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS org_id INTEGER",
                 "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TEXT",
                 "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS revoked_at TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS proposed_remediation TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_proposed_by TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_proposed_at TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_approval_status TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_plan_confidence DOUBLE PRECISION",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS org_id INTEGER",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS org_name TEXT",
+                "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_history TEXT",
                 "UPDATE incidents SET incident_status = status",
                 "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
             ]
@@ -781,12 +797,30 @@ class PlatformRepository:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT")
         if "rate_limit_max" not in api_key_columns:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100")
+        incident_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(incidents)").fetchall()}
+        incident_migrations = []
+        if "proposed_remediation" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN proposed_remediation TEXT")
+        if "remediation_proposed_by" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_proposed_by TEXT")
+        if "remediation_proposed_at" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_proposed_at TEXT")
+        if "remediation_approval_status" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_approval_status TEXT")
+        if "remediation_plan_confidence" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_plan_confidence REAL")
+        if "org_id" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN org_id INTEGER")
+        if "org_name" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN org_name TEXT")
+        if "remediation_history" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_history TEXT")
         # Migrate legacy incident data
         updates = [
             "UPDATE incidents SET incident_status = status",
             "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
         ]
-        return alter_statements + audit_migrations + api_key_migrations + updates
+        return alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
 
     @property
     def placeholder(self) -> str:
@@ -1469,6 +1503,14 @@ class PlatformRepository:
         resolved_by = getattr(incident, "resolved_by", None)
         resolved_at = getattr(incident, "resolved_at", getattr(incident, "resolved_timestamp", None))
         resolution_notes = getattr(incident, "resolution_notes", None)
+        proposed_remediation = getattr(incident, "proposed_remediation", None)
+        remediation_proposed_by = getattr(incident, "remediation_proposed_by", None)
+        remediation_proposed_at = getattr(incident, "remediation_proposed_at", None)
+        remediation_approval_status = getattr(incident, "remediation_approval_status", None)
+        remediation_plan_confidence = getattr(incident, "remediation_plan_confidence", None)
+        org_id = getattr(incident, "org_id", None)
+        org_name = getattr(incident, "org_name", None)
+        remediation_history = getattr(incident, "remediation_history", None)
         p = self.placeholder
         self._execute(
             f"""
@@ -1476,9 +1518,11 @@ class PlatformRepository:
                 incident_id, timestamp, severity, service_name, incident_type,
                 description, health_check_results, remediation_attempted,
                 remediation_successful, status, incident_status, acknowledged_by,
-                acknowledged_at, resolved_by, resolved_at, resolved_timestamp, resolution_notes
+                acknowledged_at, resolved_by, resolved_at, resolved_timestamp, resolution_notes,
+                org_id, org_name, proposed_remediation, remediation_proposed_by, remediation_proposed_at,
+                remediation_approval_status, remediation_plan_confidence, remediation_history
             )
-            VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+            VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             ON CONFLICT(incident_id) DO UPDATE SET
                 severity = excluded.severity,
                 description = excluded.description,
@@ -1492,7 +1536,15 @@ class PlatformRepository:
                 resolved_by = excluded.resolved_by,
                 resolved_at = excluded.resolved_at,
                 resolved_timestamp = excluded.resolved_timestamp,
-                resolution_notes = excluded.resolution_notes
+                resolution_notes = excluded.resolution_notes,
+                org_id = excluded.org_id,
+                org_name = excluded.org_name,
+                proposed_remediation = excluded.proposed_remediation,
+                remediation_proposed_by = excluded.remediation_proposed_by,
+                remediation_proposed_at = excluded.remediation_proposed_at,
+                remediation_approval_status = excluded.remediation_approval_status,
+                remediation_plan_confidence = excluded.remediation_plan_confidence,
+                remediation_history = excluded.remediation_history
             """,
             (
                 incident.incident_id,
@@ -1512,6 +1564,14 @@ class PlatformRepository:
                 resolved_at,
                 resolved_at,
                 resolution_notes,
+                org_id,
+                org_name,
+                json.dumps(proposed_remediation) if proposed_remediation is not None else None,
+                remediation_proposed_by,
+                remediation_proposed_at,
+                remediation_approval_status,
+                remediation_plan_confidence,
+                json.dumps(remediation_history) if remediation_history is not None else None,
             ),
         )
 
@@ -1521,27 +1581,60 @@ class PlatformRepository:
         return True
 
     def list_incidents(self, incident_status: str | None = None,
-                       limit: int = 0, offset: int = 0) -> List[Dict[str, Any]]:
+                       limit: int = 0, offset: int = 0,
+                       org_id: int | None = None) -> List[Dict[str, Any]]:
         """List incidents with optional pagination.
 
         Args:
             incident_status: Filter by status, or None for all.
             limit: Max rows (0 = no limit).
             offset: Row offset for pagination.
+            org_id: Filter by organization id, or None for all.
         """
-        if incident_status is None:
-            sql = "SELECT * FROM incidents ORDER BY timestamp DESC"
-        else:
-            sql = f"SELECT * FROM incidents WHERE incident_status = {self.placeholder} ORDER BY timestamp DESC"
+        conditions: list[str] = []
+        params: list[Any] = []
+        if incident_status is not None:
+            conditions.append(f"incident_status = {self.placeholder}")
+            params.append(incident_status)
+        if org_id is not None:
+            conditions.append(f"org_id = {self.placeholder}")
+            params.append(org_id)
+        sql = "SELECT * FROM incidents"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY timestamp DESC"
         if limit > 0:
             sql += f" LIMIT {int(limit)}"
             if offset > 0:
                 sql += f" OFFSET {int(offset)}"
-        if incident_status is None:
-            rows = self._fetch_all(sql)
-        else:
-            rows = self._fetch_all(sql, (incident_status,))
+        rows = self._fetch_all(sql, tuple(params))
         return [self._normalize_incident_row(row) for row in rows]
+
+    def count_incidents(self, incident_status: str | None = None, org_id: int | None = None) -> int:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if incident_status is not None:
+            conditions.append(f"incident_status = {self.placeholder}")
+            params.append(incident_status)
+        if org_id is not None:
+            conditions.append(f"org_id = {self.placeholder}")
+            params.append(org_id)
+        sql = "SELECT COUNT(*) AS cnt FROM incidents"
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        rows = self._fetch_all(sql, tuple(params))
+        return int(rows[0]["cnt"]) if rows else 0
+
+    def assign_incident_org(self, incident_id: str, org_id: int | None, org_name: str | None = None) -> Dict[str, Any] | None:
+        self._execute(
+            f"""
+            UPDATE incidents
+            SET org_id = {self.placeholder}, org_name = {self.placeholder}
+            WHERE incident_id = {self.placeholder}
+            """,
+            (org_id, org_name, incident_id),
+        )
+        return self.get_incident(incident_id)
 
     def get_incident(self, incident_id: str) -> Dict[str, Any] | None:
         rows = self._fetch_all(
@@ -2153,6 +2246,18 @@ class PlatformRepository:
         normalized = dict(row)
         normalized.setdefault("incident_status", normalized.get("status"))
         normalized.setdefault("resolved_at", normalized.get("resolved_timestamp"))
+        raw_plan = normalized.get("proposed_remediation")
+        if isinstance(raw_plan, str) and raw_plan:
+            try:
+                normalized["proposed_remediation"] = json.loads(raw_plan)
+            except json.JSONDecodeError:
+                normalized["proposed_remediation"] = None
+        raw_history = normalized.get("remediation_history")
+        if isinstance(raw_history, str) and raw_history:
+            try:
+                normalized["remediation_history"] = json.loads(raw_history)
+            except json.JSONDecodeError:
+                normalized["remediation_history"] = []
         return normalized
 
     @staticmethod

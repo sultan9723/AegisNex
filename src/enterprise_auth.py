@@ -215,7 +215,20 @@ def local_auth_enabled() -> bool:
 
 
 def demo_auth_enabled() -> bool:
-    return not is_production_environment() and env_flag("AEGISNEX_DEMO_AUTH_ENABLED", True)
+    """Demo login is opt-in only, off by default in every environment.
+
+    Unlike local_auth_enabled()/seed_default_admin_enabled(), this has no
+    dev-mode default and no production block: it must work in production
+    (Azure) when explicitly enabled, since the demo login issues a
+    restricted, non-admin session rather than real credentials.
+    """
+    # AEGISNEX_DEMO_AUTH_ENABLED was the original documented name. Keep it
+    # as a compatibility alias so existing deployments do not silently hide
+    # the demo after upgrading; the canonical name remains AEGISNEX_DEMO_ENABLED.
+    return env_flag(
+        "AEGISNEX_DEMO_ENABLED",
+        env_flag("AEGISNEX_DEMO_AUTH_ENABLED", False),
+    )
 
 
 def seed_default_admin_enabled() -> bool:

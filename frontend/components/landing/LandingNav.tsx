@@ -4,8 +4,6 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { Shield, ArrowRight, Zap, Menu, X } from "lucide-react";
-import { useAuth } from "@/lib/auth";
-import { useRouter } from "next/navigation";
 import { Spinner } from "@/components/common/LoadingState";
 
 const NAV_LINKS = [
@@ -15,12 +13,16 @@ const NAV_LINKS = [
   { label: "Security", href: "#security" },
 ];
 
-export function LandingNav() {
+interface LandingNavProps {
+  /** Defaults to true (optimistic) so the button doesn't flash disabled while the parent's one-time availability check is in flight. */
+  demoEnabled?: boolean;
+  demoLoading?: boolean;
+  onTryDemo?: () => void;
+}
+
+export function LandingNav({ demoEnabled = true, demoLoading = false, onTryDemo }: LandingNavProps) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [demoLoading, setDemoLoading] = useState(false);
-  const { demoLogin } = useAuth();
-  const router = useRouter();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -36,18 +38,6 @@ export function LandingNav() {
     }
     return () => { document.body.style.overflow = ""; };
   }, [mobileOpen]);
-
-  const handleDemo = async () => {
-    setDemoLoading(true);
-    try {
-      await demoLogin();
-      router.push("/dashboard");
-    } catch {
-      // handled by parent
-    } finally {
-      setDemoLoading(false);
-    }
-  };
 
   return (
     <>
@@ -70,15 +60,25 @@ export function LandingNav() {
             <Link href="/login" className="hidden text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-primary sm:block">
               Sign in
             </Link>
-            <button
-              onClick={handleDemo}
-              disabled={demoLoading}
-              className="hidden sm:inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:bg-primary-hover disabled:opacity-50"
-            >
-              {demoLoading ? <Spinner className="size-3.5" /> : <Zap className="size-3.5" />}
-              {demoLoading ? "Signing in..." : "Get Started"}
-              {!demoLoading && <ArrowRight className="size-3.5" />}
-            </button>
+            {demoEnabled ? (
+              <button
+                type="button"
+                onClick={onTryDemo}
+                disabled={demoLoading}
+                className="hidden sm:inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:bg-primary-hover disabled:opacity-50"
+              >
+                {demoLoading ? <Spinner className="size-3.5" /> : <Zap className="size-3.5" />}
+                {demoLoading ? "Signing in..." : "Try Demo"}
+                {!demoLoading && <ArrowRight className="size-3.5" />}
+              </button>
+            ) : (
+              <span
+                className="hidden sm:inline-flex h-9 items-center gap-2 rounded-lg border border-border px-4 text-[13px] font-medium text-text-disabled"
+                title="Demo workspace is not enabled on this deployment"
+              >
+                Demo Unavailable
+              </span>
+            )}
             <button
               onClick={() => setMobileOpen(true)}
               className="grid size-9 place-items-center rounded-lg border border-border text-text-tertiary hover:text-text-primary md:hidden"
@@ -136,14 +136,24 @@ export function LandingNav() {
                 >
                   Sign in
                 </a>
-                <button
-                  onClick={handleDemo}
-                  disabled={demoLoading}
-                  className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-[13px] font-semibold text-white transition-all hover:bg-primary-hover disabled:opacity-50"
-                >
-                  {demoLoading ? <Spinner className="size-3.5" /> : <Zap className="size-3.5" />}
-                  {demoLoading ? "Signing in..." : "Get Started"}
-                </button>
+                {demoEnabled ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileOpen(false);
+                      onTryDemo?.();
+                    }}
+                    disabled={demoLoading}
+                    className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-[13px] font-semibold text-white transition-all hover:bg-primary-hover disabled:opacity-50"
+                  >
+                    {demoLoading ? <Spinner className="size-3.5" /> : <Zap className="size-3.5" />}
+                    {demoLoading ? "Signing in..." : "Try Demo"}
+                  </button>
+                ) : (
+                  <span className="mt-2 flex items-center justify-center gap-2 rounded-lg border border-border px-4 py-2.5 text-[13px] font-medium text-text-disabled">
+                    Demo Unavailable
+                  </span>
+                )}
               </nav>
             </motion.div>
           </>

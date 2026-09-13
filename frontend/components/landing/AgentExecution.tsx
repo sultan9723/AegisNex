@@ -17,7 +17,7 @@ const AGENT_STEPS = [
   { icon: ShieldCheck, label: "Policy Check", sublabel: "RBAC gates", color: "chart-2" },
   { icon: CheckCircle, label: "Verifier", sublabel: "Sanity checks", color: "success" },
   { icon: Zap, label: "Decision", sublabel: "Action approval", color: "primary" },
-  { icon: LayoutDashboard, label: "Dashboard", sublabel: "Live update", color: "info" },
+  { icon: LayoutDashboard, label: "Dashboard", sublabel: "Auditable output", color: "info" },
 ];
 
 const colorMap: Record<string, { ring: string; bg: string; text: string; activeBg: string }> = {

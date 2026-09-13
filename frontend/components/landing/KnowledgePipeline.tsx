@@ -99,19 +99,19 @@ export function KnowledgePipeline() {
               })}
             </div>
 
-            {/* Stats bar */}
+            {/* Capabilities bar */}
             <div className="mt-6 flex items-center justify-center gap-8 text-[10px] text-text-tertiary">
               <span className="flex items-center gap-1.5">
-                <span className="size-1.5 rounded-full bg-info" /> 2.4M chunks indexed
+                <span className="size-1.5 rounded-full bg-info" /> Semantic retrieval
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="size-1.5 rounded-full bg-chart-2" /> 1536-dim embeddings
+                <span className="size-1.5 rounded-full bg-chart-2" /> Vector embeddings
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="size-1.5 rounded-full bg-success" /> {"<50ms"} retrieval latency
+                <span className="size-1.5 rounded-full bg-success" /> Low-latency retrieval
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="size-1.5 rounded-full bg-primary" /> 99.2% relevance
+                <span className="size-1.5 rounded-full bg-primary" /> Context-grounded answers
               </span>
             </div>
           </div>
@@ -154,13 +154,13 @@ export function KnowledgePipeline() {
               </div>
             </div>
 
-            {/* Stats */}
+            {/* Capabilities */}
             <div className="mt-4 grid grid-cols-2 gap-2">
               {[
-                { label: "Chunks", value: "2.4M", color: "text-info" },
-                { label: "Latency", value: "<50ms", color: "text-chart-2" },
-                { label: "Accuracy", value: "99.2%", color: "text-success" },
-                { label: "Sources", value: "847", color: "text-primary" },
+                { label: "Retrieval", value: "Semantic", color: "text-info" },
+                { label: "Embeddings", value: "Vector", color: "text-chart-2" },
+                { label: "Answers", value: "Grounded", color: "text-success" },
+                { label: "Response", value: "Low-latency", color: "text-primary" },
               ].map((s) => (
                 <div key={s.label} className="rounded-lg bg-muted/50 px-3 py-2 text-center">
                   <div className={`text-[12px] font-bold ${s.color}`}>{s.value}</div>

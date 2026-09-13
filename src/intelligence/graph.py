@@ -33,9 +33,6 @@ from src.intelligence.nodes import (
 from src.intelligence.state import AgentState, initial_state
 from src.platform_db import PlatformRepository
 
-_BUILT_GRAPH: Any = None
-
-
 def _reflection_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     return self_corrector_node(state, repo=repo)
 
@@ -94,11 +91,18 @@ def build_graph(repo: PlatformRepository | None = None) -> StateGraph:
         rag_generator calls the LLM provider to generate a natural-language answer
         from retrieved context and tool results when a provider is available.
     """
-    global _BUILT_GRAPH
-
-    if _BUILT_GRAPH is not None:
-        return _BUILT_GRAPH
-
+    # Deliberately NOT cached: every node below closes over this call's
+    # `repo` argument (planner, tool_executor, rag_generator, reflection,
+    # runbook_executor). A module-level cached graph would permanently bake
+    # in whichever `repo` happened to be passed on the very first call in
+    # the process's lifetime - including None - and silently serve that
+    # stale/wrong repository to every subsequent request for the rest of
+    # the process's life, regardless of what repo callers pass afterward.
+    # This is exactly what caused a live long-running server to report
+    # "Repository not available" for target/incident/metrics tools even
+    # though a real repo was being passed on every call. Graph construction
+    # here is just registering ~15 node functions/edges - negligible cost
+    # next to the LLM/DB work the graph then goes on to do.
     graph = StateGraph(AgentState)
 
     graph.add_node("planner", lambda state: plan_node(state, repo=repo))
@@ -114,7 +118,7 @@ def build_graph(repo: PlatformRepository | None = None) -> StateGraph:
     graph.add_node("risk_assessor", risk_assessor_node)
     graph.add_node("policy_checker", policy_checker_node)
     graph.add_node("runbook_executor", lambda state: runbook_executor_node(state, repo=repo))
-    graph.add_node("parallel_supervisor", parallel_supervisor_node)
+    graph.add_node("parallel_supervisor", lambda state: parallel_supervisor_node(state, repo=repo))
     graph.add_node("scheduler", scheduler_node)
 
     graph.set_entry_point("planner")
@@ -177,9 +181,7 @@ def build_graph(repo: PlatformRepository | None = None) -> StateGraph:
 
     graph.add_edge("finish", END)
 
-    _BUILT_GRAPH = graph.compile()
-
-    return _BUILT_GRAPH
+    return graph.compile()
 
 
 def run_workflow(
@@ -311,9 +313,10 @@ def run_chat(
 
 
 def reset_graph() -> None:
-    """Reset the cached graph (useful for testing)."""
-    global _BUILT_GRAPH
-    _BUILT_GRAPH = None
+    """No-op: build_graph() no longer caches (see build_graph's docstring
+    comment). Kept as a harmless public function since existing callers
+    import and call it."""
+    return None
 
 
 def get_workflows() -> dict[str, Any]:

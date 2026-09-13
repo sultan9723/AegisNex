@@ -30,9 +30,9 @@ function MiniMetric({ label, value, color }: { label: string; value: string; col
 function OverviewPreview() {
   return (
     <div className="grid grid-cols-3 gap-2">
-      <MiniMetric label="Uptime" value="99.97%" color="text-success" />
-      <MiniMetric label="Incidents" value="3" color="text-warning" />
-      <MiniMetric label="Containers" value="24" color="text-primary" />
+      <MiniMetric label="Mode" value="Product Preview" color="text-success" />
+      <MiniMetric label="Incidents" value="Auto-tracked" color="text-warning" />
+      <MiniMetric label="Containers" value="Monitored" color="text-primary" />
       <div className="col-span-3 rounded-lg border border-border bg-background p-2.5">
         <div className="flex items-center gap-1.5 mb-2">
           <Activity className="size-2.5 text-primary/40" />
@@ -52,10 +52,10 @@ function InfrastructurePreview() {
   return (
     <div className="grid grid-cols-2 gap-2">
       {[
-        { icon: Cpu, label: "CPU", val: "34%", color: "text-primary", w: "34%" },
-        { icon: HardDrive, label: "Memory", val: "6.2GB", color: "text-chart-2", w: "62%" },
-        { icon: Network, label: "Network", val: "847Mbps", color: "text-success", w: "84%" },
-        { icon: Server, label: "Containers", val: "24/24", color: "text-warning", w: "100%" },
+        { icon: Cpu, label: "CPU", val: "Real-time", color: "text-primary", w: "60%" },
+        { icon: HardDrive, label: "Memory", val: "Real-time", color: "text-chart-2", w: "60%" },
+        { icon: Network, label: "Network", val: "Real-time", color: "text-success", w: "60%" },
+        { icon: Server, label: "Containers", val: "Health-checked", color: "text-warning", w: "100%" },
       ].map((m) => (
         <div key={m.label} className="rounded-lg border border-border bg-background p-2.5">
           <div className="flex items-center gap-1.5 mb-1.5">
@@ -84,10 +84,10 @@ function KnowledgePreview() {
       <div className="rounded-lg border border-border bg-background p-2.5">
         <div className="flex items-center justify-between mb-2">
           <span className="text-[9px] font-semibold text-text-secondary">Knowledge Base</span>
-          <span className="text-[8px] text-success">2.4M chunks indexed</span>
+          <span className="text-[8px] text-success">Semantic retrieval</span>
         </div>
         <div className="grid grid-cols-3 gap-1.5">
-          {[{ v: "12.4K", l: "Documents" }, { v: "847", l: "Sources" }, { v: "99.2%", l: "Accuracy" }].map((s) => (
+          {[{ v: "Semantic", l: "Search" }, { v: "RAG", l: "Retrieval" }, { v: "Grounded", l: "Answers" }].map((s) => (
             <div key={s.l} className="rounded bg-muted/50 p-1.5 text-center">
               <div className="text-[11px] font-bold text-text-primary">{s.v}</div>
               <div className="text-[8px] text-text-tertiary">{s.l}</div>
@@ -134,11 +134,11 @@ function AIPreview() {
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-lg border border-border bg-background p-2">
           <span className="text-[8px] text-text-tertiary">Executions</span>
-          <div className="text-[12px] font-bold text-text-primary">1,247</div>
+          <div className="text-[12px] font-bold text-text-primary">Logged</div>
         </div>
         <div className="rounded-lg border border-border bg-background p-2">
-          <span className="text-[8px] text-text-tertiary">Accuracy</span>
-          <div className="text-[12px] font-bold text-success">98%</div>
+          <span className="text-[8px] text-text-tertiary">Analysis</span>
+          <div className="text-[12px] font-bold text-success">Grounded</div>
         </div>
       </div>
     </div>
@@ -155,9 +155,9 @@ function ReportsPreview() {
         </div>
         <div className="space-y-1.5">
           {[
-            { l: "Incidents Resolved", v: "12", c: "text-success" },
-            { l: "Avg Response Time", v: "42ms", c: "text-primary" },
-            { l: "AI Accuracy", v: "98.2%", c: "text-chart-2" },
+            { l: "Incidents Resolved", v: "Tracked", c: "text-success" },
+            { l: "Avg Response Time", v: "Measured", c: "text-primary" },
+            { l: "AI Analysis", v: "Evidence-based", c: "text-chart-2" },
           ].map((r) => (
             <div key={r.l} className="flex items-center justify-between text-[9px]">
               <span className="text-text-tertiary">{r.l}</span>
