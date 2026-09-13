@@ -4,15 +4,15 @@ import { motion } from "framer-motion";
 import { Shield, Lock, Fingerprint, Eye, Key, Server, FileBarChart, ShieldCheck, Smartphone } from "lucide-react";
 
 const SECURITY_FEATURES = [
-  { icon: Lock, label: "JWT Auth", desc: "Secure token-based auth" },
+  { icon: Lock, label: "JWT Auth", desc: "Secure token-based authentication" },
   { icon: Key, label: "Refresh Tokens", desc: "Seamless session renewal" },
-  { icon: Fingerprint, label: "RBAC", desc: "Role-based access control" },
-  { icon: Eye, label: "Audit Logs", desc: "Full activity tracking" },
-  { icon: Shield, label: "TLS Encryption", desc: "Data in transit protection" },
+  { icon: Fingerprint, label: "RBAC", desc: "Role-based authorization" },
+  { icon: Eye, label: "Audit Logs", desc: "Operational activity tracking" },
+  { icon: Shield, label: "HTTPS / TLS", desc: "Enforced at the deployment edge" },
   { icon: Server, label: "API Keys", desc: "Programmatic access" },
-  { icon: Key, label: "Secrets Mgmt", desc: "Encrypted credential store" },
-  { icon: FileBarChart, label: "Compliance", desc: "SOC2-ready frameworks" },
-  { icon: Smartphone, label: "MFA Ready", desc: "Multi-factor authentication" },
+  { icon: Key, label: "Secrets Management", desc: "Encrypted credential store" },
+  { icon: FileBarChart, label: "Compliance Evidence", desc: "Auditable operational records" },
+  { icon: Smartphone, label: "SSO Ready", desc: "Enterprise OIDC single sign-on" },
 ];
 
 export function SecurityGrid() {
@@ -31,7 +31,7 @@ export function SecurityGrid() {
             Enterprise-grade from day one
           </h2>
           <p className="mx-auto mt-4 max-w-lg text-[14px] text-text-secondary">
-            Built with security-first principles. Every API call authenticated. Every action audited. Every session encrypted.
+            Authentication, authorization, auditability, and controlled operational actions from day one.
           </p>
         </motion.div>
 

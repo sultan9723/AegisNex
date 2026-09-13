@@ -69,6 +69,11 @@ class AgentState(TypedDict):
     active_skills: list[str]
     skill_results: list[dict[str, Any]]
     tool_router_results: dict[str, Any]
+    reference_material: list[str]
+    required_categories: list[str]
+    covered_categories: list[str]
+    objective_coverage: float
+    tool_success_rate: float
 
 
 def initial_state(user_request: str) -> AgentState:
@@ -119,4 +124,9 @@ def initial_state(user_request: str) -> AgentState:
         "active_skills": [],
         "skill_results": [],
         "tool_router_results": {},
+        "reference_material": [],
+        "required_categories": [],
+        "covered_categories": [],
+        "objective_coverage": 1.0,
+        "tool_success_rate": 0.0,
     }

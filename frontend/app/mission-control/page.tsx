@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
-import { EmptyState } from "@/components/common/EmptyState";
+import { EmptyState, EmptyStateError } from "@/components/common/EmptyState";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import {
   getMissionControlExecutions,
@@ -122,6 +122,7 @@ export default function MissionControlPage() {
   const [executions, setExecutions] = useState<Execution[]>([]);
   const [stats, setStats] = useState<ExecutionStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [selectedExecution, setSelectedExecution] = useState<Execution | null>(null);
@@ -135,6 +136,7 @@ export default function MissionControlPage() {
 
   const loadExecutions = useCallback(async () => {
     try {
+      setLoadError("");
       const [execRes, statsRes] = await Promise.all([
         getMissionControlExecutions({ limit: 20, offset: page * 20, status: statusFilter || undefined, search: search || undefined }),
         getMissionControlStats(),
@@ -142,7 +144,11 @@ export default function MissionControlPage() {
       setExecutions(execRes.executions);
       setTotal(execRes.total);
       setStats(statsRes);
-    } catch {
+    } catch (error) {
+      setExecutions([]);
+      setTotal(0);
+      setStats(null);
+      setLoadError(error instanceof Error ? error.message : "Failed to load executions");
       toast.error("Failed to load executions");
     } finally {
       setLoading(false);
@@ -303,7 +309,9 @@ export default function MissionControlPage() {
       </div>
 
       {/* Execution List */}
-      {executions.length === 0 ? (
+      {loadError ? (
+        <EmptyStateError message={loadError} onRetry={() => void loadExecutions()} />
+      ) : executions.length === 0 ? (
         <EmptyState icon={Activity} title="No executions found" description="AI executions will appear here as they run." />
       ) : (
         <div className="space-y-2">

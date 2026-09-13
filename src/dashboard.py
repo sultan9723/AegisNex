@@ -170,6 +170,16 @@ def _websocket_token(websocket: Any) -> str | None:
     return None
 
 
+def _query_int(request: Any, name: str, default: int | None = None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def require_role(*roles: str):
     """Dependency factory: require the authenticated user to have one of the specified roles."""
 
@@ -385,6 +395,7 @@ class DashboardServices:
     self_healing_engine: Any | None = None
     execution_history: Any | None = None
     policy_engine: Any | None = None
+    dashboard_cache: Any | None = None
 
 
 def create_services(config_path: str | Path = "config.yaml") -> DashboardServices:
@@ -537,12 +548,37 @@ def _is_diagnostics_only_plan(plan: dict[str, Any]) -> bool:
     return True
 
 
-def get_cors_origins() -> list[str]:
+def is_local_environment() -> bool:
+    environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+    return environment in {"development", "dev", "local", "test"}
+
+
+def get_frontend_base_url(default: str = "/") -> str:
+    configured = os.getenv("AEGISNEX_FRONTEND_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if is_local_environment():
+        return "http://localhost:3000"
+    return default
+
+
+def frontend_redirect_url(path: str) -> str:
+    base = get_frontend_base_url("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if base == "/":
+        return clean_path
+    return f"{base}{clean_path}"
+
+
+def get_cors_origins() -> List[str]:
     configured_origins = os.getenv("AEGISNEX_CORS_ORIGINS", "")
     if configured_origins.strip():
-        return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
-    environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-    if environment in {"development", "dev", "local", "test"}:
+        return [
+            origin.strip()
+            for origin in configured_origins.split(",")
+            if origin.strip()
+        ]
+    if is_local_environment():
         return DEVELOPMENT_CORS_ORIGINS
     return []
 
@@ -842,11 +878,255 @@ def build_recent_incidents(incidents: list[Incident], limit: int = 6) -> list[di
     return rows[:limit]
 
 
-def build_recent_remediations(
-    storage_remediations: list[dict[str, Any]],
-    fallback_actions: list[dict[str, Any]],
-    limit: int = 6,
-) -> list[dict[str, Any]]:
+def _parse_health_check_results(raw: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _incident_evidence(services: "DashboardServices", incident: Dict[str, Any]) -> Dict[str, Any]:
+    """Real, observed evidence for one incident - grounding for AI analysis.
+
+    Contains nothing synthesized: every field is pulled directly from the
+    incident record or its recorded status transitions.
+    """
+    incident_id = str(incident.get("incident_id", ""))
+    repo = services.platform_repository
+    timeline: List[Dict[str, Any]] = []
+    if repo is not None:
+        try:
+            timeline = repo.list_incident_transitions(incident_id)
+        except Exception:
+            timeline = []
+    return {
+        "incident_id": incident_id,
+        "service_name": incident.get("service_name"),
+        "incident_type": incident.get("incident_type"),
+        "severity": incident.get("severity"),
+        "status": incident.get("incident_status", incident.get("status")),
+        "description": incident.get("description"),
+        "created_at": incident.get("timestamp"),
+        "acknowledged_by": incident.get("acknowledged_by"),
+        "resolution_notes": incident.get("resolution_notes"),
+        "health_check_results": _parse_health_check_results(incident.get("health_check_results")),
+        "status_transitions": [
+            {
+                "from": t.get("from_status"),
+                "to": t.get("to_status"),
+                "actor": t.get("actor"),
+                "timestamp": t.get("timestamp"),
+            }
+            for t in timeline
+        ],
+    }
+
+
+def _similar_incidents_for(repo: Any, incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Other real incidents of the same type, most recent first. Empty if none exist."""
+    if repo is None:
+        return []
+    incident_id = str(incident.get("incident_id", ""))
+    incident_type = incident.get("incident_type")
+    service_name = incident.get("service_name")
+    try:
+        rows = repo.fetch_all("incidents")
+    except Exception:
+        return []
+    candidates = [
+        r for r in rows
+        if str(r.get("incident_id")) != incident_id and r.get("incident_type") == incident_type
+    ]
+    candidates.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+    results = []
+    for row in candidates[:3]:
+        relevance = 1.0 if row.get("service_name") == service_name else 0.6
+        results.append({
+            "source": "incident_history",
+            "content": f"{row.get('service_name')}: {row.get('description') or row.get('incident_type')} ({row.get('incident_status', row.get('status'))})",
+            "relevance": relevance,
+        })
+    return results
+
+
+def _relevant_runbooks_for(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Runbooks whose name/category/tags match this incident's type or service.
+
+    Reuses the existing runbook registry (src/intelligence/runbooks). Returns
+    an empty list - not a fabricated one - when nothing matches or the
+    registry has no runbooks loaded.
+    """
+    try:
+        from src.intelligence.runbooks.registry import get_registry
+        candidates = get_registry().list_all()
+    except Exception:
+        return []
+    keywords = {
+        str(incident.get("incident_type", "")).lower(),
+        str(incident.get("service_name", "")).lower(),
+    }
+    keywords = {k for k in keywords if k}
+    matches = []
+    for rb in candidates:
+        haystack = " ".join([rb.name, rb.category, *rb.tags]).lower()
+        if any(kw in haystack for kw in keywords):
+            matches.append({"source": "runbook", "title": rb.name, "content": rb.description})
+    return matches[:3]
+
+
+def _incident_audit_context(repo: Any, incident_id: str) -> List[Dict[str, Any]]:
+    if repo is None:
+        return []
+    try:
+        rows = repo.fetch_all("audit_logs")
+    except Exception:
+        return []
+    matched = [
+        r for r in rows
+        if str(r.get("resource_id")) == incident_id and r.get("resource_type") == "incident"
+    ]
+    matched.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
+    return [
+        {"content": f"{r.get('actor')} {r.get('action')}", "timestamp": r.get("timestamp", "")}
+        for r in matched[:10]
+    ]
+
+
+def _evidence_confidence(evidence: Dict[str, Any]) -> float:
+    """Deterministic evidence-completeness heuristic, not a model-reported score.
+
+    Deliberately conservative (capped at 0.9) since this never claims certainty.
+    """
+    score = 0.4
+    if evidence.get("health_check_results"):
+        score += 0.25
+    if evidence.get("status_transitions"):
+        score += 0.15
+    if evidence.get("description"):
+        score += 0.1
+    return round(min(score, 0.9), 2)
+
+
+def _load_incident(services: "DashboardServices", incident_id: str) -> Dict[str, Any] | None:
+    repo = services.platform_repository
+    incident = repo.get_incident(incident_id) if repo is not None else None
+    if incident is None:
+        for item in services.incident_manager.list_incidents():
+            if item.incident_id == incident_id:
+                incident = item.to_dict()
+                break
+    return incident
+
+
+_READ_ONLY_DIAGNOSTIC_ACTIONS = {
+    "collect_incident_context",
+    "review_health_check_results",
+    "review_incident_timeline",
+    "prepare_evidence_packet",
+}
+
+
+def _execute_approved_diagnostics(
+    services: "DashboardServices",
+    incident_id: str,
+    approval_id: str,
+    actor: str,
+    requested_actions: List[str],
+) -> Dict[str, Any]:
+    """Execute the approved diagnostics-only plan against one real incident."""
+    incident = _load_incident(services, incident_id)
+    if incident is None:
+        raise ValueError("Incident not found")
+    plan = incident.get("proposed_remediation") or {}
+    if not isinstance(plan, dict) or not bool(plan.get("read_only", False)):
+        raise ValueError("Only read-only diagnostic plans can be executed from this approval path")
+
+    plan_actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    action_names = [
+        str(item.get("action", "")).strip()
+        for item in plan_actions
+        if isinstance(item, dict) and str(item.get("action", "")).strip()
+    ]
+    action_names = requested_actions or action_names
+    if not action_names or any(action not in _READ_ONLY_DIAGNOSTIC_ACTIONS for action in action_names):
+        raise ValueError("Approval contains an unsupported diagnostic action")
+    if "prepare_evidence_packet" not in action_names:
+        raise ValueError("Diagnostic plan must include prepare_evidence_packet")
+
+    evidence = _incident_evidence(services, incident)
+    packet = {
+        "title": f"Diagnostic evidence for {incident.get('service_name')}",
+        "summary": "Approved read-only diagnostics collected from the incident record.",
+        "incident_id": incident_id,
+        "collected_at": utc_now(),
+        "actions": action_names,
+        "incident_context": evidence,
+        "health_check_results": evidence.get("health_check_results", []),
+        "timeline": evidence.get("status_transitions", []),
+    }
+    manager = services.incident_manager
+    recorded = manager.record_diagnostic_evidence(
+        incident_id,
+        packet,
+        actor=actor,
+        incident_snapshot=incident,
+        approval_id=approval_id,
+    )
+    return recorded.to_dict()
+
+
+INCIDENT_AI_GOVERNANCE_AGENT_ID = "incident-ai"
+
+_POLICY_TO_GOVERNANCE_VERDICT = {
+    "safe": "allowed",
+    "approval_required": "pending_approval",
+    "forbidden": "denied",
+}
+
+
+def _normalize_approval_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """approval_queue stores the reviewer note as review_comment; the
+    frontend contract (ApprovalRequest.comment) expects `comment`."""
+    normalized = dict(row)
+    normalized.setdefault("comment", normalized.get("review_comment"))
+    return normalized
+
+
+def _ensure_incident_ai_agent_registered(gov: Any, provider_name: str, model: str, tenant_id: str) -> None:
+    """Idempotently register the real incident-AI agent identity in GovernanceManager.
+
+    Not a fabricated persona: this is the actual code path (this file's
+    /explain and /propose-remediation routes) reporting its own real,
+    currently-configured provider/model. Skipped if already registered.
+    """
+    if gov.get_agent(INCIDENT_AI_GOVERNANCE_AGENT_ID, tenant_id=tenant_id) is not None:
+        return
+    from src.ai_governance import AIAgent
+    gov.register_agent(
+        AIAgent(
+            agent_id=INCIDENT_AI_GOVERNANCE_AGENT_ID,
+            name="Incident AI Assistant",
+            agent_type="incident_analysis",
+            description=(
+                "Generates incident explanations and diagnostic/remediation proposals "
+                "from real incident evidence via the configured AI provider "
+                "(POST /api/incidents/{id}/explain, /propose-remediation)."
+            ),
+            owner="system",
+            team="platform",
+            provider=provider_name or "unknown",
+            model=model or "unknown",
+        ),
+        tenant_id=tenant_id,
+    )
+
+
+def build_recent_remediations(storage_remediations: List[Dict[str, Any]], fallback_actions: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
     rows = storage_remediations or fallback_actions
     normalized = [
         {
@@ -1207,7 +1487,11 @@ def build_integrations_context(services: DashboardServices) -> dict[str, Any]:
                 and hasattr(config.integrations, "grafana_url")
             ):
                 health_url = f"{config.integrations.grafana_url.rstrip('/')}/api/health"
-            if not health_url and provisioned:
+            if not health_url:
+                grafana_url = os.getenv("AEGISNEX_GRAFANA_URL", "").strip().rstrip("/")
+                if grafana_url:
+                    health_url = f"{grafana_url}/api/health"
+            if not health_url and provisioned and is_local_environment():
                 health_url = "http://localhost:3000/api/health"
             if health_url:
                 req = urllib.request.Request(health_url, method="GET")
@@ -1235,21 +1519,21 @@ def build_integrations_context(services: DashboardServices) -> dict[str, Any]:
             import urllib.request
 
             config = getattr(services, "config", None)
-            if (
-                config
-                and hasattr(config, "integrations")
-                and hasattr(config.integrations, "prometheus_url")
-            ):
+            base = None
+            if config and hasattr(config, "integrations") and hasattr(config.integrations, "prometheus_url"):
                 base = config.integrations.prometheus_url.rstrip("/")
-            else:
+            if not base:
+                base = os.getenv("AEGISNEX_PROMETHEUS_URL", "").strip().rstrip("/") or None
+            if not base and prometheus_dir.exists() and is_local_environment():
                 base = "http://localhost:9090"
-            targets_url = f"{base}/api/v1/targets"
-            req = urllib.request.Request(targets_url, method="GET")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    reachable = data.get("status") == "success"
-            scrape_url = f"{base}/metrics"
+            if base:
+                targets_url = f"{base}/api/v1/targets"
+                req = urllib.request.Request(targets_url, method="GET")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        reachable = data.get("status") == "success"
+                scrape_url = f"{base}/metrics"
         except Exception:
             reachable = False
         status = (
@@ -1608,7 +1892,10 @@ def create_app(
     app.add_middleware(TLSRedirectMiddleware)
     from src.telemetry.collector import TelemetryCollector
     from src.telemetry.middleware import TelemetryMiddleware
-    telemetry_collector = TelemetryCollector(telemetry_db_path or "telemetry.db")
+    if not telemetry_db_path:
+        data_dir = os.getenv("AEGISNEX_DATA_DIR", "").strip()
+        telemetry_db_path = str(Path(data_dir) / "telemetry.db") if data_dir else "telemetry.db"
+    telemetry_collector = TelemetryCollector(telemetry_db_path)
     app.add_middleware(TelemetryMiddleware, collector=telemetry_collector)
     app.add_middleware(AuthModeMiddleware)
     app.state.limiter = limiter
@@ -1631,10 +1918,17 @@ def create_app(
             "AEGISNEX_LOCAL_AUTH_ENABLED=true for a controlled fallback."
         )
     if seed_default_admin_enabled():
-        app.state.auth_manager.user_store.seed_default_admin()
+        try:
+            app.state.auth_manager.user_store.seed_default_admin()
+        except AuthError as exc:
+            logger.warning("Skipping default admin seed: %s", exc)
     from src.cache import DashboardCache
 
     app.state.dashboard_cache = DashboardCache()
+    # collect_dashboard_context() reads the cache off `services`, not `app.state`
+    # directly - wire it through so /api/dashboard's 10s TTL cache actually engages
+    # instead of silently missing on every request.
+    app.state.services.dashboard_cache = app.state.dashboard_cache
     app.state.telemetry_collector = telemetry_collector
     repo = app.state.services.platform_repository
     if repo is not None:
@@ -1948,14 +2242,7 @@ def create_app(
     # ---- Public auth pages ----
     @app.get("/login")
     async def login_page() -> RedirectResponse:
-        frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "").strip()
-        if not frontend_url:
-            environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-            if environment in {"development", "dev", "local", "test"}:
-                frontend_url = "http://localhost:3000"
-            else:
-                frontend_url = "/"
-        return RedirectResponse(url=f"{frontend_url}/login", status_code=302)
+        return RedirectResponse(url=frontend_redirect_url("/login"), status_code=302)
 
     @app.post("/api/login")
     @limiter.limit("5/minute")
@@ -2018,13 +2305,18 @@ def create_app(
     async def api_demo_login(request: FastAPIRequest) -> Any:
         if not demo_auth_enabled():
             raise HTTPException(status_code=404, detail="Demo login is not enabled")
-        username = os.getenv("AEGISNEX_DEMO_USERNAME", "admin")
+        username = os.getenv("AEGISNEX_DEMO_USERNAME", "demo")
         password = os.getenv("AEGISNEX_DEMO_PASSWORD")
         if not password:
             raise HTTPException(status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD.")
+        # Demo login always resolves to a dedicated, restricted read_only
+        # account - never the real admin - regardless of AEGISNEX_DEMO_USERNAME.
         result = app.state.auth_manager.login(username, password)
         if result is None:
-            app.state.auth_manager.user_store.seed_default_admin()
+            try:
+                app.state.auth_manager.user_store.seed_demo_user(username, password)
+            except AuthError:
+                pass
             result = app.state.auth_manager.login(username, password)
         if result is None:
             raise HTTPException(status_code=500, detail="Demo login is unavailable")
@@ -2032,6 +2324,17 @@ def create_app(
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
+        # Ensure the demo account belongs to an organization so tenant-
+        # membership enforcement (required by default in production) doesn't
+        # lock a freshly seeded, non-superuser demo user out of every endpoint.
+        tenant_manager = getattr(app.state, "tenant_manager", None)
+        if tenant_manager is not None and tenant_membership_required() and not user.is_superuser:
+            try:
+                if not tenant_manager.get_user_tenants(user.id):
+                    demo_org = tenant_manager.create_organization("Demo Workspace", domain="demo.aegisnex.local")
+                    tenant_manager.assign_user_to_org(user.id, demo_org.id, role="read_only")
+            except Exception:
+                logger.warning("Failed to assign demo user to a demo organization", exc_info=True)
         response = Response(
             content=json.dumps(
                 {
@@ -2106,8 +2409,7 @@ def create_app(
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(user.email, "sso_login", "session", user.email, {"provider": profile.issuer})
-        frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "/").strip() or "/"
-        response = RedirectResponse(url=f"{frontend_url.rstrip('/')}/dashboard", status_code=302)
+        response = RedirectResponse(url=frontend_redirect_url("/dashboard"), status_code=302)
         _clear_auth_cookies(response)
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
         _set_refresh_cookie(response, refresh_token, app.state.auth_manager.refresh_token_ttl_seconds)
@@ -2136,23 +2438,7 @@ def create_app(
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and user is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(user.email, "logout", "session", user.email, {})
-        response = RedirectResponse(url="/login", status_code=302)
-        _clear_auth_cookies(response)
-        return response
-
-    @app.post("/api/logout")
-    async def api_logout(request: FastAPIRequest) -> Any:
-        token = _extract_token(request)
-        if token:
-            user = app.state.auth_manager.get_user_from_token(token)
-            app.state.auth_manager.logout(token)
-            repo = getattr(app.state.services, "platform_repository", None)
-            if repo is not None and user is not None and hasattr(repo, "record_audit_log"):
-                repo.record_audit_log(user.email, "logout", "session", user.email, {})
-        response = Response(
-            content=json.dumps({"message": "Logged out"}),
-            media_type="application/json",
-        )
+        response = RedirectResponse(url=frontend_redirect_url("/login"), status_code=302)
         _clear_auth_cookies(response)
         return response
 
@@ -2362,44 +2648,29 @@ def create_app(
         limit = int(request.query_params.get("limit", 100))
         offset = int(request.query_params.get("offset", 0))
         org_id_param = request.query_params.get("org_id")
-        org_id = int(org_id_param) if org_id_param else None
+        org_id = None
+        if org_id_param not in (None, ""):
+            try:
+                org_id = int(str(org_id_param))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Invalid org_id")
+            require_org_access(request, org_id)
         limit = max(1, min(limit, 1000))
         repo = app.state.services.platform_repository
         if repo is None:
             ctx = api_context_fn()
-            incidents = ctx["active_incidents"] + ctx["resolved_incidents"]
-            if org_id is not None:
-                incidents = [item for item in incidents if item.get("org_id") == org_id]
+            incidents = [] if org_id is not None else ctx["active_incidents"] + ctx["resolved_incidents"]
             incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
-            return {
-                "active_incidents": ctx["active_incidents"],
-                "resolved_incidents": ctx["resolved_incidents"],
-                "recent_incidents": ctx["recent_incidents"],
-                "incidents": incidents[:limit],
-                "active_count": len(ctx["active_incidents"]),
-                "resolved_count": len(ctx["resolved_incidents"]),
-                "count": len(incidents),
-                "limit": limit,
-                "offset": offset,
-            }
+            active = [i for i in incidents if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}]
+            resolved = [i for i in incidents if i.get("incident_status", i.get("status")) == "resolved"]
+            return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": incidents[:6], "incidents": incidents[:limit], "active_count": len(active), "resolved_count": len(resolved), "count": len(incidents), "limit": limit, "offset": offset}
         all_incidents = repo.list_incidents(limit=limit, offset=offset, org_id=org_id)
-        total = repo.list_incidents(org_id=org_id)
-        active = [
-            i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}
-        ]
+        total_count = repo.count_incidents(org_id=org_id)
+        active = [i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}]
         resolved = [i for i in all_incidents if i.get("incident_status") == "resolved"]
-        return {
-            "active_incidents": active,
-            "resolved_incidents": resolved,
-            "recent_incidents": all_incidents[:6],
-            "incidents": all_incidents,
-            "active_count": len(active),
-            "resolved_count": len(resolved),
-            "count": len(all_incidents),
-            "total": len(total),
-            "limit": limit,
-            "offset": offset,
-        }
+        active_count = repo.count_incidents(incident_status="active", org_id=org_id) + repo.count_incidents(incident_status="acknowledged", org_id=org_id)
+        resolved_count = repo.count_incidents(incident_status="resolved", org_id=org_id)
+        return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": all_incidents[:6], "incidents": all_incidents, "active_count": active_count, "resolved_count": resolved_count, "count": total_count, "total": total_count, "limit": limit, "offset": offset}
 
     @app.get("/api/incidents/{incident_id}")
     def api_incident_detail(incident_id: str, request: FastAPIRequest) -> Any:
@@ -2431,6 +2702,323 @@ def create_app(
     @app.post("/api/incidents/{incident_id}/client")
     async def api_assign_incident_client(incident_id: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
+        repo = app.state.services.platform_repository
+        if repo is None:
+            return Response(content="Platform database unavailable", status_code=503)
+        try:
+            payload = await request.json()
+        except Exception:
+            return Response(content="Invalid JSON body", status_code=400)
+        org_id_value = payload.get("org_id")
+        org_id: int | None = None
+        org_name: str | None = None
+        if org_id_value not in (None, ""):
+            try:
+                org_id = int(org_id_value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Invalid org_id")
+            require_org_access(request, org_id)
+            mgr: TenantManager = request.app.state.tenant_manager
+            try:
+                org_name = mgr.get_organization(org_id).name
+            except ValueError:
+                return Response(content="Organization not found", status_code=404)
+        existing = repo.get_incident(incident_id)
+        if existing is None:
+            return Response(content="Incident not found", status_code=404)
+        updated = repo.assign_incident_org(incident_id, org_id, org_name)
+        try:
+            app.state.services.incident_manager.assign_client(incident_id, org_id, org_name)
+        except KeyError:
+            pass
+        repo.record_audit_log(
+            user.email,
+            "assign_client",
+            "incident",
+            incident_id,
+            {"org_id": org_id, "org_name": org_name},
+        )
+        return updated
+
+    @app.post("/api/incidents/{incident_id}/explain")
+    async def api_explain_incident(incident_id: str, request: FastAPIRequest) -> Any:
+        # Read-only: generates analysis text only, never mutates the incident.
+        require_role(*VIEWER_ROLES)(request)
+        incident = _load_incident(app.state.services, incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+
+        from src.intelligence.providers.factory import create_provider, get_default_provider
+        from src.intelligence.providers.base import Message
+
+        provider_name = get_default_provider()
+        try:
+            provider = create_provider()
+        except Exception as exc:
+            logger.warning(
+                "incident.explain provider unavailable incident_id=%s provider=%s error_type=%s",
+                incident_id, provider_name, type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"AI explanation unavailable: provider '{provider_name}' is not configured. "
+                    f"Set AEGIS_AI_{provider_name.upper()}_API_KEY on the backend and retry."
+                ),
+            )
+
+        evidence = _incident_evidence(app.state.services, incident)
+        system_prompt = (
+            "You are an infrastructure incident analyst for AegisNex. You are given real, "
+            "observed evidence for exactly one incident and nothing else. Respond in exactly "
+            "this structure:\n\n"
+            "OBSERVED EVIDENCE:\n- Facts taken directly from the evidence provided. Add nothing "
+            "that is not present in the evidence.\n\n"
+            "POSSIBLE EXPLANATIONS (unconfirmed hypotheses):\n- Candidate causes consistent with "
+            "the evidence, explicitly labeled as hypotheses, not confirmed findings.\n\n"
+            "RECOMMENDATION:\n- One safe, non-destructive next diagnostic step.\n\n"
+            "Never state a root cause as fact unless it is directly confirmed by the evidence. "
+            "Never recommend a destructive or irreversible action."
+        )
+        try:
+            response = provider.chat([
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=f"Incident evidence:\n{json.dumps(evidence, indent=2, default=str)}"),
+            ])
+        except Exception:
+            logger.exception(
+                "incident.explain provider call failed incident_id=%s provider=%s", incident_id, provider_name,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI provider '{provider_name}' request failed. Check server logs for details.",
+            )
+
+        repo = app.state.services.platform_repository
+        confidence = _evidence_confidence(evidence)
+        result = {
+            "incident_id": incident_id,
+            "analysis": response.content,
+            "similar_incidents": _similar_incidents_for(repo, incident),
+            "runbooks": _relevant_runbooks_for(incident),
+            "audit_context": _incident_audit_context(repo, incident_id),
+            "confidence": confidence,
+            "timestamp": utc_now(),
+        }
+        logger.info(
+            "incident.explain succeeded incident_id=%s provider=%s model=%s",
+            incident_id, provider_name, getattr(provider.config, "model", ""),
+        )
+
+        # Record this real AI action in the governance action audit. Best-effort:
+        # a governance bookkeeping failure must never break the actual response.
+        try:
+            gov = governance_manager()
+            tenant = governance_tenant_id(request)
+            model = getattr(provider.config, "model", "")
+            _ensure_incident_ai_agent_registered(gov, provider_name, model, tenant)
+            from src.ai_governance import AgentAction
+            gov.record_action(
+                AgentAction(
+                    action_id=f"incident-explain-{incident_id}-{utc_now()}",
+                    agent_id=INCIDENT_AI_GOVERNANCE_AGENT_ID,
+                    action_type="incident_explain",
+                    action_summary=f"Explained incident {incident_id}",
+                    target_resource=f"incident:{incident_id}",
+                    inputs=json.dumps({"incident_id": incident_id}),
+                    outputs=json.dumps({"confidence": confidence}),
+                    reasoning="Read-only incident analysis; no infrastructure mutation.",
+                    confidence_score=confidence,
+                    policy_verdict="allowed",
+                    status="success",
+                ),
+                tenant_id=tenant,
+            )
+        except Exception:
+            logger.exception("incident.explain governance recording failed incident_id=%s", incident_id)
+
+        return result
+
+    @app.post("/api/incidents/{incident_id}/propose-remediation")
+    async def api_propose_incident_remediation(incident_id: str, request: FastAPIRequest) -> Any:
+        # Mutates incident state (records a pending proposal) - same access
+        # tier as acknowledge/resolve/reopen, never VIEWER_ROLES/read_only.
+        user = require_role(*OPERATOR_ROLES)(request)
+        incident = _load_incident(app.state.services, incident_id)
+        if incident is None:
+            raise HTTPException(status_code=404, detail="Incident not found")
+
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        plan = payload.get("plan")
+        if not isinstance(plan, dict):
+            raise HTTPException(status_code=400, detail="plan (object) is required")
+        actions = plan.get("actions")
+        actions = actions if isinstance(actions, list) else []
+        proposed_by = str(payload.get("proposed_by") or user.email or "operator")
+        try:
+            confidence = float(payload.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+
+        # This endpoint never executes anything - it only classifies each
+        # proposed action via the existing governance/policy engine and
+        # records the plan as pending human approval.
+        policy_engine = getattr(app.state.services, "policy_engine", None)
+        context = {
+            "incident_id": incident_id,
+            "incident_type": incident.get("incident_type"),
+            "service_name": incident.get("service_name"),
+        }
+        classified_actions = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_name = str(action.get("action", "")).strip()
+            governance = {
+                "verdict": "approval_required",
+                "reason": "Policy engine unavailable; defaulting to human approval.",
+                "risk_level": None,
+            }
+            if policy_engine is not None and action_name:
+                try:
+                    evaluation = policy_engine.evaluate(action_name, {**context, **action})
+                    governance = {
+                        "verdict": evaluation.verdict.value,
+                        "reason": evaluation.reason,
+                        "risk_level": evaluation.risk_level,
+                    }
+                except Exception:
+                    logger.exception(
+                        "incident.propose_remediation policy evaluation failed incident_id=%s action=%s",
+                        incident_id, action_name,
+                    )
+            classified_actions.append({**action, "governance": governance})
+
+        # Best-effort AI rationale: the plan and its governance classification
+        # are already complete and real without this. AI being unconfigured
+        # or failing must not block a human-reviewable plan from being
+        # proposed - it only means the rationale field stays empty.
+        ai_rationale = None
+        provider_name = None
+        try:
+            from src.intelligence.providers.factory import create_provider, get_default_provider
+            from src.intelligence.providers.base import Message
+            provider_name = get_default_provider()
+            provider = create_provider()
+            evidence = _incident_evidence(app.state.services, incident)
+            prompt = (
+                "Given this real incident evidence and this proposed read-only diagnostic plan, "
+                "write a one or two sentence rationale for why these steps are reasonable given "
+                "the evidence. Do not propose new actions. Do not claim a confirmed root cause."
+            )
+            response = provider.chat([
+                Message(role="system", content=prompt),
+                Message(role="user", content=json.dumps({"evidence": evidence, "plan": {**plan, "actions": classified_actions}}, default=str)),
+            ])
+            ai_rationale = response.content
+        except Exception as exc:
+            logger.info(
+                "incident.propose_remediation proceeding without AI rationale incident_id=%s provider=%s error_type=%s",
+                incident_id, provider_name, type(exc).__name__,
+            )
+
+        enriched_plan = {**plan, "actions": classified_actions}
+        if ai_rationale:
+            enriched_plan["ai_rationale"] = ai_rationale
+
+        try:
+            updated = app.state.services.incident_manager.propose_remediation(
+                incident_id, enriched_plan, proposed_by=proposed_by, confidence=confidence,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Incident not found")
+
+        logger.info(
+            "incident.propose_remediation succeeded incident_id=%s actions=%d proposed_by=%s ai_rationale=%s",
+            incident_id, len(classified_actions), proposed_by, bool(ai_rationale),
+        )
+        message = "Diagnostic plan proposed and pending approval."
+        if not ai_rationale:
+            message += " (AI rationale unavailable; governance classification only.)"
+
+        # Record each real, already-classified proposed action in the
+        # governance action audit - one governance record per action
+        # actually evaluated, using its real policy verdict. Best-effort:
+        # a governance bookkeeping failure must never block the proposal.
+        governance_action_ids: List[str] = []
+        try:
+            gov = governance_manager()
+            tenant = governance_tenant_id(request)
+            if not provider_name:
+                from src.intelligence.providers.factory import get_default_provider as _get_default_provider
+                provider_name = _get_default_provider()
+            resolved_provider = provider_name
+            model = os.getenv(f"AEGIS_AI_{resolved_provider.upper()}_MODEL", "") if resolved_provider else ""
+            _ensure_incident_ai_agent_registered(gov, resolved_provider, model, tenant)
+            from src.ai_governance import AgentAction
+            for index, action in enumerate(classified_actions):
+                governance_info = action.get("governance", {})
+                gov_action_id = f"incident-remediation-{incident_id}-{utc_now()}-{index}"
+                gov.record_action(
+                    AgentAction(
+                        action_id=gov_action_id,
+                        agent_id=INCIDENT_AI_GOVERNANCE_AGENT_ID,
+                        action_type="propose_remediation",
+                        action_summary=str(action.get("action", "diagnostic_action")),
+                        target_resource=f"incident:{incident_id}",
+                        inputs=json.dumps({"action": action.get("action"), "target": action.get("target")}),
+                        outputs=json.dumps({"governance": governance_info}),
+                        reasoning=str(governance_info.get("reason", "")),
+                        confidence_score=confidence,
+                        policy_verdict=_POLICY_TO_GOVERNANCE_VERDICT.get(governance_info.get("verdict"), "pending_approval"),
+                        status="success",
+                    ),
+                    tenant_id=tenant,
+                )
+                governance_action_ids.append(gov_action_id)
+        except Exception:
+            logger.exception("incident.propose_remediation governance recording failed incident_id=%s", incident_id)
+
+        # Queue this real, already-classified plan for a real human decision
+        # via the existing Approvals page/API - this is the "real queue" the
+        # UI already advertises. Best-effort: a queueing failure must not
+        # undo the proposal that was already persisted above.
+        try:
+            repo = app.state.services.platform_repository
+            if repo is not None:
+                from uuid import uuid4
+                new_approval_id = f"incident-remediation-{incident_id}-{uuid4().hex[:12]}"
+                repo.create_approval_request(
+                    new_approval_id,
+                    "incident_diagnostic_remediation",
+                    proposed_by,
+                    f"Diagnostic/remediation plan for incident {incident_id} ({len(classified_actions)} action(s))",
+                    {
+                        "incident_id": incident_id,
+                        "governance_action_ids": governance_action_ids,
+                        "actions": [a.get("action") for a in classified_actions],
+                        "read_only": bool(plan.get("read_only", True)),
+                    },
+                )
+        except Exception:
+            logger.exception("incident.propose_remediation approval queueing failed incident_id=%s", incident_id)
+
+        return {"incident": updated.to_dict(), "message": message}
+
+    @app.get("/api/metrics")
+    def api_metrics(request: FastAPIRequest) -> Dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        ctx = api_context_fn()
+        return {"timestamp": ctx["timestamp"], "metrics": ctx["metrics"], "network": ctx["network"], "chart_data": ctx["chart_data"]["metrics"]}
+
+    @app.get("/api/metrics/history")
+    def api_metrics_history(request: FastAPIRequest) -> Dict[str, Any]:
+        require_role(*VIEWER_ROLES)(request)
+        minutes = int(request.query_params.get("minutes", 60))
+        minutes = max(1, min(minutes, 1440))
         repo = app.state.services.platform_repository
         if repo is None:
             return Response(content="Platform database unavailable", status_code=503)
@@ -3622,7 +4210,9 @@ def create_app(
     def api_update_user_role(user_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*ADMIN_ROLES)(request)
         from fastapi import HTTPException
-
+        from src.auth import Role
+        if user.role != Role.SUPER_ADMIN.value:
+            raise HTTPException(status_code=403, detail="Only super_admin can change user roles")
         role = request.query_params.get("role", "")
         normalized_role = Role.from_str(role).value
         if role not in Role.valid_roles() and normalized_role not in Role.valid_roles():
@@ -3705,6 +4295,8 @@ def create_app(
             return Response(content="name is required", status_code=400)
         role = str(payload.get("role", "read_only")).strip().lower()
         normalized_role = Role.from_str(role).value
+        if normalized_role == Role.SUPER_ADMIN.value and user.role != Role.SUPER_ADMIN.value:
+            return Response(content="Only super_admin can create super_admin API keys", status_code=403)
         scopes = payload.get("scopes", ["commandmesh:chat"])
         if isinstance(scopes, str):
             scopes = [scope.strip() for scope in scopes.split(",") if scope.strip()]
@@ -3838,6 +4430,8 @@ def create_app(
         if not email:
             return Response(content="email is required", status_code=400)
         normalized_role = Role.from_str(role).value
+        if normalized_role == Role.SUPER_ADMIN.value and user.role != Role.SUPER_ADMIN.value:
+            return Response(content="Only super_admin can invite super_admin users", status_code=403)
         token = secrets.token_urlsafe(32)
         org_id = payload.get("org_id")
         invite = repo.create_invite(
@@ -4032,7 +4626,7 @@ def create_app(
             return {"approvals": [], "count": 0}
         status = request.query_params.get("status") or None
         limit = int(request.query_params.get("limit", 50))
-        approvals = repo.list_approval_requests(status=status, limit=limit)
+        approvals = [_normalize_approval_row(a) for a in repo.list_approval_requests(status=status, limit=limit)]
         return {"approvals": approvals, "count": len(approvals)}
 
     @app.post("/api/approvals/{approval_id}/respond")
@@ -4040,51 +4634,68 @@ def create_app(
         user = require_role(*OPERATOR_ROLES)(request)
         repo = app.state.services.platform_repository
         if repo is None:
-            return Response(content="Platform database unavailable", status_code=503)
+            raise HTTPException(status_code=503, detail="Platform database unavailable")
         try:
             payload = await request.json()
         except Exception:
-            return Response(content="Invalid JSON body", status_code=400)
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
         decision = str(payload.get("decision", "")).strip().lower()
         if decision not in ("approved", "rejected"):
-            return Response(content="decision must be 'approved' or 'rejected'", status_code=400)
+            raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
         comment = str(payload.get("comment", "")).strip()
-        existing = (
-            repo.get_approval_request(approval_id)
-            if hasattr(repo, "get_approval_request")
-            else None
-        )
-        result = repo.respond_approval(
-            approval_id, decision, reviewed_by=user.email, comment=comment
-        )
-        if result is None:
-            return Response(content="Approval request not found", status_code=404)
-        if existing and existing.get("request_type") == "incident_diagnostic_remediation":
-            details = existing.get("details") or {}
-            if isinstance(details, str):
-                try:
-                    details = json.loads(details)
-                except json.JSONDecodeError:
-                    details = {}
-            incident_id = (
-                str(details.get("incident_id", "")).strip() if isinstance(details, dict) else ""
+
+        existing = repo.get_approval_request(approval_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+        if existing.get("status") != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Approval request already {existing.get('status')}; decisions are final.",
             )
-            if incident_id:
-                incident_manager = app.state.services.incident_manager
+
+        result = repo.respond_approval(approval_id, decision, reviewed_by=user.email, comment=comment)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+
+        # Persist the human decision, synchronize linked governance/incident
+        # state, and execute only the explicitly approved diagnostics-only
+        # plan. A linkage failure must not undo the decision already persisted.
+        try:
+            details = result.get("details")
+            if isinstance(details, str):
+                details = json.loads(details) if details else {}
+            details = details or {}
+            governance_action_ids = details.get("governance_action_ids") or []
+            if governance_action_ids:
+                gov = governance_manager()
+                tenant = governance_tenant_id(request)
+                new_verdict = "allowed" if decision == "approved" else "denied"
+                for gov_action_id in governance_action_ids:
+                    gov.update_action(gov_action_id, tenant_id=tenant, policy_verdict=new_verdict)
+            linked_incident_id = details.get("incident_id")
+            if linked_incident_id:
                 try:
-                    incident = incident_manager._get_required(incident_id)
-                    if incident.remediation_approval_status == "pending":
-                        if decision == "approved":
-                            incident_manager.approve_remediation(incident_id, user.email)
-                        else:
-                            incident_manager.reject_remediation(
-                                incident_id,
-                                user.email,
-                                comment or "Rejected from approval queue",
-                            )
+                    app.state.services.incident_manager.record_remediation_decision(
+                        linked_incident_id, decision, reviewed_by=user.email,
+                    )
                 except KeyError:
                     pass
-        return result
+                if decision == "approved" and result.get("request_type") == "incident_diagnostic_remediation":
+                    _execute_approved_diagnostics(
+                        app.state.services,
+                        str(linked_incident_id),
+                        approval_id,
+                        user.email,
+                        [str(action) for action in (details.get("actions") or [])],
+                    )
+        except Exception:
+            logger.exception("approval.respond linkage sync failed approval_id=%s", approval_id)
+
+        logger.info(
+            "approval.respond succeeded approval_id=%s decision=%s reviewed_by=%s",
+            approval_id, decision, user.email,
+        )
+        return _normalize_approval_row(result)
 
     # ---- Enterprise: Policy Management ----
     @app.post("/api/policies")
@@ -4479,7 +5090,13 @@ def create_app(
         except Exception as exc:
             get_logger(__name__).warning("MC finish error: %s", exc)
 
-    def _mc_complete_stage(execution: Any, stage_id: str, status: str = "completed", **kw: Any) -> None:
+    def _mc_complete_stage(
+        execution: Any,
+        stage_id: str,
+        status: str = "completed",
+        broadcast: bool = True,
+        **kw: Any,
+    ) -> None:
         from src.mission_control import complete_stage, update_execution
         repo = _mc_repo()
         if repo is None or execution is None:
@@ -4487,7 +5104,8 @@ def create_app(
         try:
             complete_stage(execution, stage_id, status=status, **kw)
             update_execution(repo, execution)
-            _broadcast_mc_update(repo)
+            if broadcast:
+                _broadcast_mc_update(repo)
         except Exception as exc:
             get_logger(__name__).warning("MC stage error: %s", exc)
 
@@ -4498,10 +5116,183 @@ def create_app(
                 from src.mission_control import get_execution_stats
                 stats = get_execution_stats(repo)
                 asyncio.create_task(
-                    ws_mgr.broadcast({"type": "mc_stats_update", "stats": stats}, channel="mission_control")
+                    ws_mgr.broadcast({"type": "execution_update", "stats": stats}, channel="mission_control")
                 )
         except Exception:
             pass
+
+    def _track_workforce_execution_in_mc(request: FastAPIRequest, agent: Any, execution: Any) -> None:
+        from src.ai_workforce import ExecutionResult
+        from src.mission_control import create_execution
+
+        repo = _mc_repo()
+        if repo is None:
+            return
+        try:
+            agent_label = str(getattr(agent, "name", "") or "").strip() or getattr(execution, "agent_id", "")
+            mc_exec = create_execution(
+                repo=repo,
+                execution_id=execution.execution_id,
+                request=execution.task[:500],
+                user=_mc_user(request),
+                metadata={
+                    "source": "ai_workforce_playground",
+                    "workforce_execution_id": execution.execution_id,
+                    "agent_id": execution.agent_id,
+                    "agent_name": agent_label,
+                    "workforce_status": execution.status,
+                    **(execution.metadata or {}),
+                },
+                execution_type="agent_dispatch",
+                organization=_mc_org(request),
+                agents=[agent_label] if agent_label else [execution.agent_id],
+                audit_links={"workforce_execution": f"/api/workforce/agents/{execution.agent_id}/executions"},
+            )
+            mc_status = "completed" if execution.status == ExecutionResult.SUCCESS.value else "failed"
+            stage_status = "completed" if mc_status == "completed" else "failed"
+            _mc_complete_stage(
+                mc_exec,
+                "executor",
+                status=stage_status,
+                broadcast=False,
+                latency_ms=execution.latency_ms,
+                confidence=execution.confidence,
+                model=getattr(agent, "model", ""),
+                provider=getattr(agent, "provider", ""),
+                estimated_cost=execution.cost,
+                summary=(execution.response or execution.error or execution.task)[:300],
+                connected_tools=execution.tools_used or [],
+                inputs={"task": execution.task, "simulate": execution.metadata.get("mode") != "live"},
+                outputs={"response": execution.response, "error": execution.error},
+            )
+            _finish_mc_execution(
+                mc_exec,
+                status=mc_status,
+                error=execution.error,
+                overall_result=execution.response,
+                confidence=execution.confidence,
+                total_latency_ms=execution.latency_ms,
+                total_cost=execution.cost,
+            )
+        except Exception as exc:
+            get_logger(__name__).warning("MC workforce tracking error: %s", exc, exc_info=True)
+
+    WORKFORCE_GOVERNANCE_ACTION_TYPE = "workforce_playground_execution"
+
+    def _ensure_workforce_agent_governance_registered(gov: Any, agent: Any, tenant_id: str) -> None:
+        """Idempotently mirror a real Workforce agent's identity into GovernanceManager.
+
+        Workforce (ai_workforce.py) and Governance (ai_governance.py) are
+        separate registries backed by separate stores; nothing previously
+        copied a Workforce agent into the governance agent registry, so its
+        real executions had no governance/audit trail. Registered once, using
+        the same agent_id, so the two systems can be correlated by ID -
+        mirrors the existing _ensure_incident_ai_agent_registered pattern.
+        """
+        agent_id = getattr(agent, "agent_id", "")
+        if not agent_id or gov.get_agent(agent_id, tenant_id=tenant_id) is not None:
+            return
+        from src.ai_governance import AIAgent
+        gov.register_agent(
+            AIAgent(
+                agent_id=agent_id,
+                name=getattr(agent, "name", "") or agent_id,
+                agent_type=getattr(agent, "agent_type", "") or "general",
+                description=getattr(agent, "description", ""),
+                owner=getattr(agent, "owner", "") or "system",
+                team=getattr(agent, "team", "") or "",
+                provider=getattr(agent, "provider", "") or "unknown",
+                model=getattr(agent, "model", "") or "unknown",
+                daily_budget=getattr(agent, "daily_budget", 25.0),
+                monthly_budget=getattr(agent, "monthly_budget", 750.0),
+            ),
+            tenant_id=tenant_id,
+        )
+
+    def _track_workforce_execution_in_governance(request: FastAPIRequest, agent: Any, execution: Any) -> None:
+        """Record a real Workforce Playground execution in Governance and Audit Logs.
+
+        Best-effort and isolated per subsystem - a governance or audit
+        failure must never break the actual playground response the operator
+        is waiting on. The execution_id is reused as the deterministic
+        governance action_id (UNIQUE(tenant_id, action_id) in agent_actions)
+        and passed as record_audit_log's execution_id, so one execution can
+        never create duplicate governance/audit rows and can always be
+        correlated across Workforce/Mission Control/Governance/Audit by that
+        one ID.
+        """
+        from src.ai_workforce import ExecutionResult
+
+        agent_id = getattr(execution, "agent_id", "") or getattr(agent, "agent_id", "")
+        tenant = governance_tenant_id(request)
+        actor = _mc_user(request)
+        is_success = execution.status == ExecutionResult.SUCCESS.value
+
+        try:
+            gov = governance_manager()
+            try:
+                _ensure_workforce_agent_governance_registered(gov, agent, tenant)
+            except Exception:
+                pass  # likely a concurrent first-execution race; registration already exists or is in flight
+            verdict, reason = gov.evaluate_policies(
+                agent_id, WORKFORCE_GOVERNANCE_ACTION_TYPE, f"workforce_agent:{agent_id}", tenant_id=tenant,
+            )
+            from src.ai_governance import AgentAction
+            gov.record_action(
+                AgentAction(
+                    action_id=f"workforce-{execution.execution_id}",
+                    agent_id=agent_id,
+                    action_type=WORKFORCE_GOVERNANCE_ACTION_TYPE,
+                    action_summary=f"Playground execution for {getattr(agent, 'name', agent_id)}",
+                    target_resource=f"workforce_agent:{agent_id}",
+                    inputs=json.dumps({
+                        "execution_id": execution.execution_id,
+                        "simulate": execution.metadata.get("mode") != "live",
+                    }),
+                    outputs=json.dumps({
+                        "status": execution.status,
+                        "tools_used": execution.tools_used,
+                    }),
+                    reasoning=reason or "",
+                    confidence_score=execution.confidence,
+                    policy_verdict=verdict,
+                    status="success" if is_success else "failed",
+                    duration_ms=execution.latency_ms,
+                ),
+                tenant_id=tenant,
+            )
+        except Exception:
+            get_logger(__name__).warning(
+                "Workforce governance recording failed execution_id=%s", execution.execution_id, exc_info=True,
+            )
+
+        try:
+            repo = app.state.services.platform_repository
+            if repo is not None:
+                # Only structural metadata - never the raw task prompt or the
+                # raw LLM response, which may contain incident evidence or
+                # other sensitive content that doesn't belong in audit logs.
+                repo.record_audit_log(
+                    actor=actor or "system",
+                    action="workforce_playground_execution",
+                    resource_type="workforce_agent",
+                    resource_id=agent_id,
+                    details={
+                        "agent_name": getattr(agent, "name", ""),
+                        "provider": getattr(agent, "provider", ""),
+                        "model": getattr(agent, "model", ""),
+                        "status": execution.status,
+                        "latency_ms": execution.latency_ms,
+                        "cost": execution.cost,
+                        "confidence": execution.confidence,
+                        "tools_used": execution.tools_used,
+                    },
+                    execution_id=execution.execution_id,
+                )
+        except Exception:
+            get_logger(__name__).warning(
+                "Workforce audit logging failed execution_id=%s", execution.execution_id, exc_info=True,
+            )
 
     @app.post("/api/ai/chat")
     async def api_ai_chat(request: FastAPIRequest) -> Any:
@@ -4682,7 +5473,7 @@ def create_app(
         user = request.query_params.get("user") or None
         exec_type = request.query_params.get("execution_type") or None
         org = request.query_params.get("organization") or None
-        days = request.query_params.get("days", type=int) or None
+        days = _query_int(request, "days")
         from src.mission_control import list_executions, count_executions
         try:
             executions = list_executions(repo, limit=limit, offset=offset, status=status, search=search, user=user, execution_type=exec_type, organization=org, days=days)
@@ -4772,7 +5563,7 @@ def create_app(
             return {"executions": [], "count": 0, "total": 0}
         limit = max(1, min(int(request.query_params.get("limit", 100)), 500))
         offset = max(0, int(request.query_params.get("offset", 0)))
-        days = request.query_params.get("days", type=int) or 30
+        days = _query_int(request, "days", 30) or 30
         exec_type = request.query_params.get("execution_type") or None
         from src.mission_control import list_executions, count_executions
         try:
@@ -4803,7 +5594,7 @@ def create_app(
         return Response(content=json.dumps({"error": "Tracking failed"}), status_code=500, media_type="application/json")
 
     @app.websocket("/ws/mission-control")
-    async def mission_control_websocket(websocket: Any) -> None:
+    async def mission_control_websocket(websocket: WebSocket) -> None:
         token = _websocket_token(websocket)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             try:
@@ -6761,6 +7552,8 @@ def create_app(
             )
         except WorkforceExecutionBlocked as exc:
             return JSONResponse({"error": exc.reason, "details": exc.details}, status_code=409)
+        _track_workforce_execution_in_mc(request, agent, execution)
+        _track_workforce_execution_in_governance(request, agent, execution)
         return execution.to_dict()
 
     @app.post("/api/workforce/wizard")
@@ -7994,14 +8787,4 @@ def create_app(
     return app
 
 
-if "pytest" in sys.modules:
-    app = None
-else:
-    try:
-        app = create_app()
-    except (RuntimeError, AttributeError) as exc:
-        print(f"FATAL: create_app() failed: {exc}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc()
-        app = None
+app = create_app()

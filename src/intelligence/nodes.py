@@ -295,6 +295,57 @@ def skill_executor_node(state: AgentState) -> AgentState:
     return state
 
 
+# Every operational intent category the keyword planner recognizes, and the
+# real-data tool(s) that satisfy it. Used in two places: plan_node (to decide
+# which tools to run) and verifier_node (to independently check, from the raw
+# request alone, whether every category the user actually asked about was
+# covered by a successfully-executed tool) - so a request spanning several
+# categories can never be silently narrowed to one without that gap showing
+# up in confidence/objective coverage, regardless of which category matched.
+_CATEGORY_TOOLS: dict[str, tuple[str, ...]] = {
+    "incident": ("incident",),
+    "metrics": ("metrics",),
+    "docker": ("docker",),
+    "target": ("target",),
+    "audit": ("audit",),
+    "report": ("report",),
+    "notification": ("notification",),
+    "health": ("health",),
+}
+
+
+def _match_intent_categories(request: str) -> list[str]:
+    """Every intent category (stable order) whose keywords appear in the
+    request - not just the first match. A single operational question can
+    legitimately span several categories (e.g. "system health" + "HTTP
+    targets" + "active incidents" all in one sentence)."""
+    request = request.lower()
+    matched: list[str] = []
+    if "incident" in request or "alert" in request:
+        matched.append("incident")
+    if (
+        "cpu" in request or "memory" in request or "disk" in request
+        or "metric" in request or "performance" in request
+    ):
+        matched.append("metrics")
+    if "docker" in request or "container" in request:
+        matched.append("docker")
+    if (
+        "target" in request or "monitor" in request or "http" in request
+        or "ssl" in request or "tcp" in request
+    ):
+        matched.append("target")
+    if "audit" in request or "log" in request:
+        matched.append("audit")
+    if "report" in request:
+        matched.append("report")
+    if "notification" in request:
+        matched.append("notification")
+    if "health" in request or "status" in request or "overview" in request:
+        matched.append("health")
+    return matched
+
+
 def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     """Analyze the user request, retrieve context, and build a plan.
 
@@ -314,18 +365,32 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
         parallel_batches: list[list[str]] = []
         missing_info: list[str] = []
         retrieved_context = ""
-        evidence: list[str] = []
+        reference_material: list[str] = []
+
+        # Detected independently of which planning path (LLM or keyword)
+        # below actually builds the plan, so verifier_node can always check
+        # real objective coverage against the raw request - not just against
+        # whatever the plan (which might itself be wrong) says it covers.
+        required_categories = _match_intent_categories(request)
 
         rag = _get_rag_engine(repo)
         try:
             retrieval = rag.retrieve(state["user_request"], limit=5)
             retrieved_context = retrieval.context_text
-            evidence = [
+            # Static/procedural knowledge (runbooks, past reports) retrieved
+            # by topic similarity to the request text - NOT live
+            # infrastructure observations. Kept separate from `evidence`
+            # (populated below, in verifier_node, from actual tool results)
+            # so the final answer never presents a runbook as proof of
+            # current system state.
+            reference_material = [
                 f"[{d.source_type}] {d.source}"
                 for d in retrieval.documents
                 if d.relevance_score > 0
             ]
-            logger.add_decision("rag_retrieval", "success", f"Retrieved {len(evidence)} documents")
+            logger.add_decision(
+                "rag_retrieval", "success", f"Retrieved {len(reference_material)} documents"
+            )
         except Exception as e:
             logger.add_warning(f"RAG retrieval failed: {e!s}")
             retrieved_context = ""
@@ -339,14 +404,26 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                     f'Given the user request: "{state["user_request"]}"\n\n'
                     f"Relevant context:\n{retrieved_context[:2000] if retrieved_context else 'None'}\n\n"
                     f"Available tools: {', '.join(tool_names)}\n\n"
-                    "Select the most relevant tools for this request. "
-                    f"Return ONLY a JSON array of tool names, nothing else. "
-                    'Example: ["metrics", "docker"]'
+                    "This request may ask about more than one distinct area "
+                    "(e.g. overall health, monitoring targets, and incidents "
+                    "can all be asked about in the same sentence). Select "
+                    "EVERY tool needed to cover EACH distinct part of the "
+                    "request - not just the most prominent one. "
+                    "Return ONLY a JSON array of tool names, nothing else, "
+                    "no markdown code fences. "
+                    'Example: ["health", "target", "incident"]'
                 )
                 msg = provider.chat([Message(role="user", content=planning_prompt)])
                 import json as _json
 
-                llm_steps = _json.loads(msg.content.strip())
+                raw_content = msg.content.strip()
+                if raw_content.startswith("```"):
+                    raw_content = raw_content.strip("`")
+                    if raw_content.lower().startswith("json"):
+                        raw_content = raw_content[4:]
+                    raw_content = raw_content.strip()
+
+                llm_steps = _json.loads(raw_content)
                 if isinstance(llm_steps, list) and all(s in tool_names for s in llm_steps):
                     steps = llm_steps
                     objective = f"LLM analysis for: {state['user_request'][:80]}"
@@ -356,76 +433,101 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                 logger.add_warning("LLM planning failed, falling back to keyword matching")
 
         if not steps:
-            if "incident" in request or "alert" in request:
-                objective = "Investigate incidents"
-                if "analyze" in request or "why" in request or "what happened" in request:
-                    steps = ["audit", "incident", "health"]
-                    parallel_batches = [["audit", "health"], ["incident"]]
+            # Evaluate every matched category independently (not an
+            # elif-chain) and union their tools/objectives, so a request
+            # spanning several categories (e.g. health + targets +
+            # incidents in one sentence) runs every required tool instead
+            # of only the first category that happens to match.
+            objective_parts: list[str] = []
+            for category in required_categories:
+                if category == "incident":
+                    if "analyze" in request or "why" in request or "what happened" in request:
+                        steps += ["audit", "incident", "health"]
+                        parallel_batches += [["audit", "health"], ["incident"]]
+                        objective_parts.append("Investigate incidents")
+                        logger.add_decision(
+                            "planning", "incident_analysis", "Pattern: analyze incident"
+                        )
+                    elif "active" in request:
+                        steps += ["incident"]
+                        objective_parts.append("List active incidents")
+                        logger.add_decision(
+                            "planning", "list_incidents", "Pattern: active incidents"
+                        )
+                    else:
+                        steps += ["incident"]
+                        parallel_batches += [["incident"]]
+                        objective_parts.append("Investigate incidents")
+                        logger.add_decision(
+                            "planning", "list_incidents", "Pattern: generic incident query"
+                        )
+                elif category == "metrics":
+                    steps += ["metrics", "docker", "health"]
+                    parallel_batches += [["metrics", "health"], ["docker"]]
+                    objective_parts.append("Investigate system metrics")
                     logger.add_decision(
-                        "planning", "incident_analysis", "Pattern: analyze incident"
+                        "planning", "metrics_analysis", "Pattern: system performance"
                     )
-                elif "active" in request:
-                    steps = ["incident"]
-                    objective = "List active incidents"
-                    logger.add_decision("planning", "list_incidents", "Pattern: active incidents")
-                else:
-                    steps = ["incident"]
-                    parallel_batches = [["incident"]]
+                elif category == "docker":
+                    steps += ["docker", "health"]
+                    parallel_batches += [["docker", "health"]]
+                    objective_parts.append("Inspect Docker containers")
                     logger.add_decision(
-                        "planning", "list_incidents", "Pattern: generic incident query"
+                        "planning", "docker_inspection", "Pattern: container query"
                     )
-            elif (
-                "cpu" in request
-                or "memory" in request
-                or "disk" in request
-                or "metric" in request
-                or "performance" in request
-            ):
-                objective = "Investigate system metrics"
-                steps = ["metrics", "docker", "health"]
-                parallel_batches = [["metrics", "health"], ["docker"]]
-                logger.add_decision("planning", "metrics_analysis", "Pattern: system performance")
-            elif "docker" in request or "container" in request:
-                objective = "Inspect Docker containers"
-                steps = ["docker", "health"]
-                parallel_batches = [["docker", "health"]]
-                logger.add_decision("planning", "docker_inspection", "Pattern: container query")
-            elif (
-                "target" in request
-                or "monitor" in request
-                or "http" in request
-                or "ssl" in request
-                or "tcp" in request
-            ):
-                objective = "Check monitoring targets"
-                steps = ["target", "incident"]
-                parallel_batches = [["target", "incident"]]
-                logger.add_decision("planning", "targets_check", "Pattern: monitoring targets")
-            elif "audit" in request or "log" in request:
-                objective = "Review audit logs"
-                steps = ["audit"]
-                logger.add_decision("planning", "audit_review", "Pattern: audit/logs")
-            elif "report" in request:
-                objective = "Generate operational report"
-                if "weekly" in request:
-                    steps = ["report"]
-                    logger.add_decision("planning", "weekly_report", "Pattern: weekly report")
-                elif "monthly" in request:
-                    steps = ["report"]
-                    logger.add_decision("planning", "monthly_report", "Pattern: monthly report")
-                else:
-                    steps = ["report", "incident", "metrics"]
-                    parallel_batches = [["incident", "metrics"], ["report"]]
-                    logger.add_decision("planning", "full_report", "Pattern: generic report")
-            elif "notification" in request:
-                objective = "Check notification status"
-                steps = ["notification"]
-                logger.add_decision("planning", "notification_check", "Pattern: notifications")
-            elif "health" in request or "status" in request or "overview" in request:
-                objective = "Assess overall system health"
-                steps = ["health", "metrics", "incident"]
-                parallel_batches = [["health", "metrics"], ["incident"]]
-                logger.add_decision("planning", "health_assessment", "Pattern: health/status")
+                elif category == "target":
+                    steps += ["target", "incident"]
+                    parallel_batches += [["target", "incident"]]
+                    objective_parts.append("Check monitoring targets")
+                    logger.add_decision(
+                        "planning", "targets_check", "Pattern: monitoring targets"
+                    )
+                elif category == "audit":
+                    steps += ["audit"]
+                    objective_parts.append("Review audit logs")
+                    logger.add_decision("planning", "audit_review", "Pattern: audit/logs")
+                elif category == "report":
+                    if "weekly" in request:
+                        steps += ["report"]
+                        logger.add_decision("planning", "weekly_report", "Pattern: weekly report")
+                    elif "monthly" in request:
+                        steps += ["report"]
+                        logger.add_decision(
+                            "planning", "monthly_report", "Pattern: monthly report"
+                        )
+                    else:
+                        steps += ["report", "incident", "metrics"]
+                        parallel_batches += [["incident", "metrics"], ["report"]]
+                        logger.add_decision("planning", "full_report", "Pattern: generic report")
+                    objective_parts.append("Generate operational report")
+                elif category == "notification":
+                    steps += ["notification"]
+                    objective_parts.append("Check notification status")
+                    logger.add_decision(
+                        "planning", "notification_check", "Pattern: notifications"
+                    )
+                elif category == "health":
+                    steps += ["health", "metrics", "incident"]
+                    parallel_batches += [["health", "metrics"], ["incident"]]
+                    objective_parts.append("Assess overall system health")
+                    logger.add_decision(
+                        "planning", "health_assessment", "Pattern: health/status"
+                    )
+
+            if required_categories:
+                # De-dupe while preserving first-seen order - several
+                # categories can legitimately request the same tool (e.g.
+                # "incident" appears via both the incident and target
+                # categories).
+                seen: set[str] = set()
+                steps = [s for s in steps if not (s in seen or seen.add(s))]
+                objective = "; ".join(dict.fromkeys(objective_parts))
+                if len(required_categories) > 1:
+                    logger.add_decision(
+                        "planning", "multi_intent",
+                        f"Request spans {len(required_categories)} categories: "
+                        f"{', '.join(required_categories)}",
+                    )
             else:
                 objective = "Comprehensive system analysis"
                 steps = ["metrics", "docker", "incident", "target", "health"]
@@ -463,7 +565,12 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
         state["missing_info"] = missing_info
         state["parallel_batches"] = [b for b in parallel_batches if any(s in steps for s in b)]
         state["retrieved_context"] = retrieved_context
-        state["evidence"] = evidence
+        state["reference_material"] = reference_material
+        # Populated in verifier_node from actual tool results, not here -
+        # `evidence` means "observed from a live tool call", never "a
+        # topically-similar document".
+        state["evidence"] = []
+        state["required_categories"] = required_categories
 
         # Record output
         logger.add_output(
@@ -473,7 +580,8 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                 "parallel_batches": state["parallel_batches"],
                 "tool_count": len(steps),
                 "missing_info": missing_info,
-                "evidence_count": len(evidence),
+                "reference_material_count": len(reference_material),
+                "required_categories": required_categories,
             }
         )
 
@@ -660,11 +768,36 @@ def verifier_node(state: AgentState) -> AgentState:
             log = logger.finalize("warning")
             add_execution_log_to_state(state, log)
             state["confidence"] = 0.0
+            state["tool_success_rate"] = 0.0
+            state["objective_coverage"] = 0.0 if state.get("required_categories") else 1.0
+            state["covered_categories"] = []
             state["reasoning_summary"] = "No tools were planned — unable to gather data."
             state["remaining_uncertainty"] = "Complete uncertainty: no operational data collected."
             return state
 
-        confidence = successful_tools / total_tools
+        tool_success_rate = successful_tools / total_tools
+
+        # Objective coverage: independent of what the plan itself contained,
+        # cross-check the categories detected directly from the raw request
+        # (set in plan_node) against which of those categories actually got
+        # a successfully-executed tool. A plan that only covers 1 of 3
+        # requested categories must not be able to reach full confidence
+        # just because the 1 tool it did run succeeded.
+        required_categories = state.get("required_categories", [])
+        successful_tool_names = {n for n, r in tool_results.items() if r.get("status") == "ok"}
+        covered_categories = [
+            c for c in required_categories
+            if any(t in successful_tool_names for t in _CATEGORY_TOOLS.get(c, ()))
+        ]
+        uncovered_categories = [c for c in required_categories if c not in covered_categories]
+        objective_coverage = (
+            len(covered_categories) / len(required_categories) if required_categories else 1.0
+        )
+
+        # Final answer confidence is capped by whichever dimension is worse -
+        # every tool succeeding is not "complete" if entire requested areas
+        # were never even attempted.
+        confidence = min(tool_success_rate, objective_coverage)
 
         if errors:
             msg = f"Found {len(errors)} tool errors"
@@ -677,8 +810,18 @@ def verifier_node(state: AgentState) -> AgentState:
                 logger.add_decision("verification", "tool_failure", msg)
                 observations.append(msg)
 
-        if confidence >= 0.8:
-            confidence_verdict = "High confidence: most tools completed successfully"
+        if uncovered_categories:
+            confidence_verdict = (
+                f"Incomplete: {len(uncovered_categories)}/{len(required_categories)} "
+                f"requested area(s) never retrieved ({', '.join(uncovered_categories)})"
+            )
+            logger.add_decision(
+                "verification", "objective_coverage_gap",
+                f"Uncovered categories: {', '.join(uncovered_categories)}",
+            )
+            observations.append(confidence_verdict)
+        elif confidence >= 0.8:
+            confidence_verdict = "High confidence: all requested areas covered, tools completed successfully"
             logger.add_decision(
                 "verification", "confidence_level", "high", f"Confidence: {confidence:.0%}"
             )
@@ -697,8 +840,15 @@ def verifier_node(state: AgentState) -> AgentState:
             observations.append(confidence_verdict)
 
         for tool_name, result in tool_results.items():
-            if result.get("status") == "ok" and result.get("count", 0) > 0:
-                evidence.append(f"Tool '{tool_name}' returned {result.get('count')} items")
+            if result.get("status") == "ok":
+                # Recorded even when count is 0 - "0 active incidents,
+                # confirmed by a live query" is real observed evidence, not
+                # an absence of evidence.
+                count = result.get("count")
+                if count is not None:
+                    evidence.append(f"Tool '{tool_name}' returned {count} item(s) (live query)")
+                else:
+                    evidence.append(f"Tool '{tool_name}' executed successfully (live query)")
 
         reason_parts = []
         reason_parts.append(f"Executed {successful_tools}/{total_tools} tools successfully")
@@ -707,11 +857,21 @@ def verifier_node(state: AgentState) -> AgentState:
             reason_parts.append(f"Successful: {', '.join(names)}")
         if failed_tools > 0:
             reason_parts.append(f"Failed: {failed_tools} tool(s)")
-        reason_parts.append(f"Confidence: {min(confidence, 1.0):.0%}")
+        if required_categories:
+            reason_parts.append(
+                f"Objective coverage: {len(covered_categories)}/{len(required_categories)} "
+                f"requested areas ({', '.join(covered_categories) or 'none'})"
+            )
+        reason_parts.append(f"Confidence: {confidence:.0%}")
 
         uncertainty = []
         if failed_tools > 0:
             uncertainty.append(f"{failed_tools} tool(s) produced errors — data may be incomplete")
+        if uncovered_categories:
+            uncertainty.append(
+                f"Never retrieved: {', '.join(uncovered_categories)} — "
+                "the response cannot speak to these parts of the request"
+            )
         if confidence < 0.6:
             uncertainty.append("Low confidence suggests significant gaps in available data")
         if _requires_manual_investigation(confidence):
@@ -722,7 +882,11 @@ def verifier_node(state: AgentState) -> AgentState:
         # Add output
         logger.add_output(
             {
-                "confidence": min(confidence, 1.0),
+                "confidence": confidence,
+                "tool_success_rate": tool_success_rate,
+                "objective_coverage": objective_coverage,
+                "covered_categories": covered_categories,
+                "uncovered_categories": uncovered_categories,
                 "successful_tools": successful_tools,
                 "failed_tools": failed_tools,
                 "observations_count": len(observations),
@@ -735,7 +899,10 @@ def verifier_node(state: AgentState) -> AgentState:
         log = logger.finalize(status)
         add_execution_log_to_state(state, log)
 
-        state["confidence"] = min(confidence, 1.0)
+        state["confidence"] = confidence
+        state["tool_success_rate"] = tool_success_rate
+        state["objective_coverage"] = objective_coverage
+        state["covered_categories"] = covered_categories
         state["observations"] = observations
         state["evidence"] = evidence
         state["reasoning_summary"] = "; ".join(reason_parts)
@@ -951,10 +1118,35 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
                 f"### Results\n{summary}\n\n"
             )
 
+        required_categories = state.get("required_categories", [])
+        covered_categories = state.get("covered_categories", [])
+        if required_categories:
+            uncovered = [c for c in required_categories if c not in covered_categories]
+            final_answer += (
+                f"### Objective Coverage\n"
+                f"{len(covered_categories)}/{len(required_categories)} requested area(s) "
+                f"addressed: {', '.join(covered_categories) or 'none'}\n"
+            )
+            if uncovered:
+                final_answer += f"**Not addressed:** {', '.join(uncovered)}\n"
+            final_answer += "\n"
+
         if evidence:
-            final_answer += "### Evidence Used\n"
-            for e in evidence[-5:]:
+            # Live tool observations only - never a static/procedural
+            # document, even when it was topically relevant to the request.
+            final_answer += "### Observed Evidence\n"
+            for e in evidence[-8:]:
                 final_answer += f"- {e}\n"
+            final_answer += "\n"
+
+        reference_material = state.get("reference_material", [])
+        if reference_material:
+            final_answer += (
+                "### Reference Material (procedural context only - "
+                "not current infrastructure state)\n"
+            )
+            for r in reference_material[:5]:
+                final_answer += f"- {r}\n"
             final_answer += "\n"
 
         if reasoning_summary:
@@ -992,8 +1184,15 @@ def goal_evaluator_node(state: AgentState) -> AgentState:
                 f"Manual investigation recommended (confidence below threshold: {confidence:.0%})"
             )
 
+        uncovered_categories = [c for c in required_categories if c not in covered_categories]
         if not existing_answer:
-            if confidence >= 0.8:
+            if uncovered_categories:
+                final_answer += (
+                    f"**Status:** Partial — {len(uncovered_categories)} of "
+                    f"{len(required_categories)} requested area(s) were never retrieved "
+                    f"({', '.join(uncovered_categories)})."
+                )
+            elif confidence >= 0.8:
                 final_answer += "**Status:** Complete — high confidence in results."
             elif confidence >= 0.5:
                 final_answer += "**Status:** Partial — some information may be incomplete."
@@ -1189,8 +1388,23 @@ def runbook_executor_node(state: AgentState, repo: PlatformRepository | None = N
     return state
 
 
-def parallel_supervisor_node(state: AgentState) -> AgentState:
-    """Fan out parallel batches and collect results."""
+def parallel_supervisor_node(
+    state: AgentState, repo: PlatformRepository | None = None
+) -> AgentState:
+    """Fan out parallel batches and collect results.
+
+    plan_node always fills `parallel_batches` (explicitly per matched
+    category, or via its own `if not parallel_batches: parallel_batches =
+    [[s] for s in steps]` fallback), so planner_router's `if
+    state.get("parallel_batches"): return "parallel"` check means this node
+    - not tool_executor_node - is the path almost every real plan actually
+    takes. It was previously missing the `repo` parameter entirely (every
+    other tool-calling node - tool_executor, rag_generator, reflection,
+    runbook_executor - already receives it from build_graph), so every
+    repo-backed tool (target, incident, audit, notification, report) always
+    ran with repo=None here and hard-failed with "Repository not
+    available", regardless of what repo the graph was built with.
+    """
     parallel_batches = state.get("parallel_batches", [])
     if not parallel_batches:
         executed_steps = list(state.get("executed_steps", []))
@@ -1205,7 +1419,7 @@ def parallel_supervisor_node(state: AgentState) -> AgentState:
             if get_tool(tool_name) is None:
                 continue
             try:
-                result = execute_tool(tool_name)
+                result = execute_tool(tool_name, repo=repo)
                 batch_result[tool_name] = result
             except Exception as exc:
                 batch_result[tool_name] = {"status": "error", "error": str(exc)}

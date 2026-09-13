@@ -157,3 +157,55 @@ describe("Governance agent registry", () => {
     expect(screen.getAllByText("96.4%").length).toBeGreaterThanOrEqual(1);
   });
 });
+
+// Regression coverage for: /governance always showed 0 agents / 0 actions in
+// the real browser even though the backend and governance.db genuinely had
+// real data. Root cause: fetchData() used bare fetch(buildApiUrl(...)) calls
+// with no `credentials: "include"`. Since the frontend (localhost:3000) and
+// backend (localhost:8000) are different origins, the browser silently
+// dropped the session cookie, every governance call came back 401, and
+// `.then((r) => r.json())` parsed the 401 error body as if it were real
+// stats data - Promise.allSettled saw that as "fulfilled", so the zeroed-out
+// UI defaults (?? 0 / ?? 50) rendered with no visible error. The tests above
+// never caught this because their mock always resolves `ok: true` and never
+// asserts on the request's `credentials` option.
+describe("Governance data fetching (auth/credentials regression)", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("requests /governance/stats with credentials included", async () => {
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<GovernancePage />);
+
+    await waitFor(() => {
+      const statsCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/governance/stats"));
+      expect(statsCall).toBeDefined();
+    });
+    const [, statsInit] = fetchMock.mock.calls.find(([input]) => String(input).includes("/governance/stats"))!;
+    expect(statsInit).toMatchObject({ credentials: "include" });
+  });
+
+  it("does not render an auth-error body as if it were real governance stats", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/governance/stats")) {
+        return Promise.resolve({
+          ok: false,
+          status: 401,
+          json: () => Promise.resolve({ detail: "Authentication required" }),
+        } as Response);
+      }
+      return jsonResponse({});
+    }));
+
+    render(<GovernancePage />);
+
+    await waitFor(() => {
+      expect(screen.queryByText("Authentication required")).not.toBeInTheDocument();
+    });
+  });
+});

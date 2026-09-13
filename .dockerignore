@@ -1,0 +1,62 @@
+# Git
+.git/
+.gitattributes
+.github/
+
+# Environment and secrets (real values must come from Azure env vars/secrets, not the image)
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
+# Local databases and SQLite write-ahead logs (created fresh at runtime)
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend build artifacts and dependencies (frontend has its own build/deploy)
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+frontend/*.log
+node_modules/
+.next/
+*.tsbuildinfo
+
+# Application-generated/runtime artifacts (regenerated on boot, not needed in image)
+logs/
+*.log
+restart_history.json
+incident_history.json
+notification_history.json
+reports/*.pdf
+reports/*.csv
+reports/*.json
+
+# Branch worktrees / scratch workspaces
+_branch_worktrees/
+_tmp_ws/
+
+# Docs, tests, and non-runtime assets (not required by the backend at runtime)
+docs/
+tests/
+assets/
+.agents/
+*.md
+
+# System and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

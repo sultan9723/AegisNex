@@ -56,7 +56,9 @@ def make_app(tmp_path: Path):
     return app
 
 
-def test_sso_config_reports_disabled_when_env_is_missing(tmp_path: Path) -> None:
+def test_sso_config_reports_disabled_when_env_is_missing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("AEGISNEX_DEMO_ENABLED", raising=False)
+    monkeypatch.delenv("AEGISNEX_DEMO_AUTH_ENABLED", raising=False)
     app = make_app(tmp_path)
     client = TestClient(app)
 
@@ -65,7 +67,8 @@ def test_sso_config_reports_disabled_when_env_is_missing(tmp_path: Path) -> None
     assert response.status_code == 200
     assert response.json()["enabled"] is False
     assert response.json()["local_auth_enabled"] is True
-    assert response.json()["demo_auth_enabled"] is True
+    # Demo login is opt-in only and off by default in every environment.
+    assert response.json()["demo_auth_enabled"] is False
 
 
 def test_sso_login_redirect_sets_state_and_nonce_cookies(tmp_path: Path) -> None:
@@ -136,6 +139,8 @@ def test_production_does_not_seed_default_admin(tmp_path: Path, monkeypatch) -> 
 
 def test_production_blocks_password_and_demo_login_by_default(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AEGISNEX_ENV", "production")
+    monkeypatch.delenv("AEGISNEX_DEMO_ENABLED", raising=False)
+    monkeypatch.delenv("AEGISNEX_DEMO_AUTH_ENABLED", raising=False)
     enable_oidc_env(monkeypatch)
     app = make_app(tmp_path)
     client = TestClient(app, base_url="https://testserver", client=("prod-auth-test", 50000))

@@ -12,7 +12,7 @@ const PIPELINE_STEPS = [
   { icon: Workflow, label: "Planner", sublabel: "Runbooks, Workflows", color: "success" },
   { icon: BrainCircuit, label: "AI Engine", sublabel: "Reasoning, Analysis", color: "chart-2" },
   { icon: Shield, label: "Approval", sublabel: "RBAC, Gates", color: "warning" },
-  { icon: Activity, label: "Dashboard", sublabel: "Live, Real-time", color: "primary" },
+  { icon: Activity, label: "Dashboard", sublabel: "Operational view", color: "primary" },
 ];
 
 const colorMap: Record<string, { ring: string; bg: string; text: string; line: string }> = {

@@ -87,19 +87,22 @@ const INTEGRATIONS: Integration[] = [
     name: "PagerDuty",
     category: ["notifications"],
     svg: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.54 7.55L12 4.5 5.46 7.55v6.9L12 17.5l6.54-3.05v-6.9zM12 2L3 6.5v11L12 22l9-4.5v-11L12 2z"/></svg>`,
-    status: "available",
+    status: "active",
   },
   {
     name: "AWS",
     category: ["cloud"],
     svg: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.763 10.036c0 .296.032.535.088.71.064.176.144.368.256.576.04.063.056.127.056.183 0 .08-.048.16-.152.24l-.503.335a.383.383 0 01-.208.072c-.08 0-.16-.04-.239-.112a2.47 2.47 0 01-.287-.375 6.18 6.18 0 01-.248-.471c-.622.734-1.405 1.101-2.347 1.101-.67 0-1.205-.191-1.596-.574-.391-.384-.59-.894-.59-1.533 0-.678.239-1.23.726-1.644.487-.415 1.133-.623 1.955-.623.272 0 .551.024.846.064.296.04.6.104.918.176v-.583c0-.607-.127-1.03-.375-1.277-.256-.248-.686-.367-1.3-.367-.28 0-.568.031-.863.103a6.395 6.395 0 00-.862.271 2.287 2.287 0 01-.28.104.488.488 0 01-.127.023c-.112 0-.168-.08-.168-.247v-.391c0-.128.016-.224.056-.28a.597.597 0 01.224-.167c.28-.144.615-.263 1.006-.36a4.84 4.84 0 011.246-.151c.95 0 1.644.216 2.091.647.44.43.662 1.085.662 1.963v2.586zm-3.24 1.214c.263 0 .534-.048.822-.144.287-.096.543-.271.758-.51.128-.152.224-.32.271-.512.048-.191.08-.423.08-.694v-.335a6.66 6.66 0 00-.735-.136 6.02 6.02 0 00-.75-.048c-.535 0-.926.104-1.19.32-.263.215-.39.518-.39.917 0 .375.095.655.295.846.191.2.47.296.838.296zm6.41.822c-.144 0-.24-.024-.304-.08-.064-.048-.12-.16-.168-.311L7.586 5.55a1.398 1.398 0 01-.128-.32c0-.128.064-.2.191-.2h.783c.151 0 .255.025.31.08.065.048.113.16.16.312l1.366 4.406 1.262-4.406c.04-.16.088-.264.151-.312a.549.549 0 01.32-.08h.638c.152 0 .256.025.32.08.063.048.12.16.151.312l1.278 4.486 1.413-4.486c.048-.16.104-.264.16-.312a.52.52 0 01.311-.08h.743c.127 0 .2.065.2.2 0 .04-.009.08-.017.128a1.137 1.137 0 01-.056.2l-1.923 5.149v.008l-.008.023-.008.024-2.149 5.568c-.04.12-.088.2-.16.248a.533.533 0 01-.295.08h-.687zm10.282.215c-.415 0-.83-.048-1.214-.143-.383-.096-.71-.2-.958-.327-.16-.08-.28-.16-.343-.24a.583.583 0 01-.12-.288v-.407c0-.167.064-.247.183-.247.032 0 .064.008.104.016.04.008.12.04.215.088.296.144.615.263.974.343.358.08.71.12 1.07.12.606 0 1.077-.135 1.406-.406.327-.272.495-.679.495-1.222 0-.431-.12-.758-.358-.99-.24-.231-.686-.447-1.318-.631l-.958-.28c-.567-.168-.99-.376-1.254-.623-.263-.247-.39-.582-.39-1.006 0-.335.096-.631.287-.886.191-.256.44-.448.75-.56a2.49 2.49 0 011.038-.199c.176 0 .36.016.55.048.191.032.37.08.543.143.176.064.327.143.455.24.128.096.22.191.271.287a.51.51 0 01.072.287v.375c0 .167-.064.255-.183.255a.87.87 0 01-.311-.096 3.356 3.356 0 00-1.581-.367c-.543 0-.965.12-1.262.359-.296.24-.443.607-.443 1.101 0 .447.136.79.407 1.03.271.24.718.455 1.341.639l.957.28c.559.16.973.367 1.246.615.271.248.407.582.407 1.006 0 .343-.096.647-.287.91-.191.263-.44.456-.75.576a2.483 2.483 0 01-1.046.208z"/></svg>`,
-    status: "active",
+    // Backend only checks for AWS credentials being present (status_center.py) -
+    // there is no functional AWS provider adapter, unlike Slack/PagerDuty/etc.
+    status: "available",
   },
   {
     name: "Azure",
     category: ["cloud"],
     svg: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13.05 4.24L7.56 18.78L2 18.73L5.79 4.24H13.05ZM14.21 7.28L17.57 16.1L12.6 16.47L9.6 18.78H22L14.21 7.28Z"/></svg>`,
-    status: "active",
+    // Same as AWS: credential-presence check only, no functional cloud adapter.
+    status: "available",
   },
   {
     name: "Google Cloud",
@@ -135,7 +138,7 @@ const INTEGRATIONS: Integration[] = [
     name: "Ollama",
     category: ["ai"],
     svg: `<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeWidth="1.5"/><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>`,
-    status: "available",
+    status: "active",
   },
 ];
 
@@ -161,7 +164,7 @@ export function IntegrationGrid() {
             Connects to your entire stack
           </h2>
           <p className="mx-auto mt-4 max-w-lg text-[14px] text-text-secondary">
-            Seamless integration with the tools your team already uses. One platform to unify them all.
+            Connect monitoring, AI providers, notifications, observability, and infrastructure tools through a unified operations layer.
           </p>
         </motion.div>
 
@@ -202,6 +205,8 @@ export function IntegrationGrid() {
               viewport={{ once: true }}
               transition={{ delay: i * 0.03, duration: 0.3 }}
               whileHover={{ scale: 1.05, y: -2 }}
+              title={int.status === "active" ? "Supported integration" : "Optional or configuration-dependent integration"}
+              aria-label={`${int.name}: ${int.status === "active" ? "supported integration" : "optional or configuration-dependent integration"}`}
               className="group relative flex flex-col items-center gap-2.5 rounded-xl border border-border bg-surface p-4 transition-[border-color,box-shadow] duration-200 hover:border-border-strong hover:shadow-sm"
             >
               <div

@@ -504,6 +504,26 @@ async function tryRefreshToken(): Promise<boolean> {
   return pendingRefresh;
 }
 
+// Backend error bodies come in two shapes across the API: FastAPI's default
+// `{"detail": "..."}` (most routes), and `{"error": "...", "details": {...}}`
+// (some workforce/JSONResponse-based routes, e.g. playground execution
+// blocks). Without this, callers only ever see "AegisNex API <path> returned
+// <status>" - the real reason (e.g. "budget_exceeded") never reaches the UI.
+export async function describeApiError(response: Response, path: string): Promise<string> {
+  const fallback = `AegisNex API ${path} returned ${response.status}`;
+  try {
+    const body = await response.json();
+    if (body?.detail) return String(body.detail);
+    if (body?.error) {
+      const details = body?.details && typeof body.details === "object" ? JSON.stringify(body.details) : null;
+      return details ? `${body.error}: ${details}` : String(body.error);
+    }
+  } catch {
+    // Non-JSON error body - keep the generic message.
+  }
+  return fallback;
+}
+
 async function fetchJsonWithRetry<T>(
   path: string,
   initOrRetries: RequestInit | number = MAX_RETRIES,
@@ -538,7 +558,7 @@ async function fetchJsonWithRetry<T>(
       }
 
       if (!response.ok) {
-        throw new Error(`AegisNex API ${path} returned ${response.status}`);
+        throw new Error(await describeApiError(response, path));
       }
 
       return response.json() as Promise<T>;
@@ -722,7 +742,7 @@ async function writeJson<T>(
   }
 
   if (!response.ok) {
-    throw new Error(`AegisNex API ${path} returned ${response.status}`);
+    throw new Error(await describeApiError(response, path));
   }
 
   return response.json() as Promise<T>;
@@ -1494,12 +1514,20 @@ export function listGovernanceActions(params?: { agent_id?: string; action_type?
   if (params?.verdict) qs.set("verdict", params.verdict);
   if (params?.limit) qs.set("limit", String(params.limit));
   const q = qs.toString();
-  return fetchJsonWithRetry<GovernanceAction[]>(`/api/governance/actions${q ? `?${q}` : ""}`);
+  return fetchJsonWithRetry<{ actions: GovernanceAction[]; count: number }>(`/api/governance/actions${q ? `?${q}` : ""}`);
 }
+
+export type GovernanceActionStats = {
+  total_actions: number;
+  by_verdict: Record<string, number>;
+  by_type: Record<string, number>;
+  avg_confidence: number;
+  hours: number;
+};
 
 export function getGovernanceActionStats(agentId?: string) {
   const qs = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
-  return fetchJsonWithRetry<Record<string, unknown>>(`/api/governance/actions/stats${qs}`);
+  return fetchJsonWithRetry<GovernanceActionStats>(`/api/governance/actions/stats${qs}`);
 }
 
 export function listGovernancePolicies() {

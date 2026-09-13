@@ -619,7 +619,8 @@ export function TargetHistoryDrawer({ target, open, onClose }: { target: Monitor
                 {history.slice(0, 20).map((h) => (
                   <div key={h.id} className="flex items-center justify-between rounded-lg border border-border/30 bg-surface-elevated/30 px-3 py-2">
                     <div className="flex items-center gap-2">
-                      {h.status === "healthy" || h.status === "reachable" || h.status === "valid" ? (
+                      {/* Backend monitors report "ok" on success, not "healthy"/"reachable"/"valid" */}
+                      {h.status === "ok" ? (
                         <CheckCircle2 className="size-3 text-success" />
                       ) : (
                         <AlertTriangle className="size-3 text-danger" />
