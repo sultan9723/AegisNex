@@ -191,6 +191,16 @@ def _query_int(request: Any, name: str, default: int | None = None) -> int | Non
         return default
 
 
+def _query_int(request: Any, name: str, default: int | None = None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def require_role(*roles: str):
     """Dependency factory: require the authenticated user to have one of the specified roles."""
 
@@ -559,7 +569,29 @@ def frontend_redirect_url(path: str) -> str:
     return f"{base}{clean_path}"
 
 
-def get_cors_origins() -> list[str]:
+def is_local_environment() -> bool:
+    environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+    return environment in {"development", "dev", "local", "test"}
+
+
+def get_frontend_base_url(default: str = "/") -> str:
+    configured = os.getenv("AEGISNEX_FRONTEND_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if is_local_environment():
+        return "http://localhost:3000"
+    return default
+
+
+def frontend_redirect_url(path: str) -> str:
+    base = get_frontend_base_url("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if base == "/":
+        return clean_path
+    return f"{base}{clean_path}"
+
+
+def get_cors_origins() -> List[str]:
     configured_origins = os.getenv("AEGISNEX_CORS_ORIGINS", "")
     if configured_origins.strip():
         return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]

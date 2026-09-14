@@ -24,13 +24,13 @@ const badgeVariants = cva(
         ghost:
           "border-transparent text-text-secondary",
         "success-subtle":
-          "border-success-border bg-success-bg text-success-subtle",
+          "border-success-border bg-success-bg text-success",
         "warning-subtle":
-          "border-warning-border bg-warning-bg text-warning-subtle",
+          "border-warning-border bg-warning-bg text-warning",
         "danger-subtle":
-          "border-danger-border bg-danger-bg text-danger-subtle",
+          "border-danger-border bg-danger-bg text-danger",
         "info-subtle":
-          "border-info-border bg-info-bg text-info-subtle",
+          "border-info-border bg-info-bg text-info",
       },
       size: {
         default: "h-6 px-2.5 text-[11px]",
