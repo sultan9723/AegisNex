@@ -6,66 +6,70 @@ PlatformRepository. AegisNexRepository (src/storage.py) is deprecated.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Mapping
+from dataclasses import dataclass
+from datetime import UTC
+from pathlib import Path
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
-from src.incidents import Incident, utc_timestamp
+from src.incidents import utc_timestamp
 
 _logger = logging.getLogger(__name__)
 
 
 # Settings keys — expanded for enterprise platform
-SETTINGS_KEYS = frozenset({
-    "session_timeout",
-    "workspace_name",
-    "email_notifications",
-    "notification_frequency",
-    "timezone",
-    "theme",
-    "accent_color",
-    # SMTP
-    "smtp_host",
-    "smtp_port",
-    "smtp_username",
-    "smtp_password",
-    "smtp_sender",
-    "smtp_recipient",
-    # Slack
-    "slack_webhook_url",
-    # Discord
-    "discord_webhook_url",
-    # Monitoring intervals
-    "monitoring_default_interval_seconds",
-    "monitoring_http_timeout",
-    "monitoring_ssl_timeout",
-    "monitoring_tcp_timeout",
-    # Retention
-    "retention_check_results_days",
-    "retention_metrics_snapshots_days",
-    "retention_audit_logs_days",
-    # Thresholds
-    "threshold_cpu_percent",
-    "threshold_memory_percent",
-    "threshold_disk_percent",
-    # Prometheus
-    "prometheus_enabled",
-    "prometheus_port",
-    # Grafana
-    "grafana_url",
-    "grafana_api_key",
-    # General
-    "log_level",
-    "log_retention_days",
-    "otel_enabled",
-    "otel_endpoint",
-})
+SETTINGS_KEYS = frozenset(
+    {
+        "session_timeout",
+        "workspace_name",
+        "email_notifications",
+        "notification_frequency",
+        "timezone",
+        "theme",
+        "accent_color",
+        # SMTP
+        "smtp_host",
+        "smtp_port",
+        "smtp_username",
+        "smtp_password",
+        "smtp_sender",
+        "smtp_recipient",
+        # Slack
+        "slack_webhook_url",
+        # Discord
+        "discord_webhook_url",
+        # Monitoring intervals
+        "monitoring_default_interval_seconds",
+        "monitoring_http_timeout",
+        "monitoring_ssl_timeout",
+        "monitoring_tcp_timeout",
+        # Retention
+        "retention_check_results_days",
+        "retention_metrics_snapshots_days",
+        "retention_audit_logs_days",
+        # Thresholds
+        "threshold_cpu_percent",
+        "threshold_memory_percent",
+        "threshold_disk_percent",
+        # Prometheus
+        "prometheus_enabled",
+        "prometheus_port",
+        # Grafana
+        "grafana_url",
+        "grafana_api_key",
+        # General
+        "log_level",
+        "log_retention_days",
+        "otel_enabled",
+        "otel_endpoint",
+    }
+)
 
 MONITORING_TARGET_TYPES = {"http", "tcp", "ssl", "dns", "container"}
 NOTIFICATION_CHANNEL_TYPES = {"email", "slack", "discord"}
@@ -111,7 +115,15 @@ class DatabaseModel:
 DATABASE_MODELS = {
     "users": DatabaseModel(
         "users",
-        ("id", "email", "hashed_password", "is_active", "is_superuser", "is_verified", "created_at"),
+        (
+            "id",
+            "email",
+            "hashed_password",
+            "is_active",
+            "is_superuser",
+            "is_verified",
+            "created_at",
+        ),
     ),
     "monitoring_targets": DatabaseModel(
         "monitoring_targets",
@@ -156,7 +168,17 @@ DATABASE_MODELS = {
     ),
     "notifications": DatabaseModel(
         "notifications",
-        ("id", "timestamp", "event_type", "incident_id", "service_name", "provider", "status", "attempts", "message"),
+        (
+            "id",
+            "timestamp",
+            "event_type",
+            "incident_id",
+            "service_name",
+            "provider",
+            "status",
+            "attempts",
+            "message",
+        ),
     ),
     "remediation_actions": DatabaseModel(
         "remediation_actions",
@@ -180,14 +202,38 @@ DATABASE_MODELS = {
     ),
     "api_keys": DatabaseModel(
         "api_keys",
-        ("id", "name", "key_hash", "key_prefix", "role", "scopes", "org_id", "expires_at",
-         "revoked_at", "allowed_ips", "rate_limit_max", "is_active", "created_at",
-         "last_used_at", "request_count"),
+        (
+            "id",
+            "name",
+            "key_hash",
+            "key_prefix",
+            "role",
+            "scopes",
+            "org_id",
+            "expires_at",
+            "revoked_at",
+            "allowed_ips",
+            "rate_limit_max",
+            "is_active",
+            "created_at",
+            "last_used_at",
+            "request_count",
+        ),
     ),
     "alert_rules": DatabaseModel(
         "alert_rules",
-        ("id", "name", "description", "target_type", "condition", "threshold", "severity",
-         "enabled", "created_at", "updated_at"),
+        (
+            "id",
+            "name",
+            "description",
+            "target_type",
+            "condition",
+            "threshold",
+            "severity",
+            "enabled",
+            "created_at",
+            "updated_at",
+        ),
     ),
 }
 
@@ -241,15 +287,18 @@ class PlatformRepository:
             raw_path = parsed.path or ""
             if raw_path.startswith("//"):
                 raw_path = raw_path[1:]
-            elif os.name == "nt" and raw_path.startswith("/") and len(raw_path) > 2 and raw_path[2] == ":":
-                raw_path = raw_path.lstrip("/")
-            elif raw_path.startswith("/"):
+            elif (
+                os.name == "nt"
+                and raw_path.startswith("/")
+                and len(raw_path) > 2
+                and raw_path[2] == ":"
+            ) or raw_path.startswith("/"):
                 raw_path = raw_path.lstrip("/")
             return Path(raw_path or "aegisnex.db")
         return Path(self.settings.url)
 
     def _connect(self) -> Any:
-        if not getattr(self, '_initialized', False) and not getattr(self, '_initializing', False):
+        if not getattr(self, "_initialized", False) and not getattr(self, "_initializing", False):
             self._initializing = True
             try:
                 self.initialize()
@@ -279,23 +328,17 @@ class PlatformRepository:
         try:
             connection.execute("PRAGMA journal_mode=WAL")
         except sqlite3.OperationalError:
-            _logger.warning("Could not enable WAL mode on %s (another connection may be active)", path)
-        try:
+            _logger.warning(
+                "Could not enable WAL mode on %s (another connection may be active)", path
+            )
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=30000")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA synchronous=NORMAL")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA cache_size=-8000")
-        except sqlite3.OperationalError:
-            pass
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA foreign_keys=ON")
-        except sqlite3.OperationalError:
-            pass
         self._sqlite_conn = connection
         return connection
 
@@ -311,7 +354,6 @@ class PlatformRepository:
                 pool.close()
                 self._pg_pool = None
         try:
-            import psycopg
             from psycopg.rows import dict_row
             from psycopg_pool import ConnectionPool
         except ModuleNotFoundError as exc:
@@ -364,7 +406,7 @@ class PlatformRepository:
             self._sqlite_conn = None
 
     def initialize(self) -> None:
-        if getattr(self, '_initialized', False):
+        if getattr(self, "_initialized", False):
             return
         retries = 3
         for attempt in range(retries):
@@ -380,8 +422,13 @@ class PlatformRepository:
                 return
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc) and attempt < retries - 1:
-                    wait = 0.5 * (2 ** attempt)
-                    _logger.warning("Database locked during init (attempt %d/%d), retrying in %.1fs", attempt + 1, retries, wait)
+                    wait = 0.5 * (2**attempt)
+                    _logger.warning(
+                        "Database locked during init (attempt %d/%d), retrying in %.1fs",
+                        attempt + 1,
+                        retries,
+                        wait,
+                    )
                     time.sleep(wait)
                 else:
                     raise
@@ -395,13 +442,15 @@ class PlatformRepository:
             return False
         try:
             conn = sqlite3.connect(str(path))
-            row = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+            row = conn.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='users'"
+            ).fetchone()
             conn.close()
             return row is not None and row[0] > 0
         except sqlite3.OperationalError:
             return False
 
-    def _schema_statements(self) -> List[str]:
+    def _schema_statements(self) -> list[str]:
         if self.backend == "postgresql":
             serial = "BIGSERIAL PRIMARY KEY"
             bool_type = "BOOLEAN"
@@ -727,7 +776,7 @@ class PlatformRepository:
             """,
         ]
 
-    def _migration_statements(self, connection: Any) -> List[str]:
+    def _migration_statements(self, connection: Any) -> list[str]:
         columns = {
             "check_interval_seconds": "INTEGER",
             "incident_status": "TEXT",
@@ -746,7 +795,8 @@ class PlatformRepository:
                 f"ALTER TABLE monitoring_targets ADD COLUMN IF NOT EXISTS {name} {column_type}"
                 for name, column_type in columns.items()
             ]
-            return monitoring_migrations + [
+            return [
+                *monitoring_migrations,
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS before_state TEXT",
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS after_state TEXT",
                 "ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS execution_id TEXT",
@@ -775,7 +825,10 @@ class PlatformRepository:
             if name not in existing
         ]
         # Migrate audit_logs — add before_state, after_state, execution_id columns
-        audit_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(audit_logs)").fetchall()}
+        audit_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(audit_logs)").fetchall()
+        }
         audit_migrations = []
         if "before_state" not in audit_columns:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN before_state TEXT")
@@ -783,10 +836,14 @@ class PlatformRepository:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN after_state TEXT")
         if "execution_id" not in audit_columns:
             audit_migrations.append("ALTER TABLE audit_logs ADD COLUMN execution_id TEXT")
-        api_key_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(api_keys)").fetchall()}
+        api_key_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(api_keys)").fetchall()
+        }
         api_key_migrations = []
         if "scopes" not in api_key_columns:
-            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"*\"]'")
+            api_key_migrations.append(
+                "ALTER TABLE api_keys ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"*\"]'"
+            )
         if "org_id" not in api_key_columns:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN org_id INTEGER")
         if "expires_at" not in api_key_columns:
@@ -796,19 +853,32 @@ class PlatformRepository:
         if "allowed_ips" not in api_key_columns:
             api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN allowed_ips TEXT")
         if "rate_limit_max" not in api_key_columns:
-            api_key_migrations.append("ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100")
-        incident_columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(incidents)").fetchall()}
+            api_key_migrations.append(
+                "ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100"
+            )
+        incident_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
+        }
         incident_migrations = []
         if "proposed_remediation" not in incident_columns:
             incident_migrations.append("ALTER TABLE incidents ADD COLUMN proposed_remediation TEXT")
         if "remediation_proposed_by" not in incident_columns:
-            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_proposed_by TEXT")
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_proposed_by TEXT"
+            )
         if "remediation_proposed_at" not in incident_columns:
-            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_proposed_at TEXT")
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_proposed_at TEXT"
+            )
         if "remediation_approval_status" not in incident_columns:
-            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_approval_status TEXT")
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_approval_status TEXT"
+            )
         if "remediation_plan_confidence" not in incident_columns:
-            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_plan_confidence REAL")
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_plan_confidence REAL"
+            )
         if "org_id" not in incident_columns:
             incident_migrations.append("ALTER TABLE incidents ADD COLUMN org_id INTEGER")
         if "org_name" not in incident_columns:
@@ -820,7 +890,9 @@ class PlatformRepository:
             "UPDATE incidents SET incident_status = status",
             "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
         ]
-        return alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
+        return (
+            alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
+        )
 
     @property
     def placeholder(self) -> str:
@@ -839,7 +911,7 @@ class PlatformRepository:
             if self.backend == "postgresql":
                 self._close_connection(connection)
 
-    def _fetch_all(self, sql: str, values: Iterable[Any] = ()) -> List[Dict[str, Any]]:
+    def _fetch_all(self, sql: str, values: Iterable[Any] = ()) -> list[dict[str, Any]]:
         connection = self._connect()
         try:
             rows = connection.execute(sql, tuple(values)).fetchall()
@@ -854,7 +926,7 @@ class PlatformRepository:
     # Generic table operations (migrated from AegisNexRepository.fetch_all)
     # ========================================================================
 
-    def fetch_all(self, table_name: str, limit: int = 0, offset: int = 0) -> List[Dict[str, Any]]:
+    def fetch_all(self, table_name: str, limit: int = 0, offset: int = 0) -> list[dict[str, Any]]:
         """Fetch all rows from a table. Pagination supported via limit/offset.
 
         Only whitelisted tables are accessible.
@@ -878,9 +950,7 @@ class PlatformRepository:
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
             )
         else:
-            rows = self._fetch_all(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
+            rows = self._fetch_all("SELECT name FROM sqlite_master WHERE type = 'table'")
         return {str(row["name"] if self.backend == "postgresql" else row["name"]) for row in rows}
 
     def table_exists(self, table_name: str) -> bool:
@@ -893,7 +963,7 @@ class PlatformRepository:
 
     def save_metrics_snapshot(
         self,
-        metrics: Dict[str, float],
+        metrics: dict[str, float],
         timestamp: str | None = None,
     ) -> None:
         """Save a metrics snapshot to the metrics_snapshots table."""
@@ -938,7 +1008,7 @@ class PlatformRepository:
     # but legacy callers may use these individual save methods.
     # ========================================================================
 
-    def save_http_check(self, check: Dict[str, Any]) -> None:
+    def save_http_check(self, check: dict[str, Any]) -> None:
         """Save an HTTP check result (legacy compatibility)."""
         p = self.placeholder
         self._execute(
@@ -958,7 +1028,7 @@ class PlatformRepository:
             ),
         )
 
-    def save_ssl_check(self, check: Dict[str, Any]) -> None:
+    def save_ssl_check(self, check: dict[str, Any]) -> None:
         """Save an SSL check result (legacy compatibility)."""
         p = self.placeholder
         self._execute(
@@ -978,7 +1048,7 @@ class PlatformRepository:
             ),
         )
 
-    def save_tcp_check(self, check: Dict[str, Any]) -> None:
+    def save_tcp_check(self, check: dict[str, Any]) -> None:
         """Save a TCP check result (legacy compatibility)."""
         p = self.placeholder
         self._execute(
@@ -1002,7 +1072,7 @@ class PlatformRepository:
     # Monitoring targets
     # ========================================================================
 
-    def list_monitoring_targets(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
+    def list_monitoring_targets(self, include_inactive: bool = False) -> list[dict[str, Any]]:
         if include_inactive:
             return self._fetch_all("SELECT * FROM monitoring_targets ORDER BY name")
         return self._fetch_all(
@@ -1010,12 +1080,14 @@ class PlatformRepository:
             (True,),
         )
 
-    def create_monitoring_target(self, payload: Mapping[str, Any], actor: str = "system") -> Dict[str, Any]:
+    def create_monitoring_target(
+        self, payload: Mapping[str, Any], actor: str = "system"
+    ) -> dict[str, Any]:
         target = self._normalize_target(payload)
         now = utc_timestamp()
         p = self.placeholder
         with self._connect() as connection:
-            cursor = connection.execute(
+            connection.execute(
                 f"""
                 INSERT INTO monitoring_targets (
                     name, target_type, address, expected_status, timeout_seconds,
@@ -1039,10 +1111,14 @@ class PlatformRepository:
             if self.backend == "postgresql":
                 connection.commit()
         created = self.get_monitoring_target_by_name(target["name"]) or target
-        self.record_audit_log(actor, "create", "monitoring_target", str(created.get("id", target["name"])), created)
+        self.record_audit_log(
+            actor, "create", "monitoring_target", str(created.get("id", target["name"])), created
+        )
         return created
 
-    def update_monitoring_target(self, target_id: int, payload: Mapping[str, Any], actor: str = "system") -> Dict[str, Any] | None:
+    def update_monitoring_target(
+        self, target_id: int, payload: Mapping[str, Any], actor: str = "system"
+    ) -> dict[str, Any] | None:
         existing = self.get_monitoring_target(target_id)
         if existing is None:
             return None
@@ -1072,7 +1148,9 @@ class PlatformRepository:
             ),
         )
         updated = self.get_monitoring_target(target_id)
-        self.record_audit_log(actor, "update", "monitoring_target", str(target_id), updated or target)
+        self.record_audit_log(
+            actor, "update", "monitoring_target", str(target_id), updated or target
+        )
         return updated
 
     def delete_monitoring_target(self, target_id: int, actor: str = "system") -> bool:
@@ -1083,14 +1161,14 @@ class PlatformRepository:
         self.record_audit_log(actor, "delete", "monitoring_target", str(target_id), existing)
         return True
 
-    def get_monitoring_target(self, target_id: int) -> Dict[str, Any] | None:
+    def get_monitoring_target(self, target_id: int) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM monitoring_targets WHERE id = {self.placeholder}",
             (target_id,),
         )
         return rows[0] if rows else None
 
-    def get_monitoring_target_by_name(self, name: str) -> Dict[str, Any] | None:
+    def get_monitoring_target_by_name(self, name: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM monitoring_targets WHERE name = {self.placeholder}",
             (name,),
@@ -1101,7 +1179,7 @@ class PlatformRepository:
     # Notification channels
     # ========================================================================
 
-    def list_notification_channels(self, include_inactive: bool = False) -> List[Dict[str, Any]]:
+    def list_notification_channels(self, include_inactive: bool = False) -> list[dict[str, Any]]:
         if include_inactive:
             sql = "SELECT * FROM notification_channels ORDER BY name"
             return self._fetch_all(sql)
@@ -1110,14 +1188,14 @@ class PlatformRepository:
             (1 if self.backend != "postgresql" else True,),
         )
 
-    def get_notification_channel(self, channel_id: int) -> Dict[str, Any] | None:
+    def get_notification_channel(self, channel_id: int) -> dict[str, Any] | None:
         rows = self._fetch_all(
             "SELECT * FROM notification_channels WHERE id = ?",
             (channel_id,),
         )
         return rows[0] if rows else None
 
-    def get_notification_channel_by_name(self, name: str) -> Dict[str, Any] | None:
+    def get_notification_channel_by_name(self, name: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             "SELECT * FROM notification_channels WHERE name = ?",
             (name,),
@@ -1126,14 +1204,16 @@ class PlatformRepository:
 
     def create_notification_channel(
         self, payload: Mapping[str, Any], actor: str = "system"
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         p = self.placeholder
         name = str(payload.get("name", "")).strip()
         if not name:
             raise ValueError("name is required")
         channel_type = str(payload.get("channel_type", "")).strip().lower()
         if channel_type not in NOTIFICATION_CHANNEL_TYPES:
-            raise ValueError(f"channel_type must be one of: {', '.join(sorted(NOTIFICATION_CHANNEL_TYPES))}")
+            raise ValueError(
+                f"channel_type must be one of: {', '.join(sorted(NOTIFICATION_CHANNEL_TYPES))}"
+            )
         config = payload.get("config", {})
         if isinstance(config, dict):
             config = json.dumps(config, sort_keys=True)
@@ -1145,7 +1225,9 @@ class PlatformRepository:
             """,
             (name, channel_type, str(config), 1, now, now),
         )
-        self.record_audit_log(actor, "create", "notification_channel", name, {"channel_type": channel_type})
+        self.record_audit_log(
+            actor, "create", "notification_channel", name, {"channel_type": channel_type}
+        )
         channel = self.get_notification_channel_by_name(name)
         if channel is None:
             raise RuntimeError("Failed to create notification channel")
@@ -1153,14 +1235,20 @@ class PlatformRepository:
 
     def update_notification_channel(
         self, channel_id: int, payload: Mapping[str, Any], actor: str = "system"
-    ) -> Dict[str, Any] | None:
+    ) -> dict[str, Any] | None:
         existing = self.get_notification_channel(channel_id)
         if existing is None:
             return None
         name = str(payload.get("name", existing["name"])).strip()
-        channel_type = str(payload.get("channel_type", existing.get("channel_type", ""))).strip().lower()
-        if channel_type not in NOTIFICATION_CHANNEL_TYPES and channel_type != existing.get("channel_type", ""):
-            raise ValueError(f"channel_type must be one of: {', '.join(sorted(NOTIFICATION_CHANNEL_TYPES))}")
+        channel_type = (
+            str(payload.get("channel_type", existing.get("channel_type", ""))).strip().lower()
+        )
+        if channel_type not in NOTIFICATION_CHANNEL_TYPES and channel_type != existing.get(
+            "channel_type", ""
+        ):
+            raise ValueError(
+                f"channel_type must be one of: {', '.join(sorted(NOTIFICATION_CHANNEL_TYPES))}"
+            )
         config = payload.get("config")
         if config is not None:
             if isinstance(config, dict):
@@ -1181,7 +1269,9 @@ class PlatformRepository:
             """,
             (name, channel_type, str(config), is_active, now, channel_id),
         )
-        self.record_audit_log(actor, "update", "notification_channel", name, {"channel_type": channel_type})
+        self.record_audit_log(
+            actor, "update", "notification_channel", name, {"channel_type": channel_type}
+        )
         return self.get_notification_channel(channel_id)
 
     def delete_notification_channel(self, channel_id: int, actor: str = "system") -> bool:
@@ -1189,7 +1279,6 @@ class PlatformRepository:
         if existing is None:
             return False
         name = existing["name"]
-        p = self.placeholder
         self._execute("DELETE FROM notification_channels WHERE id = ?", (channel_id,))
         self.record_audit_log(actor, "delete", "notification_channel", name, {})
         return True
@@ -1198,17 +1287,17 @@ class PlatformRepository:
     # API Keys
     # ========================================================================
 
-    def list_api_keys(self) -> List[Dict[str, Any]]:
+    def list_api_keys(self) -> list[dict[str, Any]]:
         return self._fetch_all("SELECT * FROM api_keys ORDER BY name")
 
-    def get_api_key(self, key_id: int) -> Dict[str, Any] | None:
+    def get_api_key(self, key_id: int) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM api_keys WHERE id = {self.placeholder}",
             (key_id,),
         )
         return rows[0] if rows else None
 
-    def get_api_key_by_hash(self, key_hash: str) -> Dict[str, Any] | None:
+    def get_api_key_by_hash(self, key_hash: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM api_keys WHERE key_hash = {self.placeholder}",
             (key_hash,),
@@ -1222,12 +1311,12 @@ class PlatformRepository:
         key_prefix: str,
         role: str = "viewer",
         actor: str = "system",
-        scopes: List[str] | None = None,
+        scopes: list[str] | None = None,
         org_id: int | None = None,
         expires_at: str | None = None,
-        allowed_ips: List[str] | None = None,
+        allowed_ips: list[str] | None = None,
         rate_limit_max: int = 100,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         now = utc_timestamp()
         p = self.placeholder
         scopes_json = json.dumps(scopes or ["*"], sort_keys=True)
@@ -1237,24 +1326,51 @@ class PlatformRepository:
             INSERT INTO api_keys (name, key_hash, key_prefix, role, scopes, org_id, expires_at, allowed_ips, rate_limit_max, is_active, created_at)
             VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
-            (name, key_hash, key_prefix, role, scopes_json, org_id, expires_at, allowed_ips_json, rate_limit_max, 1, now),
+            (
+                name,
+                key_hash,
+                key_prefix,
+                role,
+                scopes_json,
+                org_id,
+                expires_at,
+                allowed_ips_json,
+                rate_limit_max,
+                1,
+                now,
+            ),
         )
-        self.record_audit_log(actor, "create", "api_key", name, {"role": role, "scopes": scopes or ["*"], "org_id": org_id})
+        self.record_audit_log(
+            actor,
+            "create",
+            "api_key",
+            name,
+            {"role": role, "scopes": scopes or ["*"], "org_id": org_id},
+        )
         if self.backend != "postgresql":
             key = self.get_api_key_by_hash(key_hash)
         else:
-            key = self._fetch_all(f"SELECT * FROM api_keys WHERE id = {self.placeholder}", (new_id,))[0] if new_id else None
+            key = (
+                self._fetch_all(f"SELECT * FROM api_keys WHERE id = {self.placeholder}", (new_id,))[
+                    0
+                ]
+                if new_id
+                else None
+            )
         if key is None:
             raise RuntimeError("Failed to create API key")
         return key
 
-    def update_api_key(self, key_id: int, payload: Mapping[str, Any], actor: str = "system") -> Dict[str, Any] | None:
+    def update_api_key(
+        self, key_id: int, payload: Mapping[str, Any], actor: str = "system"
+    ) -> dict[str, Any] | None:
         existing = self.get_api_key(key_id)
         if existing is None:
             return None
         name = str(payload.get("name", existing["name"])).strip()
         role = str(payload.get("role", existing.get("role", "read_only")))
         from src.auth import Role as AuthRole
+
         normalized_role = AuthRole.from_str(role).value
         scopes = payload.get("scopes", existing.get("scopes", '["*"]'))
         if isinstance(scopes, str):
@@ -1266,14 +1382,21 @@ class PlatformRepository:
             parsed_scopes = scopes
         if not isinstance(parsed_scopes, list):
             parsed_scopes = ["*"]
-        scopes_json = json.dumps([str(scope).strip() for scope in parsed_scopes if str(scope).strip()] or ["*"], sort_keys=True)
+        scopes_json = json.dumps(
+            [str(scope).strip() for scope in parsed_scopes if str(scope).strip()] or ["*"],
+            sort_keys=True,
+        )
         org_id = payload.get("org_id", existing.get("org_id"))
         expires_at = payload.get("expires_at", existing.get("expires_at"))
         is_active = payload.get("is_active", existing.get("is_active", True))
         if isinstance(is_active, bool):
             is_active = 1 if is_active else 0
         allowed_ips = payload.get("allowed_ips", existing.get("allowed_ips"))
-        allowed_ips_json = json.dumps(allowed_ips) if isinstance(allowed_ips, list) else (allowed_ips or existing.get("allowed_ips"))
+        allowed_ips_json = (
+            json.dumps(allowed_ips)
+            if isinstance(allowed_ips, list)
+            else (allowed_ips or existing.get("allowed_ips"))
+        )
         rate_limit_max = int(payload.get("rate_limit_max", existing.get("rate_limit_max", 100)))
         p = self.placeholder
         self._execute(
@@ -1284,11 +1407,23 @@ class PlatformRepository:
                 revoked_at = CASE WHEN {p} = 0 THEN COALESCE(revoked_at, {p}) ELSE NULL END
             WHERE id = {p}
             """,
-            (name, normalized_role, scopes_json, org_id, expires_at,
-             allowed_ips_json, rate_limit_max, int(is_active),
-             int(is_active), utc_timestamp(), key_id),
+            (
+                name,
+                normalized_role,
+                scopes_json,
+                org_id,
+                expires_at,
+                allowed_ips_json,
+                rate_limit_max,
+                int(is_active),
+                int(is_active),
+                utc_timestamp(),
+                key_id,
+            ),
         )
-        self.record_audit_log(actor, "update", "api_key", name, {"scopes": json.loads(scopes_json), "org_id": org_id})
+        self.record_audit_log(
+            actor, "update", "api_key", name, {"scopes": json.loads(scopes_json), "org_id": org_id}
+        )
         return self.get_api_key(key_id)
 
     def delete_api_key(self, key_id: int, actor: str = "system") -> bool:
@@ -1318,7 +1453,7 @@ class PlatformRepository:
     # Alert Rules
     # ========================================================================
 
-    def list_alert_rules(self, enabled_only: bool = False) -> List[Dict[str, Any]]:
+    def list_alert_rules(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         if enabled_only:
             return self._fetch_all(
                 f"SELECT * FROM alert_rules WHERE enabled = {self.placeholder} ORDER BY name",
@@ -1326,21 +1461,23 @@ class PlatformRepository:
             )
         return self._fetch_all("SELECT * FROM alert_rules ORDER BY name")
 
-    def get_alert_rule(self, rule_id: int) -> Dict[str, Any] | None:
+    def get_alert_rule(self, rule_id: int) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM alert_rules WHERE id = {self.placeholder}",
             (rule_id,),
         )
         return rows[0] if rows else None
 
-    def get_alert_rule_by_name(self, name: str) -> Dict[str, Any] | None:
+    def get_alert_rule_by_name(self, name: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM alert_rules WHERE name = {self.placeholder}",
             (name,),
         )
         return rows[0] if rows else None
 
-    def create_alert_rule(self, payload: Mapping[str, Any], actor: str = "system") -> Dict[str, Any]:
+    def create_alert_rule(
+        self, payload: Mapping[str, Any], actor: str = "system"
+    ) -> dict[str, Any]:
         name = str(payload.get("name", "")).strip()
         if not name:
             raise ValueError("name is required")
@@ -1359,9 +1496,21 @@ class PlatformRepository:
             INSERT INTO alert_rules (name, description, target_type, condition, threshold, severity, enabled, created_at, updated_at)
             VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
-            (name, description, target_type, condition, threshold, severity, 1 if enabled else 0, now, now),
+            (
+                name,
+                description,
+                target_type,
+                condition,
+                threshold,
+                severity,
+                1 if enabled else 0,
+                now,
+                now,
+            ),
         )
-        self.record_audit_log(actor, "create", "alert_rule", name, {"severity": severity, "condition": condition})
+        self.record_audit_log(
+            actor, "create", "alert_rule", name, {"severity": severity, "condition": condition}
+        )
         rule = self.get_alert_rule(new_id) if new_id else None
         if rule is None:
             rule = self.get_alert_rule_by_name(name)
@@ -1369,14 +1518,20 @@ class PlatformRepository:
             raise RuntimeError("Failed to create alert rule")
         return rule
 
-    def update_alert_rule(self, rule_id: int, payload: Mapping[str, Any], actor: str = "system") -> Dict[str, Any] | None:
+    def update_alert_rule(
+        self, rule_id: int, payload: Mapping[str, Any], actor: str = "system"
+    ) -> dict[str, Any] | None:
         existing = self.get_alert_rule(rule_id)
         if existing is None:
             return None
         name = str(payload.get("name", existing["name"])).strip()
         description = str(payload.get("description", existing.get("description", ""))).strip()
-        target_type = str(payload.get("target_type", existing.get("target_type", ""))).strip().lower()
-        condition = str(payload.get("condition", existing.get("condition", "above"))).strip().lower()
+        target_type = (
+            str(payload.get("target_type", existing.get("target_type", ""))).strip().lower()
+        )
+        condition = (
+            str(payload.get("condition", existing.get("condition", "above"))).strip().lower()
+        )
         threshold = float(payload.get("threshold", existing.get("threshold", 0.0)))
         severity = str(payload.get("severity", existing.get("severity", "medium"))).strip().lower()
         if severity not in ALERT_RULE_SEVERITIES:
@@ -1393,7 +1548,17 @@ class PlatformRepository:
                 threshold = {p}, severity = {p}, enabled = {p}, updated_at = {p}
             WHERE id = {p}
             """,
-            (name, description, target_type, condition, threshold, severity, int(enabled), now, rule_id),
+            (
+                name,
+                description,
+                target_type,
+                condition,
+                threshold,
+                severity,
+                int(enabled),
+                now,
+                rule_id,
+            ),
         )
         self.record_audit_log(actor, "update", "alert_rule", name, {"severity": severity})
         return self.get_alert_rule(rule_id)
@@ -1414,7 +1579,7 @@ class PlatformRepository:
     # Settings
     # ========================================================================
 
-    def get_settings(self) -> Dict[str, str]:
+    def get_settings(self) -> dict[str, str]:
         rows = self._fetch_all("SELECT key, value FROM app_settings")
         return {row["key"]: row["value"] for row in rows}
 
@@ -1431,7 +1596,7 @@ class PlatformRepository:
             (key, value, utc_timestamp(), value, utc_timestamp()),
         )
 
-    def update_settings(self, payload: Mapping[str, str]) -> Dict[str, str]:
+    def update_settings(self, payload: Mapping[str, str]) -> dict[str, str]:
         for key in payload:
             if key not in SETTINGS_KEYS:
                 raise ValueError(f"Unknown setting key: {key}")
@@ -1464,7 +1629,9 @@ class PlatformRepository:
         )
         self.update_target_check_state(target, result)
 
-    def update_target_check_state(self, target: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    def update_target_check_state(
+        self, target: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> None:
         target_id = target.get("id")
         if target_id is None:
             return
@@ -1497,11 +1664,15 @@ class PlatformRepository:
     # ========================================================================
 
     def save_incident(self, incident: Any) -> None:
-        incident_status = str(getattr(incident, "incident_status", getattr(incident, "status", "active")))
+        incident_status = str(
+            getattr(incident, "incident_status", getattr(incident, "status", "active"))
+        )
         acknowledged_by = getattr(incident, "acknowledged_by", None)
         acknowledged_at = getattr(incident, "acknowledged_at", None)
         resolved_by = getattr(incident, "resolved_by", None)
-        resolved_at = getattr(incident, "resolved_at", getattr(incident, "resolved_timestamp", None))
+        resolved_at = getattr(
+            incident, "resolved_at", getattr(incident, "resolved_timestamp", None)
+        )
         resolution_notes = getattr(incident, "resolution_notes", None)
         proposed_remediation = getattr(incident, "proposed_remediation", None)
         remediation_proposed_by = getattr(incident, "remediation_proposed_by", None)
@@ -1580,9 +1751,13 @@ class PlatformRepository:
         self._execute(f"DELETE FROM incidents WHERE incident_id = {p}", (incident_id,))
         return True
 
-    def list_incidents(self, incident_status: str | None = None,
-                       limit: int = 0, offset: int = 0,
-                       org_id: int | None = None) -> List[Dict[str, Any]]:
+    def list_incidents(
+        self,
+        incident_status: str | None = None,
+        limit: int = 0,
+        offset: int = 0,
+        org_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         """List incidents with optional pagination.
 
         Args:
@@ -1625,7 +1800,9 @@ class PlatformRepository:
         rows = self._fetch_all(sql, tuple(params))
         return int(rows[0]["cnt"]) if rows else 0
 
-    def assign_incident_org(self, incident_id: str, org_id: int | None, org_name: str | None = None) -> Dict[str, Any] | None:
+    def assign_incident_org(
+        self, incident_id: str, org_id: int | None, org_name: str | None = None
+    ) -> dict[str, Any] | None:
         self._execute(
             f"""
             UPDATE incidents
@@ -1636,7 +1813,7 @@ class PlatformRepository:
         )
         return self.get_incident(incident_id)
 
-    def get_incident(self, incident_id: str) -> Dict[str, Any] | None:
+    def get_incident(self, incident_id: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM incidents WHERE incident_id = {self.placeholder}",
             (incident_id,),
@@ -1645,7 +1822,7 @@ class PlatformRepository:
             return None
         return self._normalize_incident_row(rows[0])
 
-    def list_incident_transitions(self, incident_id: str) -> List[Dict[str, Any]]:
+    def list_incident_transitions(self, incident_id: str) -> list[dict[str, Any]]:
         rows = self._fetch_all(
             f"""
             SELECT * FROM incident_transitions
@@ -1709,7 +1886,7 @@ class PlatformRepository:
     # Check results queries
     # ========================================================================
 
-    def latest_check_results(self) -> List[Dict[str, Any]]:
+    def latest_check_results(self) -> list[dict[str, Any]]:
         """Return the latest check result per target using SQL.
 
         Uses DISTINCT ON for PostgreSQL, subquery with MAX for SQLite.
@@ -1739,7 +1916,7 @@ class PlatformRepository:
                 row["details"] = {}
         return rows
 
-    def check_history(self, target_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    def check_history(self, target_id: int, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._fetch_all(
             f"""
             SELECT * FROM check_results
@@ -1800,7 +1977,7 @@ class PlatformRepository:
     # Policies
     # ========================================================================
 
-    def list_policies(self) -> List[Dict[str, Any]]:
+    def list_policies(self) -> list[dict[str, Any]]:
         try:
             return self._fetch_all("SELECT * FROM policies ORDER BY priority DESC")
         except Exception:
@@ -1817,13 +1994,21 @@ class PlatformRepository:
                 priority={p}, enabled={p}, updated_at={p}
             """,
             (
-                policy["name"], policy.get("description", ""), policy.get("action_pattern", "*"),
-                policy.get("condition", "always"), policy.get("effect", "deny"),
-                int(policy.get("priority", 0)), bool(policy.get("enabled", True)),
-                utc_timestamp(), utc_timestamp(),
-                policy.get("description", ""), policy.get("action_pattern", "*"),
-                policy.get("condition", "always"), policy.get("effect", "deny"),
-                int(policy.get("priority", 0)), bool(policy.get("enabled", True)),
+                policy["name"],
+                policy.get("description", ""),
+                policy.get("action_pattern", "*"),
+                policy.get("condition", "always"),
+                policy.get("effect", "deny"),
+                int(policy.get("priority", 0)),
+                bool(policy.get("enabled", True)),
+                utc_timestamp(),
+                utc_timestamp(),
+                policy.get("description", ""),
+                policy.get("action_pattern", "*"),
+                policy.get("condition", "always"),
+                policy.get("effect", "deny"),
+                int(policy.get("priority", 0)),
+                bool(policy.get("enabled", True)),
                 utc_timestamp(),
             ),
         )
@@ -1858,7 +2043,9 @@ class PlatformRepository:
             ),
         )
 
-    def list_execution_history(self, limit: int = 50, status: str | None = None) -> List[Dict[str, Any]]:
+    def list_execution_history(
+        self, limit: int = 50, status: str | None = None
+    ) -> list[dict[str, Any]]:
         if status:
             rows = self._fetch_all(
                 "SELECT * FROM execution_history WHERE status = ? ORDER BY started_at DESC LIMIT ?",
@@ -1894,7 +2081,9 @@ class PlatformRepository:
                 action.get("action", ""),
                 action.get("target", ""),
                 action.get("status", "running"),
-                action.get("policy", {}).get("verdict") if isinstance(action.get("policy"), dict) else None,
+                action.get("policy", {}).get("verdict")
+                if isinstance(action.get("policy"), dict)
+                else None,
                 json.dumps(action.get("explanation", {}), default=str, sort_keys=True),
                 json.dumps(action.get("details", {}), default=str, sort_keys=True),
                 action.get("error"),
@@ -1908,7 +2097,7 @@ class PlatformRepository:
             ),
         )
 
-    def list_healing_actions(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_healing_actions(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self._fetch_all(
             "SELECT * FROM healing_actions ORDER BY created_at DESC LIMIT ?",
             (int(limit),),
@@ -1948,13 +2137,15 @@ class PlatformRepository:
                 resource_type,
                 resource_id,
                 json.dumps(dict(details or {}), sort_keys=True),
-                json.dumps(dict(before_state)) if isinstance(before_state, Mapping) else before_state,
+                json.dumps(dict(before_state))
+                if isinstance(before_state, Mapping)
+                else before_state,
                 json.dumps(dict(after_state)) if isinstance(after_state, Mapping) else after_state,
                 execution_id,
             ),
         )
 
-    def list_audit_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+    def list_audit_logs(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         """List audit logs with optional pagination."""
         sql = "SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?"
         params: list[Any] = [int(limit)]
@@ -2004,7 +2195,9 @@ class PlatformRepository:
     # ========================================================================
 
     def list_secrets(self) -> list[dict[str, Any]]:
-        return self._fetch_all("SELECT id, name, category, is_active, created_at, updated_at FROM secrets ORDER BY name")
+        return self._fetch_all(
+            "SELECT id, name, category, is_active, created_at, updated_at FROM secrets ORDER BY name"
+        )
 
     def get_secret(self, name: str) -> str | None:
         rows = self._fetch_all(
@@ -2013,7 +2206,9 @@ class PlatformRepository:
         )
         return rows[0]["encrypted_value"] if rows else None
 
-    def upsert_secret(self, name: str, encrypted_value: str, category: str = "generic", actor: str = "system") -> dict[str, Any]:
+    def upsert_secret(
+        self, name: str, encrypted_value: str, category: str = "generic", actor: str = "system"
+    ) -> dict[str, Any]:
         now = utc_timestamp()
         p = self.placeholder
         self._execute(
@@ -2026,12 +2221,18 @@ class PlatformRepository:
             (name, encrypted_value, category, now, now, encrypted_value, category, now),
         )
         self.record_audit_log(actor, "upsert_secret", "secret", name, {"category": category})
-        rows = self._fetch_all(f"SELECT id, name, category, is_active, created_at, updated_at FROM secrets WHERE name = {p}", (name,))
+        rows = self._fetch_all(
+            f"SELECT id, name, category, is_active, created_at, updated_at FROM secrets WHERE name = {p}",
+            (name,),
+        )
         return rows[0] if rows else {"name": name, "category": category}
 
     def delete_secret(self, name: str, actor: str = "system") -> bool:
         p = self.placeholder
-        self._execute(f"UPDATE secrets SET is_active = 0, updated_at = {p} WHERE name = {p}", (utc_timestamp(), name))
+        self._execute(
+            f"UPDATE secrets SET is_active = 0, updated_at = {p} WHERE name = {p}",
+            (utc_timestamp(), name),
+        )
         self.record_audit_log(actor, "delete_secret", "secret", name, {})
         return True
 
@@ -2046,10 +2247,23 @@ class PlatformRepository:
     # Invites CRUD
     # ========================================================================
 
-    def create_invite(self, email: str, token: str, role: str, invited_by: str, org_id: int | None = None, expires_in_hours: int = 48) -> dict[str, Any]:
+    def create_invite(
+        self,
+        email: str,
+        token: str,
+        role: str,
+        invited_by: str,
+        org_id: int | None = None,
+        expires_in_hours: int = 48,
+    ) -> dict[str, Any]:
         now = utc_timestamp()
-        from datetime import datetime, timedelta, timezone
-        expires = (datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)).isoformat().replace("+00:00", "Z")
+        from datetime import datetime, timedelta
+
+        expires = (
+            (datetime.now(UTC) + timedelta(hours=expires_in_hours))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         p = self.placeholder
         new_id = self._execute(
             f"""
@@ -2087,16 +2301,27 @@ class PlatformRepository:
     # Password Resets CRUD
     # ========================================================================
 
-    def create_password_reset(self, user_id: int, token: str, expires_in_hours: int = 1) -> dict[str, Any]:
+    def create_password_reset(
+        self, user_id: int, token: str, expires_in_hours: int = 1
+    ) -> dict[str, Any]:
         now = utc_timestamp()
-        from datetime import datetime, timedelta, timezone
-        expires = (datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)).isoformat().replace("+00:00", "Z")
+        from datetime import datetime, timedelta
+
+        expires = (
+            (datetime.now(UTC) + timedelta(hours=expires_in_hours))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         p = self.placeholder
         new_id = self._execute(
             f"INSERT INTO password_resets (user_id, token, expires_at, created_at) VALUES ({p}, {p}, {p}, {p})",
             (user_id, token, expires, now),
         )
-        rows = self._fetch_all(f"SELECT * FROM password_resets WHERE id = {p}", (new_id,)) if new_id else []
+        rows = (
+            self._fetch_all(f"SELECT * FROM password_resets WHERE id = {p}", (new_id,))
+            if new_id
+            else []
+        )
         return rows[0] if rows else {"token": token, "user_id": user_id}
 
     def get_password_reset_by_token(self, token: str) -> dict[str, Any] | None:
@@ -2108,7 +2333,9 @@ class PlatformRepository:
 
     def use_password_reset(self, token: str) -> bool:
         p = self.placeholder
-        self._execute(f"UPDATE password_resets SET used_at = {p} WHERE token = {p}", (utc_timestamp(), token))
+        self._execute(
+            f"UPDATE password_resets SET used_at = {p} WHERE token = {p}", (utc_timestamp(), token)
+        )
         return True
 
     # ========================================================================
@@ -2130,18 +2357,31 @@ class PlatformRepository:
             INSERT INTO approval_queue (approval_id, request_type, requester, summary, details, status, created_at)
             VALUES ({p}, {p}, {p}, {p}, {p}, 'pending', {p})
             """,
-            (approval_id, request_type, requester, summary, json.dumps(dict(details or {}), sort_keys=True), now),
+            (
+                approval_id,
+                request_type,
+                requester,
+                summary,
+                json.dumps(dict(details or {}), sort_keys=True),
+                now,
+            ),
         )
-        rows = self._fetch_all(f"SELECT * FROM approval_queue WHERE approval_id = {p}", (approval_id,))
+        rows = self._fetch_all(
+            f"SELECT * FROM approval_queue WHERE approval_id = {p}", (approval_id,)
+        )
         return rows[0] if rows else {"approval_id": approval_id}
 
-    def list_approval_requests(self, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_approval_requests(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         if status:
             return self._fetch_all(
                 f"SELECT * FROM approval_queue WHERE status = {self.placeholder} ORDER BY created_at DESC LIMIT {int(limit)}",
                 (status,),
             )
-        return self._fetch_all(f"SELECT * FROM approval_queue ORDER BY created_at DESC LIMIT {int(limit)}")
+        return self._fetch_all(
+            f"SELECT * FROM approval_queue ORDER BY created_at DESC LIMIT {int(limit)}"
+        )
 
     def get_approval_request(self, approval_id: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
@@ -2174,7 +2414,13 @@ class PlatformRepository:
             """,
             (decision, reviewed_by, comment, now, approval_id),
         )
-        self.record_audit_log(reviewed_by, decision, "approval", approval_id, {"request_type": existing.get("request_type")})
+        self.record_audit_log(
+            reviewed_by,
+            decision,
+            "approval",
+            approval_id,
+            {"request_type": existing.get("request_type")},
+        )
         return self.get_approval_request(approval_id)
 
     # ========================================================================
@@ -2197,14 +2443,34 @@ class PlatformRepository:
             INSERT INTO backup_records (file_path, file_size_bytes, label, tables_included, knowledge_included, created_by, created_at)
             VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
             """,
-            (file_path, file_size_bytes, label, json.dumps(tables_included), 1 if knowledge_included else 0, created_by, now),
+            (
+                file_path,
+                file_size_bytes,
+                label,
+                json.dumps(tables_included),
+                1 if knowledge_included else 0,
+                created_by,
+                now,
+            ),
         )
-        self.record_audit_log(created_by, "create_backup", "backup", label or file_path, {"size": file_size_bytes, "tables": tables_included})
-        rows = self._fetch_all(f"SELECT * FROM backup_records WHERE id = {p}", (new_id,)) if new_id else []
+        self.record_audit_log(
+            created_by,
+            "create_backup",
+            "backup",
+            label or file_path,
+            {"size": file_size_bytes, "tables": tables_included},
+        )
+        rows = (
+            self._fetch_all(f"SELECT * FROM backup_records WHERE id = {p}", (new_id,))
+            if new_id
+            else []
+        )
         return rows[0] if rows else {"file_path": file_path, "label": label}
 
     def list_backup_records(self, limit: int = 20) -> list[dict[str, Any]]:
-        rows = self._fetch_all(f"SELECT * FROM backup_records ORDER BY created_at DESC LIMIT {int(limit)}")
+        rows = self._fetch_all(
+            f"SELECT * FROM backup_records ORDER BY created_at DESC LIMIT {int(limit)}"
+        )
         for row in rows:
             try:
                 row["tables_included"] = json.loads(str(row.get("tables_included", "[]")))
@@ -2227,7 +2493,7 @@ class PlatformRepository:
     # Health check
     # ========================================================================
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         """Check database connectivity and return status."""
         try:
             with self._connect() as connection:
@@ -2242,7 +2508,7 @@ class PlatformRepository:
     # ========================================================================
 
     @staticmethod
-    def _normalize_incident_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_incident_row(row: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(row)
         normalized.setdefault("incident_status", normalized.get("status"))
         normalized.setdefault("resolved_at", normalized.get("resolved_timestamp"))
@@ -2261,7 +2527,7 @@ class PlatformRepository:
         return normalized
 
     @staticmethod
-    def _normalize_transition_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    def _normalize_transition_row(row: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(row)
         try:
             normalized["details"] = json.loads(str(normalized.get("details", "{}")))
@@ -2269,7 +2535,7 @@ class PlatformRepository:
             normalized["details"] = {}
         return normalized
 
-    def _normalize_target(self, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    def _normalize_target(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         target_type = str(payload.get("target_type", payload.get("type", ""))).strip().lower()
         if target_type not in MONITORING_TARGET_TYPES:
             raise ValueError("target_type must be http, tcp, or ssl")

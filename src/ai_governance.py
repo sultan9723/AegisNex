@@ -933,7 +933,7 @@ class GovernanceManager:
         if not fields:
             return False
         set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = list(fields.values()) + [self._tenant(tenant_id), action_id]
+        values = [*list(fields.values()), self._tenant(tenant_id), action_id]
         with self._connect() as connection:
             cursor = connection.execute(
                 f"UPDATE agent_actions SET {set_clause} WHERE tenant_id = ? AND action_id = ?",

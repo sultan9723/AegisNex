@@ -102,6 +102,7 @@ export default function LandingPage() {
             <div className="flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
               {demoEnabled ? (
                 <button
+                  type="button"
                   onClick={handleDemoLogin}
                   disabled={demoLoading}
                   className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-7 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"
@@ -240,6 +241,7 @@ export default function LandingPage() {
               </p>
               {demoEnabled ? (
                 <button
+                  type="button"
                   onClick={handleDemoLogin}
                   disabled={demoLoading}
                   className="group inline-flex h-12 items-center gap-2.5 rounded-xl bg-primary px-8 text-[13px] font-semibold text-white shadow-sm shadow-primary/20 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50"

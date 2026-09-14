@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+import asyncio
+import inspect
 import json
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from uuid import uuid4
 
 from src.notifications.base import NotificationProvider, NotificationResult
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -24,26 +26,26 @@ class Incident:
     service_name: str
     incident_type: str
     description: str
-    health_check_results: List[Dict[str, Any]]
+    health_check_results: list[dict[str, Any]]
     remediation_attempted: bool
     remediation_successful: bool
     status: str
-    acknowledged_by: Optional[str] = None
-    acknowledged_at: Optional[str] = None
-    resolved_by: Optional[str] = None
-    resolved_timestamp: Optional[str] = None
-    resolution_notes: Optional[str] = None
-    proposed_remediation: Optional[Dict[str, Any]] = None
-    remediation_proposed_by: Optional[str] = None
-    remediation_proposed_at: Optional[str] = None
-    remediation_approval_status: Optional[str] = None
-    remediation_plan_confidence: Optional[float] = None
-    org_id: Optional[int] = None
-    org_name: Optional[str] = None
-    remediation_history: List[Dict[str, Any]] | None = None
+    acknowledged_by: str | None = None
+    acknowledged_at: str | None = None
+    resolved_by: str | None = None
+    resolved_timestamp: str | None = None
+    resolution_notes: str | None = None
+    proposed_remediation: dict[str, Any] | None = None
+    remediation_proposed_by: str | None = None
+    remediation_proposed_at: str | None = None
+    remediation_approval_status: str | None = None
+    remediation_plan_confidence: float | None = None
+    org_id: int | None = None
+    org_name: str | None = None
+    remediation_history: list[dict[str, Any]] | None = None
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "Incident":
+    def from_dict(cls, payload: dict[str, Any]) -> Incident:
         status = str(payload.get("incident_status", payload.get("status", "active")))
         return cls(
             incident_id=str(payload["incident_id"]),
@@ -71,7 +73,7 @@ class Incident:
             remediation_history=list(payload.get("remediation_history") or []),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["incident_status"] = self.status
         payload["resolved_at"] = self.resolved_timestamp
@@ -86,11 +88,11 @@ class Incident:
         self.status = value
 
     @property
-    def resolved_at(self) -> Optional[str]:
+    def resolved_at(self) -> str | None:
         return self.resolved_timestamp
 
     @resolved_at.setter
-    def resolved_at(self, value: Optional[str]) -> None:
+    def resolved_at(self, value: str | None) -> None:
         self.resolved_timestamp = value
 
 
@@ -98,18 +100,33 @@ class IncidentManager:
     def __init__(
         self,
         history_path: str | Path = "incident_history.json",
-        notification_providers: Optional[List[NotificationProvider]] = None,
+        notification_providers: list[NotificationProvider] | None = None,
         notification_history_path: str | Path = "notification_history.json",
         storage_repository: Any | None = None,
-        broadcast_callback: Optional[Any] = None,
+        broadcast_callback: Any | None = None,
     ) -> None:
         self.history_path = Path(history_path)
         self.notification_history_path = Path(notification_history_path)
         self.notification_providers = notification_providers or []
         self.storage_repository = storage_repository
         self.broadcast_callback = broadcast_callback
-        self.incidents: List[Incident] = self._load_incidents()
-        self.notification_events: List[Dict[str, Any]] = self._load_notification_events()
+        self.incidents: list[Incident] = self._load_incidents()
+        self.notification_events: list[dict[str, Any]] = self._load_notification_events()
+
+    def _broadcast_incident_event(self, event_type: str, incident: Incident) -> None:
+        if not self.broadcast_callback:
+            return
+        try:
+            result = self.broadcast_callback(event_type, incident.to_dict())
+            if inspect.isawaitable(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(result)
+                else:
+                    loop.create_task(result)
+        except Exception:
+            pass
 
     def create_incident(
         self,
@@ -117,7 +134,7 @@ class IncidentManager:
         service_name: str,
         incident_type: str,
         description: str,
-        health_check_results: Optional[List[Dict[str, Any]]] = None,
+        health_check_results: list[dict[str, Any]] | None = None,
     ) -> Incident:
         existing = self._find_active(service_name, incident_type)
         if existing:
@@ -183,7 +200,9 @@ class IncidentManager:
         incident.resolved_timestamp = None
         self._save_incidents()
         self._save_incident_to_storage(incident)
-        self._record_transition(incident, previous_status, incident.status, actor, {"reason": "acknowledged"})
+        self._record_transition(
+            incident, previous_status, incident.status, actor, {"reason": "acknowledged"}
+        )
         return incident
 
     def resolve_incident(
@@ -200,7 +219,13 @@ class IncidentManager:
         incident.resolution_notes = resolution_notes
         self._save_incidents()
         self._save_incident_to_storage(incident)
-        self._record_transition(incident, previous_status, incident.status, actor, {"reason": "resolved", "resolution_notes": resolution_notes})
+        self._record_transition(
+            incident,
+            previous_status,
+            incident.status,
+            actor,
+            {"reason": "resolved", "resolution_notes": resolution_notes},
+        )
         self._notify_resolved(incident)
         return incident
 
@@ -215,13 +240,15 @@ class IncidentManager:
         incident.resolution_notes = None
         self._save_incidents()
         self._save_incident_to_storage(incident)
-        self._record_transition(incident, previous_status, incident.status, actor, {"reason": "reopened"})
+        self._record_transition(
+            incident, previous_status, incident.status, actor, {"reason": "reopened"}
+        )
         return incident
 
     def propose_remediation(
         self,
         incident_id: str,
-        plan: Dict[str, Any],
+        plan: dict[str, Any],
         proposed_by: str = "system",
         confidence: float = 0.0,
     ) -> Incident:
@@ -251,7 +278,10 @@ class IncidentManager:
         return incident
 
     def record_remediation_decision(
-        self, incident_id: str, decision: str, reviewed_by: str = "system",
+        self,
+        incident_id: str,
+        decision: str,
+        reviewed_by: str = "system",
     ) -> Incident:
         """Reflect a real human approve/reject decision on the incident.
 
@@ -276,9 +306,9 @@ class IncidentManager:
     def record_diagnostic_evidence(
         self,
         incident_id: str,
-        evidence_packet: Dict[str, Any],
+        evidence_packet: dict[str, Any],
         actor: str = "system",
-        incident_snapshot: Dict[str, Any] | None = None,
+        incident_snapshot: dict[str, Any] | None = None,
         approval_id: str | None = None,
     ) -> Incident:
         """Persist one approved, read-only diagnostic evidence packet."""
@@ -292,9 +322,7 @@ class IncidentManager:
 
         history = list(incident.remediation_history or [])
         if approval_id and any(
-            entry.get("approval_id") == approval_id
-            for entry in history
-            if isinstance(entry, dict)
+            entry.get("approval_id") == approval_id for entry in history if isinstance(entry, dict)
         ):
             return incident
         history.append(
@@ -347,8 +375,8 @@ class IncidentManager:
         service_name: str,
         actor: str = "system",
         resolution_notes: str | None = None,
-    ) -> List[Incident]:
-        resolved: List[Incident] = []
+    ) -> list[Incident]:
+        resolved: list[Incident] = []
         for incident in self.get_active_incidents():
             if incident.service_name == service_name:
                 resolved.append(
@@ -360,25 +388,20 @@ class IncidentManager:
                 )
         return resolved
 
-    def list_incidents(self) -> List[Incident]:
+    def list_incidents(self) -> list[Incident]:
         return list(self.incidents)
 
-    def get_active_incidents(self) -> List[Incident]:
+    def get_active_incidents(self) -> list[Incident]:
         return [
-            incident
-            for incident in self.incidents
-            if incident.status in {"active", "acknowledged"}
+            incident for incident in self.incidents if incident.status in {"active", "acknowledged"}
         ]
 
-    def list_notification_events(self) -> List[Dict[str, Any]]:
+    def list_notification_events(self) -> list[dict[str, Any]]:
         return list(self.notification_events)
 
-    def _find_active(self, service_name: str, incident_type: str) -> Optional[Incident]:
+    def _find_active(self, service_name: str, incident_type: str) -> Incident | None:
         for incident in self.get_active_incidents():
-            if (
-                incident.service_name == service_name
-                and incident.incident_type == incident_type
-            ):
+            if incident.service_name == service_name and incident.incident_type == incident_type:
                 return incident
         return None
 
@@ -394,7 +417,7 @@ class IncidentManager:
         from_status: str | None,
         to_status: str,
         actor: str,
-        details: Dict[str, Any] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         if not self.storage_repository:
             return
@@ -419,7 +442,7 @@ class IncidentManager:
                 },
             )
 
-    def _load_incidents(self) -> List[Incident]:
+    def _load_incidents(self) -> list[Incident]:
         if not self.history_path.exists():
             return []
         try:
@@ -428,7 +451,7 @@ class IncidentManager:
             return []
         if not isinstance(payload, list):
             return []
-        incidents: List[Incident] = []
+        incidents: list[Incident] = []
         for item in payload:
             if isinstance(item, dict):
                 try:
@@ -451,39 +474,27 @@ class IncidentManager:
         if self.storage_repository:
             self.storage_repository.save_incident(incident)
 
-    def _notify_created(self, incident: Incident) -> List[NotificationResult]:
+    def _notify_created(self, incident: Incident) -> list[NotificationResult]:
         results = [
-            provider.notify_incident_created(incident)
-            for provider in self.notification_providers
+            provider.notify_incident_created(incident) for provider in self.notification_providers
         ]
         self._record_notification_results("incident_created", incident, results)
-        if self.broadcast_callback:
-            try:
-                import asyncio
-                asyncio.ensure_future(self.broadcast_callback("incident_created", incident.to_dict()))
-            except Exception:
-                pass
+        self._broadcast_incident_event("incident_created", incident)
         return results
 
-    def _notify_resolved(self, incident: Incident) -> List[NotificationResult]:
+    def _notify_resolved(self, incident: Incident) -> list[NotificationResult]:
         results = [
-            provider.notify_incident_resolved(incident)
-            for provider in self.notification_providers
+            provider.notify_incident_resolved(incident) for provider in self.notification_providers
         ]
         self._record_notification_results("incident_resolved", incident, results)
-        if self.broadcast_callback:
-            try:
-                import asyncio
-                asyncio.ensure_future(self.broadcast_callback("incident_resolved", incident.to_dict()))
-            except Exception:
-                pass
+        self._broadcast_incident_event("incident_resolved", incident)
         return results
 
     def _record_notification_results(
         self,
         event_type: str,
         incident: Incident,
-        results: List[NotificationResult],
+        results: list[NotificationResult],
     ) -> None:
         if not results:
             return
@@ -503,13 +514,11 @@ class IncidentManager:
                 self.storage_repository.save_notification_event(event)
         self._save_notification_events()
 
-    def _load_notification_events(self) -> List[Dict[str, Any]]:
+    def _load_notification_events(self) -> list[dict[str, Any]]:
         if not self.notification_history_path.exists():
             return []
         try:
-            payload = json.loads(
-                self.notification_history_path.read_text(encoding="utf-8")
-            )
+            payload = json.loads(self.notification_history_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
         if not isinstance(payload, list):

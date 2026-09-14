@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import os
 import base64
+import os
 from typing import Any
 
 from cryptography.fernet import Fernet
@@ -26,7 +25,7 @@ class SecretManager:
         if not secret_key:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY environment variable is required for secret management. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         stripped = secret_key.strip().encode("ascii")
         try:
@@ -34,12 +33,12 @@ class SecretManager:
         except Exception as exc:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY must be a valid base64url-encoded Fernet key. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             ) from exc
         if len(key_bytes) != 32:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY must decode to exactly 32 bytes (a valid Fernet key). "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         return base64.urlsafe_b64encode(key_bytes)
 
@@ -59,7 +58,9 @@ class SecretManager:
         f = self._get_fernet()
         return f.decrypt(ciphertext.encode("ascii")).decode("utf-8")
 
-    def store_secret(self, name: str, value: str, category: str = "generic", actor: str = "system") -> dict[str, Any]:
+    def store_secret(
+        self, name: str, value: str, category: str = "generic", actor: str = "system"
+    ) -> dict[str, Any]:
         """Encrypt and store a secret in the database."""
         encrypted = self.encrypt(value)
         if self._repo is not None and hasattr(self._repo, "upsert_secret"):

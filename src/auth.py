@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import enum
 import hashlib
 import hmac
 import json
 import logging
 import os
-from pathlib import Path
 import secrets
 import sqlite3
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
 _logger = logging.getLogger(__name__)
+
+import contextlib
 
 import jwt as pyjwt
 
@@ -26,6 +28,7 @@ from src.session import SessionStore
 try:
     import hashlib as _hashlib
     import secrets as _secrets
+
     _HAVE_HASH = True
 except ImportError:
     _HAVE_HASH = False
@@ -51,7 +54,7 @@ def hash_api_key(key: str) -> str:
 
 
 def utc_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 class Role(enum.Enum):
@@ -73,7 +76,7 @@ class Role(enum.Enum):
         }[self.value]
 
     @staticmethod
-    def from_str(value: str) -> "Role":
+    def from_str(value: str) -> Role:
         normalized = value.strip().lower()
         mapping = {
             "admin": Role.ADMINISTRATOR,
@@ -153,10 +156,8 @@ class TokenBlacklist:
         _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -172,7 +173,7 @@ class TokenBlacklist:
             )
         # Warm the cache from DB
         with self._connect() as connection:
-            now = int(datetime.now(timezone.utc).timestamp())
+            now = int(datetime.now(UTC).timestamp())
             connection.execute("DELETE FROM token_blacklist WHERE expires_at < ?", (now,))
             rows = connection.execute(
                 "SELECT jti FROM token_blacklist WHERE expires_at >= ?", (now,)
@@ -213,10 +214,8 @@ class UserStore:
         _logger.debug("UserStore opening connection to %s", self.database_path)
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             connection.execute("PRAGMA busy_timeout=10000")
-        except sqlite3.OperationalError:
-            pass
         return connection
 
     def _initialize(self) -> None:
@@ -239,15 +238,24 @@ class UserStore:
                 """
             )
             # Add columns if migrating from old schema
-            existing = {str(row["name"]) for row in connection.execute("PRAGMA table_info(users)").fetchall()}
+            existing = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(users)").fetchall()
+            }
             if "role" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'"
+                )
             if "display_name" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+                )
             if "last_login" not in existing:
                 connection.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
             if "mfa_enabled" not in existing:
-                connection.execute("ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0")
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS external_identities (
@@ -568,7 +576,7 @@ class AuthManager:
         self.session_store = session_store
 
     def create_access_token(self, user: User) -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         jti = secrets.token_hex(16)
         payload = {
             "sub": str(user.id),
@@ -584,7 +592,7 @@ class AuthManager:
         return pyjwt.encode(payload, self.jwt_secret, algorithm="HS256")
 
     def create_refresh_token(self, user: User) -> str:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         jti = secrets.token_hex(16)
         payload = {
             "sub": str(user.id),
@@ -760,7 +768,9 @@ class AuthManager:
             )
             new_jti = new_payload.get("jti", "")
             new_exp = new_payload.get("exp", 0)
-            new_expires_at = datetime.fromtimestamp(new_exp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            new_expires_at = (
+                datetime.fromtimestamp(new_exp, tz=UTC).isoformat().replace("+00:00", "Z")
+            )
             self.session_store.rotate_refresh_token(jti, new_jti, new_expires_at)
 
         return new_access, new_refresh
@@ -866,10 +876,12 @@ async def parse_form_body(request: Any) -> dict[str, str]:
 
 def b64url_encode(value: bytes) -> str:
     import base64
+
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
 def b64url_decode(value: str) -> bytes:
     import base64
+
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode(value + padding)

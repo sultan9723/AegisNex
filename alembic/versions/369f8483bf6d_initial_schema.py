@@ -1,224 +1,235 @@
 """initial_schema
 
 Revision ID: 369f8483bf6d
-Revises: 
+Revises:
 Create Date: 2026-06-23 00:36:47.000000
 
 """
+
 from typing import Sequence, Union
 
+import sqlalchemy as sa
+from alembic import context
 from alembic import op
 
 
 # revision identifiers, used by Alembic.
-revision: str = '369f8483bf6d'
+revision: str = "369f8483bf6d"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-CREATE_USERS = """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
-    hashed_password TEXT NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    is_superuser INTEGER NOT NULL DEFAULT 0,
-    is_verified INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
-)
-"""
+def _table_exists(table_name: str) -> bool:
+    if context.is_offline_mode():
+        return False
+    inspector = sa.inspect(op.get_bind())
+    return table_name in inspector.get_table_names()
 
-CREATE_MONITORING_TARGETS = """
-CREATE TABLE IF NOT EXISTS monitoring_targets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    target_type TEXT NOT NULL,
-    address TEXT NOT NULL,
-    expected_status INTEGER,
-    timeout_seconds INTEGER NOT NULL DEFAULT 5,
-    warning_days INTEGER NOT NULL DEFAULT 30,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    last_error TEXT,
-    last_status_code INTEGER,
-    last_response_time_ms REAL,
-    last_successful_check_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    incident_status TEXT,
-    acknowledged_by TEXT,
-    acknowledged_at TEXT,
-    resolved_by TEXT,
-    resolved_at TEXT,
-    resolution_notes TEXT
-)
-"""
 
-CREATE_CHECK_RESULTS = """
-CREATE TABLE IF NOT EXISTS check_results (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target_id INTEGER,
-    target_name TEXT NOT NULL,
-    target_type TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    status TEXT NOT NULL,
-    latency_ms REAL,
-    details TEXT NOT NULL
-)
-"""
+def _create_table_if_missing(table_name: str, *columns: sa.Column) -> None:
+    if _table_exists(table_name):
+        return
+    op.create_table(table_name, *columns)
 
-CREATE_INCIDENTS = """
-CREATE TABLE IF NOT EXISTS incidents (
-    incident_id TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    service_name TEXT NOT NULL,
-    incident_type TEXT NOT NULL,
-    description TEXT NOT NULL,
-    health_check_results TEXT NOT NULL,
-    remediation_attempted INTEGER NOT NULL DEFAULT 0,
-    remediation_successful INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL,
-    incident_status TEXT NOT NULL DEFAULT 'active',
-    acknowledged_by TEXT,
-    acknowledged_at TEXT,
-    resolved_by TEXT,
-    resolved_at TEXT,
-    resolved_timestamp TEXT,
-    resolution_notes TEXT
-)
-"""
 
-CREATE_NOTIFICATIONS = """
-CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    incident_id TEXT NOT NULL,
-    service_name TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    status TEXT NOT NULL,
-    attempts INTEGER NOT NULL,
-    message TEXT NOT NULL
-)
-"""
-
-CREATE_REMEDIATION_ACTIONS = """
-CREATE TABLE IF NOT EXISTS remediation_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    service_name TEXT NOT NULL,
-    action TEXT NOT NULL,
-    successful INTEGER NOT NULL,
-    incident_id TEXT,
-    details TEXT NOT NULL
-)
-"""
-
-CREATE_INCIDENT_TRANSITIONS = """
-CREATE TABLE IF NOT EXISTS incident_transitions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    incident_id TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    from_status TEXT,
-    to_status TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    details TEXT NOT NULL
-)
-"""
-
-CREATE_AUDIT_LOGS = """
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    action TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT NOT NULL,
-    details TEXT NOT NULL
-)
-"""
-
-CREATE_METRICS_SNAPSHOTS = """
-CREATE TABLE IF NOT EXISTS metrics_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    cpu_percent REAL NOT NULL,
-    memory_percent REAL NOT NULL,
-    disk_percent REAL NOT NULL,
-    network_bytes_sent REAL NOT NULL,
-    network_bytes_received REAL NOT NULL,
-    running_containers REAL NOT NULL,
-    stopped_containers REAL NOT NULL,
-    unhealthy_containers REAL NOT NULL,
-    active_incidents REAL NOT NULL,
-    resolved_incidents REAL NOT NULL,
-    total_incidents REAL NOT NULL,
-    restart_attempts REAL NOT NULL,
-    successful_restarts REAL NOT NULL,
-    failed_restarts REAL NOT NULL,
-    notifications_sent REAL NOT NULL,
-    notifications_failed REAL NOT NULL
-)
-"""
-
-CREATE_REPORTS = """
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    report_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    path TEXT NOT NULL,
-    summary TEXT NOT NULL
-)
-"""
-
-INDEX_CHECK_RESULTS_TARGET_ID = "CREATE INDEX IF NOT EXISTS ix_check_results_target_id ON check_results (target_id)"
-INDEX_CHECK_RESULTS_TIMESTAMP = "CREATE INDEX IF NOT EXISTS ix_check_results_timestamp ON check_results (timestamp)"
-INDEX_INCIDENTS_TIMESTAMP = "CREATE INDEX IF NOT EXISTS ix_incidents_timestamp ON incidents (timestamp)"
-INDEX_INCIDENTS_STATUS = "CREATE INDEX IF NOT EXISTS ix_incidents_incident_status ON incidents (incident_status)"
-INDEX_METRICS_TIMESTAMP = "CREATE INDEX IF NOT EXISTS ix_metrics_snapshots_timestamp ON metrics_snapshots (timestamp)"
-INDEX_AUDIT_LOGS_TIMESTAMP = "CREATE INDEX IF NOT EXISTS ix_audit_logs_timestamp ON audit_logs (timestamp)"
-
-MIGRATE_INCIDENTS_STATUS = "UPDATE incidents SET incident_status = status WHERE incident_status IS NULL"
-MIGRATE_INCIDENTS_RESOLVED = "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL"
+def _integer_pk() -> sa.Column:
+    return sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True)
 
 
 def upgrade() -> None:
     """Create the initial AegisNex schema with indexes."""
-    op.execute(CREATE_USERS)
-    op.execute(CREATE_MONITORING_TARGETS)
-    op.execute(CREATE_CHECK_RESULTS)
-    op.execute(CREATE_INCIDENTS)
-    op.execute(CREATE_NOTIFICATIONS)
-    op.execute(CREATE_REMEDIATION_ACTIONS)
-    op.execute(CREATE_INCIDENT_TRANSITIONS)
-    op.execute(CREATE_AUDIT_LOGS)
-    op.execute(CREATE_METRICS_SNAPSHOTS)
-    op.execute(CREATE_REPORTS)
+    _create_table_if_missing(
+        "users",
+        _integer_pk(),
+        sa.Column("email", sa.Text(), nullable=False, unique=True),
+        sa.Column("hashed_password", sa.Text(), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("is_superuser", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("is_verified", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("created_at", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "monitoring_targets",
+        _integer_pk(),
+        sa.Column("name", sa.Text(), nullable=False, unique=True),
+        sa.Column("target_type", sa.Text(), nullable=False),
+        sa.Column("address", sa.Text(), nullable=False),
+        sa.Column("expected_status", sa.Integer(), nullable=True),
+        sa.Column("timeout_seconds", sa.Integer(), nullable=False, server_default="5"),
+        sa.Column("warning_days", sa.Integer(), nullable=False, server_default="30"),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("last_status_code", sa.Integer(), nullable=True),
+        sa.Column("last_response_time_ms", sa.Float(), nullable=True),
+        sa.Column("last_successful_check_at", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.Text(), nullable=False),
+        sa.Column("updated_at", sa.Text(), nullable=False),
+        sa.Column("incident_status", sa.Text(), nullable=True),
+        sa.Column("acknowledged_by", sa.Text(), nullable=True),
+        sa.Column("acknowledged_at", sa.Text(), nullable=True),
+        sa.Column("resolved_by", sa.Text(), nullable=True),
+        sa.Column("resolved_at", sa.Text(), nullable=True),
+        sa.Column("resolution_notes", sa.Text(), nullable=True),
+    )
+    _create_table_if_missing(
+        "check_results",
+        _integer_pk(),
+        sa.Column("target_id", sa.Integer(), nullable=True),
+        sa.Column("target_name", sa.Text(), nullable=False),
+        sa.Column("target_type", sa.Text(), nullable=False),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("latency_ms", sa.Float(), nullable=True),
+        sa.Column("details", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "incidents",
+        sa.Column("incident_id", sa.Text(), primary_key=True),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("severity", sa.Text(), nullable=False),
+        sa.Column("service_name", sa.Text(), nullable=False),
+        sa.Column("incident_type", sa.Text(), nullable=False),
+        sa.Column("description", sa.Text(), nullable=False),
+        sa.Column("health_check_results", sa.Text(), nullable=False),
+        sa.Column("remediation_attempted", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("remediation_successful", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("incident_status", sa.Text(), nullable=False, server_default="active"),
+        sa.Column("acknowledged_by", sa.Text(), nullable=True),
+        sa.Column("acknowledged_at", sa.Text(), nullable=True),
+        sa.Column("resolved_by", sa.Text(), nullable=True),
+        sa.Column("resolved_at", sa.Text(), nullable=True),
+        sa.Column("resolved_timestamp", sa.Text(), nullable=True),
+        sa.Column("resolution_notes", sa.Text(), nullable=True),
+    )
+    _create_table_if_missing(
+        "notifications",
+        _integer_pk(),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("event_type", sa.Text(), nullable=False),
+        sa.Column("incident_id", sa.Text(), nullable=False),
+        sa.Column("service_name", sa.Text(), nullable=False),
+        sa.Column("provider", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("attempts", sa.Integer(), nullable=False),
+        sa.Column("message", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "remediation_actions",
+        _integer_pk(),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("service_name", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
+        sa.Column("successful", sa.Boolean(), nullable=False),
+        sa.Column("incident_id", sa.Text(), nullable=True),
+        sa.Column("details", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "incident_transitions",
+        _integer_pk(),
+        sa.Column("incident_id", sa.Text(), nullable=False),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("from_status", sa.Text(), nullable=True),
+        sa.Column("to_status", sa.Text(), nullable=False),
+        sa.Column("actor", sa.Text(), nullable=False),
+        sa.Column("details", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "audit_logs",
+        _integer_pk(),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("actor", sa.Text(), nullable=False),
+        sa.Column("action", sa.Text(), nullable=False),
+        sa.Column("resource_type", sa.Text(), nullable=False),
+        sa.Column("resource_id", sa.Text(), nullable=False),
+        sa.Column("details", sa.Text(), nullable=False),
+    )
+    _create_table_if_missing(
+        "metrics_snapshots",
+        _integer_pk(),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("cpu_percent", sa.Float(), nullable=False),
+        sa.Column("memory_percent", sa.Float(), nullable=False),
+        sa.Column("disk_percent", sa.Float(), nullable=False),
+        sa.Column("network_bytes_sent", sa.Float(), nullable=False),
+        sa.Column("network_bytes_received", sa.Float(), nullable=False),
+        sa.Column("running_containers", sa.Float(), nullable=False),
+        sa.Column("stopped_containers", sa.Float(), nullable=False),
+        sa.Column("unhealthy_containers", sa.Float(), nullable=False),
+        sa.Column("active_incidents", sa.Float(), nullable=False),
+        sa.Column("resolved_incidents", sa.Float(), nullable=False),
+        sa.Column("total_incidents", sa.Float(), nullable=False),
+        sa.Column("restart_attempts", sa.Float(), nullable=False),
+        sa.Column("successful_restarts", sa.Float(), nullable=False),
+        sa.Column("failed_restarts", sa.Float(), nullable=False),
+        sa.Column("notifications_sent", sa.Float(), nullable=False),
+        sa.Column("notifications_failed", sa.Float(), nullable=False),
+    )
+    _create_table_if_missing(
+        "reports",
+        _integer_pk(),
+        sa.Column("timestamp", sa.Text(), nullable=False),
+        sa.Column("report_type", sa.Text(), nullable=False),
+        sa.Column("status", sa.Text(), nullable=False),
+        sa.Column("path", sa.Text(), nullable=False),
+        sa.Column("summary", sa.Text(), nullable=False),
+    )
 
-    # Indexes for common queries
-    op.execute(INDEX_CHECK_RESULTS_TARGET_ID)
-    op.execute(INDEX_CHECK_RESULTS_TIMESTAMP)
-    op.execute(INDEX_INCIDENTS_TIMESTAMP)
-    op.execute(INDEX_INCIDENTS_STATUS)
-    op.execute(INDEX_METRICS_TIMESTAMP)
-    op.execute(INDEX_AUDIT_LOGS_TIMESTAMP)
+    op.create_index(
+        "ix_check_results_target_id",
+        "check_results",
+        ["target_id"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "ix_check_results_timestamp",
+        "check_results",
+        ["timestamp"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "ix_incidents_timestamp",
+        "incidents",
+        ["timestamp"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "ix_incidents_incident_status",
+        "incidents",
+        ["incident_status"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "ix_metrics_snapshots_timestamp",
+        "metrics_snapshots",
+        ["timestamp"],
+        if_not_exists=True,
+    )
+    op.create_index(
+        "ix_audit_logs_timestamp",
+        "audit_logs",
+        ["timestamp"],
+        if_not_exists=True,
+    )
 
-    # Backfill legacy incident data if needed
-    op.execute(MIGRATE_INCIDENTS_STATUS)
-    op.execute(MIGRATE_INCIDENTS_RESOLVED)
+    # Backfill legacy incident data if needed.
+    op.execute("UPDATE incidents SET incident_status = status WHERE incident_status IS NULL")
+    op.execute(
+        "UPDATE incidents SET resolved_at = resolved_timestamp "
+        "WHERE resolved_timestamp IS NOT NULL"
+    )
 
 
 def downgrade() -> None:
     """Drop all tables created in upgrade."""
-    op.execute("DROP TABLE IF EXISTS reports")
-    op.execute("DROP TABLE IF EXISTS metrics_snapshots")
-    op.execute("DROP TABLE IF EXISTS audit_logs")
-    op.execute("DROP TABLE IF EXISTS incident_transitions")
-    op.execute("DROP TABLE IF EXISTS remediation_actions")
-    op.execute("DROP TABLE IF EXISTS notifications")
-    op.execute("DROP TABLE IF EXISTS incidents")
-    op.execute("DROP TABLE IF EXISTS check_results")
-    op.execute("DROP TABLE IF EXISTS monitoring_targets")
-    op.execute("DROP TABLE IF EXISTS users")
+    op.drop_table("reports", if_exists=True)
+    op.drop_table("metrics_snapshots", if_exists=True)
+    op.drop_table("audit_logs", if_exists=True)
+    op.drop_table("incident_transitions", if_exists=True)
+    op.drop_table("remediation_actions", if_exists=True)
+    op.drop_table("notifications", if_exists=True)
+    op.drop_table("incidents", if_exists=True)
+    op.drop_table("check_results", if_exists=True)
+    op.drop_table("monitoring_targets", if_exists=True)
+    op.drop_table("users", if_exists=True)
