@@ -1718,7 +1718,7 @@ class WorkforceManager:
                 prompts = self.list_prompt_versions(agent_id=agent_id, name="system_prompt")
                 system_prompt = prompt_override or (prompts[0].content if prompts else "")
                 live_provider = provider or create_provider(agent.provider)
-                if agent.model and getattr(live_provider, "config", None):
+                if agent.model:
                     live_provider.config.model = agent.model
                 rag = RAGEngine(provider=live_provider, repo=repo or self.repo)
                 context = ""

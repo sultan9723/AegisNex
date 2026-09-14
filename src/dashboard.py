@@ -8,15 +8,14 @@ import os
 import platform
 import re
 import secrets
-import sys
+import socket
 import time
 import uuid
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -24,6 +23,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.responses import RedirectResponse as StarletteRedirect
 
+from src.agents.orchestrator import AgentOrchestrator
 from src.auth import AuthError, AuthManager, Role, User, parse_form_body
 from src.config import Config
 from src.docker_scanner import DockerScanner
@@ -54,11 +54,6 @@ except ModuleNotFoundError:
     WebSocket = Any
     WebSocketDisconnect = Exception
 
-try:
-    from src.agents.orchestrator import AgentOrchestrator
-except ImportError:
-    AgentOrchestrator = Any  # type: ignore[misc,assignment]
-
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = BASE_DIR / "templates"
@@ -78,10 +73,8 @@ REALTIME_EVENT_TYPES = {
     "metric_update",
     "incident_created",
     "incident_resolved",
-    "incident_explained",
     "remediation_executed",
     "container_status_changed",
-    "agent_activity",
 }
 DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS = 5.0
 
@@ -94,11 +87,13 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-        if environment not in {"development", "dev", "local", "test"} and (
-            request.url.scheme != "https" and request.headers.get("x-forwarded-proto") != "https"
-        ):
-            url = request.url.replace(scheme="https")
-            return StarletteRedirect(url=url, status_code=301)
+        if environment not in {"development", "dev", "local", "test"}:
+            if (
+                request.url.scheme != "https"
+                and request.headers.get("x-forwarded-proto") != "https"
+            ):
+                url = request.url.replace(scheme="https")
+                return StarletteRedirect(url=url, status_code=301)
         return await call_next(request)
 
 
@@ -116,7 +111,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if environment not in {"development", "dev", "local", "test"}:
             response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
             response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:"
+                "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:"
             )
         return response
 
@@ -164,11 +159,15 @@ def require_auth(request: FastAPIRequest, auth_manager: AuthManager) -> User:
     return user
 
 
-def _websocket_token(websocket: Any) -> str | None:
-    """Extract a websocket bearer token from cookie or Authorization header only.
+def _websocket_token(websocket: Any, *, allow_query: bool = True) -> str | None:
+    """Extract a websocket bearer token from cookie, header, or query string.
 
-    Query string tokens are not accepted as they are logged in server access logs
-    and browser history, defeating secure token handling.
+    ``allow_query`` controls whether the opaque token may be supplied as a query
+    string parameter. Query-string tokens travel in URLs and can leak via logs,
+    referrers, and browser history; only allow them where a legacy client (e.g.
+    ``mission-control``) requires it. Dashboard-first websocket endpoints pass
+    ``allow_query=False`` so they exclusively accept ``Authorization`` headers or
+    cookies.
     """
     token = websocket.cookies.get("aegisnex_session")
     if token:
@@ -176,7 +175,20 @@ def _websocket_token(websocket: Any) -> str | None:
     auth_header = websocket.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         return auth_header[7:]
-    return None
+    if not allow_query:
+        return None
+    query_token = websocket.query_params.get("token") or websocket.query_params.get("access_token")
+    return query_token or None
+
+
+def _query_int(request: Any, name: str, default: int | None = None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 def _query_int(request: Any, name: str, default: int | None = None) -> int | None:
@@ -424,6 +436,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
     from src.tcp_monitor import TcpTargetMonitor
 
     config = Config.load(config_path)
+    notifier = NotifierCompat(build_notification_providers(config))
     monitor = SystemResourceMonitor(
         cpu_interval_seconds=config.monitoring.cpu_interval_seconds,
         thresholds=config.monitoring.thresholds,
@@ -441,11 +454,10 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
         storage_repository=platform_repository,
     )
     health_checker = SystemHealthChecker(monitor=monitor, docker_scanner=docker_scanner)
-    notification_providers = build_notification_providers(config)
     guardian = Guardian(
         health_checker=health_checker,
         docker_scanner=docker_scanner,
-        notifier=NotifierCompat(notification_providers),
+        notifier=notifier,
         restart_cooldown_seconds=config.guardian.restart_cooldown_seconds,
         max_restart_attempts=config.guardian.max_restart_attempts,
         restart_history_path=config.guardian.restart_history_path,
@@ -502,7 +514,7 @@ def create_services(config_path: str | Path = "config.yaml") -> DashboardService
     self_healing_engine = SelfHealingEngine(
         policy_engine=policy_engine,
         docker_scanner=docker_scanner,
-        notifier=NotifierCompat(notification_providers),
+        notifier=notifier,
         repository=platform_repository,
     )
     autonomous_pipeline = AutonomousPipeline(
@@ -535,28 +547,26 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _is_diagnostics_only_plan(plan: dict[str, Any]) -> bool:
-    if not isinstance(plan, dict):
-        return False
-    if plan.get("mode") != "diagnostics_only" or plan.get("read_only") is not True:
-        return False
-    actions = plan.get("actions", [])
-    if not isinstance(actions, list) or not actions:
-        return False
-    allowed_actions = {
-        "collect_incident_context",
-        "review_health_check_results",
-        "review_incident_timeline",
-        "prepare_evidence_packet",
-    }
-    for action in actions:
-        if not isinstance(action, dict):
-            return False
-        if action.get("action") not in allowed_actions:
-            return False
-        if action.get("destructive") is True or action.get("read_only") is not True:
-            return False
-    return True
+def is_local_environment() -> bool:
+    environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
+    return environment in {"development", "dev", "local", "test"}
+
+
+def get_frontend_base_url(default: str = "/") -> str:
+    configured = os.getenv("AEGISNEX_FRONTEND_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    if is_local_environment():
+        return "http://localhost:3000"
+    return default
+
+
+def frontend_redirect_url(path: str) -> str:
+    base = get_frontend_base_url("/")
+    clean_path = path if path.startswith("/") else f"/{path}"
+    if base == "/":
+        return clean_path
+    return f"{base}{clean_path}"
 
 
 def is_local_environment() -> bool:
@@ -584,11 +594,7 @@ def frontend_redirect_url(path: str) -> str:
 def get_cors_origins() -> List[str]:
     configured_origins = os.getenv("AEGISNEX_CORS_ORIGINS", "")
     if configured_origins.strip():
-        return [
-            origin.strip()
-            for origin in configured_origins.split(",")
-            if origin.strip()
-        ]
+        return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
     if is_local_environment():
         return DEVELOPMENT_CORS_ORIGINS
     return []
@@ -707,12 +713,6 @@ def storage_rows(services: DashboardServices, table_name: str) -> list[dict[str,
 
 
 def collect_http_monitoring(services: DashboardServices) -> dict[str, Any]:
-    repository = getattr(services, "platform_repository", None)
-    if repository is not None:
-        try:
-            return build_monitoring_summary(repository, "http")
-        except Exception:
-            pass
     return {
         "status": "disabled",
         "timestamp": utc_now(),
@@ -724,12 +724,6 @@ def collect_http_monitoring(services: DashboardServices) -> dict[str, Any]:
 
 
 def collect_ssl_monitoring(services: DashboardServices) -> dict[str, Any]:
-    repository = getattr(services, "platform_repository", None)
-    if repository is not None:
-        try:
-            return build_monitoring_summary(repository, "ssl")
-        except Exception:
-            pass
     return {
         "status": "disabled",
         "timestamp": utc_now(),
@@ -740,12 +734,6 @@ def collect_ssl_monitoring(services: DashboardServices) -> dict[str, Any]:
 
 
 def collect_tcp_monitoring(services: DashboardServices) -> dict[str, Any]:
-    repository = getattr(services, "platform_repository", None)
-    if repository is not None:
-        try:
-            return build_monitoring_summary(repository, "tcp")
-        except Exception:
-            pass
     return {
         "status": "disabled",
         "timestamp": utc_now(),
@@ -889,7 +877,7 @@ def build_recent_incidents(incidents: list[Incident], limit: int = 6) -> list[di
     return rows[:limit]
 
 
-def _parse_health_check_results(raw: Any) -> List[Dict[str, Any]]:
+def _parse_health_check_results(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, list):
         return raw
     if isinstance(raw, str) and raw:
@@ -901,7 +889,7 @@ def _parse_health_check_results(raw: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _incident_evidence(services: "DashboardServices", incident: Dict[str, Any]) -> Dict[str, Any]:
+def _incident_evidence(services: DashboardServices, incident: dict[str, Any]) -> dict[str, Any]:
     """Real, observed evidence for one incident - grounding for AI analysis.
 
     Contains nothing synthesized: every field is pulled directly from the
@@ -909,7 +897,7 @@ def _incident_evidence(services: "DashboardServices", incident: Dict[str, Any]) 
     """
     incident_id = str(incident.get("incident_id", ""))
     repo = services.platform_repository
-    timeline: List[Dict[str, Any]] = []
+    timeline: list[dict[str, Any]] = []
     if repo is not None:
         try:
             timeline = repo.list_incident_transitions(incident_id)
@@ -938,7 +926,7 @@ def _incident_evidence(services: "DashboardServices", incident: Dict[str, Any]) 
     }
 
 
-def _similar_incidents_for(repo: Any, incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _similar_incidents_for(repo: Any, incident: dict[str, Any]) -> list[dict[str, Any]]:
     """Other real incidents of the same type, most recent first. Empty if none exist."""
     if repo is None:
         return []
@@ -950,22 +938,25 @@ def _similar_incidents_for(repo: Any, incident: Dict[str, Any]) -> List[Dict[str
     except Exception:
         return []
     candidates = [
-        r for r in rows
+        r
+        for r in rows
         if str(r.get("incident_id")) != incident_id and r.get("incident_type") == incident_type
     ]
     candidates.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
     results = []
     for row in candidates[:3]:
         relevance = 1.0 if row.get("service_name") == service_name else 0.6
-        results.append({
-            "source": "incident_history",
-            "content": f"{row.get('service_name')}: {row.get('description') or row.get('incident_type')} ({row.get('incident_status', row.get('status'))})",
-            "relevance": relevance,
-        })
+        results.append(
+            {
+                "source": "incident_history",
+                "content": f"{row.get('service_name')}: {row.get('description') or row.get('incident_type')} ({row.get('incident_status', row.get('status'))})",
+                "relevance": relevance,
+            }
+        )
     return results
 
 
-def _relevant_runbooks_for(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _relevant_runbooks_for(incident: dict[str, Any]) -> list[dict[str, Any]]:
     """Runbooks whose name/category/tags match this incident's type or service.
 
     Reuses the existing runbook registry (src/intelligence/runbooks). Returns
@@ -974,6 +965,7 @@ def _relevant_runbooks_for(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     try:
         from src.intelligence.runbooks.registry import get_registry
+
         candidates = get_registry().list_all()
     except Exception:
         return []
@@ -990,7 +982,7 @@ def _relevant_runbooks_for(incident: Dict[str, Any]) -> List[Dict[str, Any]]:
     return matches[:3]
 
 
-def _incident_audit_context(repo: Any, incident_id: str) -> List[Dict[str, Any]]:
+def _incident_audit_context(repo: Any, incident_id: str) -> list[dict[str, Any]]:
     if repo is None:
         return []
     try:
@@ -998,7 +990,8 @@ def _incident_audit_context(repo: Any, incident_id: str) -> List[Dict[str, Any]]
     except Exception:
         return []
     matched = [
-        r for r in rows
+        r
+        for r in rows
         if str(r.get("resource_id")) == incident_id and r.get("resource_type") == "incident"
     ]
     matched.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
@@ -1008,7 +1001,7 @@ def _incident_audit_context(repo: Any, incident_id: str) -> List[Dict[str, Any]]
     ]
 
 
-def _evidence_confidence(evidence: Dict[str, Any]) -> float:
+def _evidence_confidence(evidence: dict[str, Any]) -> float:
     """Deterministic evidence-completeness heuristic, not a model-reported score.
 
     Deliberately conservative (capped at 0.9) since this never claims certainty.
@@ -1023,7 +1016,7 @@ def _evidence_confidence(evidence: Dict[str, Any]) -> float:
     return round(min(score, 0.9), 2)
 
 
-def _load_incident(services: "DashboardServices", incident_id: str) -> Dict[str, Any] | None:
+def _load_incident(services: DashboardServices, incident_id: str) -> dict[str, Any] | None:
     repo = services.platform_repository
     incident = repo.get_incident(incident_id) if repo is not None else None
     if incident is None:
@@ -1043,12 +1036,12 @@ _READ_ONLY_DIAGNOSTIC_ACTIONS = {
 
 
 def _execute_approved_diagnostics(
-    services: "DashboardServices",
+    services: DashboardServices,
     incident_id: str,
     approval_id: str,
     actor: str,
-    requested_actions: List[str],
-) -> Dict[str, Any]:
+    requested_actions: list[str],
+) -> dict[str, Any]:
     """Execute the approved diagnostics-only plan against one real incident."""
     incident = _load_incident(services, incident_id)
     if incident is None:
@@ -1064,7 +1057,9 @@ def _execute_approved_diagnostics(
         if isinstance(item, dict) and str(item.get("action", "")).strip()
     ]
     action_names = requested_actions or action_names
-    if not action_names or any(action not in _READ_ONLY_DIAGNOSTIC_ACTIONS for action in action_names):
+    if not action_names or any(
+        action not in _READ_ONLY_DIAGNOSTIC_ACTIONS for action in action_names
+    ):
         raise ValueError("Approval contains an unsupported diagnostic action")
     if "prepare_evidence_packet" not in action_names:
         raise ValueError("Diagnostic plan must include prepare_evidence_packet")
@@ -1100,7 +1095,7 @@ _POLICY_TO_GOVERNANCE_VERDICT = {
 }
 
 
-def _normalize_approval_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_approval_row(row: dict[str, Any]) -> dict[str, Any]:
     """approval_queue stores the reviewer note as review_comment; the
     frontend contract (ApprovalRequest.comment) expects `comment`."""
     normalized = dict(row)
@@ -1108,7 +1103,9 @@ def _normalize_approval_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _ensure_incident_ai_agent_registered(gov: Any, provider_name: str, model: str, tenant_id: str) -> None:
+def _ensure_incident_ai_agent_registered(
+    gov: Any, provider_name: str, model: str, tenant_id: str
+) -> None:
     """Idempotently register the real incident-AI agent identity in GovernanceManager.
 
     Not a fabricated persona: this is the actual code path (this file's
@@ -1118,6 +1115,7 @@ def _ensure_incident_ai_agent_registered(gov: Any, provider_name: str, model: st
     if gov.get_agent(INCIDENT_AI_GOVERNANCE_AGENT_ID, tenant_id=tenant_id) is not None:
         return
     from src.ai_governance import AIAgent
+
     gov.register_agent(
         AIAgent(
             agent_id=INCIDENT_AI_GOVERNANCE_AGENT_ID,
@@ -1137,7 +1135,11 @@ def _ensure_incident_ai_agent_registered(gov: Any, provider_name: str, model: st
     )
 
 
-def build_recent_remediations(storage_remediations: List[Dict[str, Any]], fallback_actions: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
+def build_recent_remediations(
+    storage_remediations: list[dict[str, Any]],
+    fallback_actions: list[dict[str, Any]],
+    limit: int = 6,
+) -> list[dict[str, Any]]:
     rows = storage_remediations or fallback_actions
     normalized = [
         {
@@ -1255,49 +1257,10 @@ def collect_dashboard_context(
         "http_monitoring": collect_http_monitoring(services),
         "ssl_monitoring": collect_ssl_monitoring(services),
         "tcp_monitoring": collect_tcp_monitoring(services),
-        "agent_activity": collect_agent_activity(services),
     }
     if cache is not None:
         cache.set_system_metrics(result)
     return result
-
-
-def collect_agent_activity(services: DashboardServices) -> dict[str, Any]:
-    """Collect recent agent activity for the dashboard."""
-    repo = getattr(services, "platform_repository", None)
-    recent_actions = []
-    active_agents = []
-    agent_stats = {"total_actions": 0, "success_rate": 0.0, "pending_approvals": 0}
-    try:
-        if repo is not None and hasattr(repo, "fetch_all"):
-            action_rows = repo.fetch_all("agent_actions", limit=10)
-            if isinstance(action_rows, list):
-                recent_actions = action_rows[:10]
-                agent_stats["total_actions"] = len(repo.fetch_all("agent_actions", limit=0))
-            agent_rows = repo.fetch_all("ai_agents", limit=0)
-            if isinstance(agent_rows, list):
-                active_agents = [a for a in agent_rows if a.get("status") == "active"][:5]
-                if agent_rows:
-                    successes = sum(1 for a in agent_rows if a.get("success_rate", 0) > 0.5)
-                    agent_stats["success_rate"] = successes / len(agent_rows) if agent_rows else 0.0
-    except Exception:
-        pass
-    try:
-        orchestrator = getattr(getattr(services, "_app", None), "state", None)
-        if orchestrator is not None:
-            orchestrator = getattr(orchestrator, "agent_orchestrator", None)
-            if orchestrator is not None and hasattr(orchestrator, "get_shared_state"):
-                shared = orchestrator.get_shared_state()
-                pending = shared.get("pending_approvals", [])
-                agent_stats["pending_approvals"] = len(pending) if isinstance(pending, list) else 0
-    except Exception:
-        pass
-    return {
-        "recent_actions": recent_actions,
-        "active_agents": active_agents,
-        "stats": agent_stats,
-        "timestamp": utc_now(),
-    }
 
 
 def build_dashboard_api_snapshot(context: dict[str, Any]) -> dict[str, Any]:
@@ -1345,10 +1308,6 @@ def build_dashboard_api_snapshot(context: dict[str, Any]) -> dict[str, Any]:
         "http_monitoring": context.get("http_monitoring", {"status": "disabled"}),
         "ssl_monitoring": context.get("ssl_monitoring", {"status": "disabled"}),
         "tcp_monitoring": context.get("tcp_monitoring", {"status": "disabled"}),
-        "agent_activity": context.get(
-            "agent_activity",
-            {"recent_actions": [], "active_agents": [], "stats": {}, "timestamp": ""},
-        ),
     }
 
 
@@ -1440,34 +1399,6 @@ async def run_dashboard_broadcaster(
                         },
                         channel="targets",
                     )
-                # Broadcast agent activity updates to /ws/dashboard channel
-                agent_activity = context.get("agent_activity", {})
-                if agent_activity.get("recent_actions"):
-                    await manager.broadcast_with_backoff(
-                        {
-                            "type": "agent_activity",
-                            "timestamp": context["timestamp"],
-                            "payload": agent_activity,
-                        }
-                    )
-                # Broadcast mission control execution updates
-                try:
-                    from src.mission_control import list_executions as mc_list_executions
-
-                    mc_repo = app.state.services.platform_repository
-                    if mc_repo is not None:
-                        mc_executions = mc_list_executions(mc_repo, limit=5)
-                        if mc_executions:
-                            await manager.broadcast_with_backoff(
-                                {
-                                    "type": "execution_update",
-                                    "timestamp": context["timestamp"],
-                                    "payload": {"executions": [e.to_dict() for e in mc_executions]},
-                                },
-                                channel="mission-control",
-                            )
-                except Exception:
-                    pass
                 manager.reset_failures()
                 previous_context = context
             else:
@@ -1531,7 +1462,11 @@ def build_integrations_context(services: DashboardServices) -> dict[str, Any]:
 
             config = getattr(services, "config", None)
             base = None
-            if config and hasattr(config, "integrations") and hasattr(config.integrations, "prometheus_url"):
+            if (
+                config
+                and hasattr(config, "integrations")
+                and hasattr(config.integrations, "prometheus_url")
+            ):
                 base = config.integrations.prometheus_url.rstrip("/")
             if not base:
                 base = os.getenv("AEGISNEX_PROMETHEUS_URL", "").strip().rstrip("/") or None
@@ -1643,61 +1578,54 @@ def build_integrations_context(services: DashboardServices) -> dict[str, Any]:
 
 
 def build_mcp_context() -> dict[str, Any]:
-    tools = [
-        {
-            "name": "get_system_health",
-            "description": "Current system and Docker health report.",
-            "example": '{"tool": "get_system_health"}',
-        },
-        {
-            "name": "list_containers",
-            "description": "List Docker containers.",
-            "example": '{"tool": "list_containers", "include_all": true}',
-        },
-        {
-            "name": "list_incidents",
-            "description": "List incidents by status.",
-            "example": '{"tool": "list_incidents", "status": "active"}',
-        },
-        {
-            "name": "get_metrics",
-            "description": "Current metrics snapshot.",
-            "example": '{"tool": "get_metrics"}',
-        },
-        {
-            "name": "get_http_monitoring",
-            "description": "HTTP endpoint status.",
-            "example": '{"tool": "get_http_monitoring"}',
-        },
-        {
-            "name": "get_ssl_monitoring",
-            "description": "SSL certificate status.",
-            "example": '{"tool": "get_ssl_monitoring"}',
-        },
-        {
-            "name": "get_tcp_monitoring",
-            "description": "TCP target status.",
-            "example": '{"tool": "get_tcp_monitoring"}',
-        },
-        {
-            "name": "generate_report",
-            "description": "Generate weekly or monthly report.",
-            "example": '{"tool": "generate_report", "report_type": "weekly"}',
-        },
-        {
-            "name": "restart_container",
-            "description": "Restart a Docker container.",
-            "example": '{"tool": "restart_container", "container_name": "api"}',
-        },
-    ]
-    try:
-        tools_info = []
-        for tool in tools:
-            tools_info.append(tool)
-    except Exception:
-        tools_info = tools
     return {
-        "mcp_tools": tools_info,
+        "mcp_tools": [
+            {
+                "name": "get_system_health",
+                "description": "Current system and Docker health report.",
+                "example": '{"tool": "get_system_health"}',
+            },
+            {
+                "name": "list_containers",
+                "description": "List Docker containers.",
+                "example": '{"tool": "list_containers", "include_all": true}',
+            },
+            {
+                "name": "list_incidents",
+                "description": "List incidents by status.",
+                "example": '{"tool": "list_incidents", "status": "active"}',
+            },
+            {
+                "name": "get_metrics",
+                "description": "Current metrics snapshot.",
+                "example": '{"tool": "get_metrics"}',
+            },
+            {
+                "name": "get_http_monitoring",
+                "description": "HTTP endpoint status.",
+                "example": '{"tool": "get_http_monitoring"}',
+            },
+            {
+                "name": "get_ssl_monitoring",
+                "description": "SSL certificate status.",
+                "example": '{"tool": "get_ssl_monitoring"}',
+            },
+            {
+                "name": "get_tcp_monitoring",
+                "description": "TCP target status.",
+                "example": '{"tool": "get_tcp_monitoring"}',
+            },
+            {
+                "name": "generate_report",
+                "description": "Generate weekly or monthly report.",
+                "example": '{"tool": "generate_report", "report_type": "weekly"}',
+            },
+            {
+                "name": "restart_container",
+                "description": "Restart a Docker container.",
+                "example": '{"tool": "restart_container", "container_name": "api"}',
+            },
+        ],
         "claude_config": json.dumps(
             {
                 "mcpServers": {
@@ -1714,37 +1642,20 @@ def build_mcp_context() -> dict[str, Any]:
 
 
 def build_reports_context(services: DashboardServices) -> dict[str, Any]:
-    reports = [
-        {
-            "name": "Weekly report",
-            "report_type": "weekly",
-            "payload": {"window": {"label": "Last 7 days"}},
-        },
-        {
-            "name": "Monthly report",
-            "report_type": "monthly",
-            "payload": {"window": {"label": "Last 30 days"}},
-        },
-    ]
-    try:
-        from src.reporting import OperationalReporter
-
-        repo = getattr(services, "platform_repository", None)
-        if repo is not None:
-            db_path = str(repo._sqlite_path()) if hasattr(repo, "_sqlite_path") else None
-            if db_path:
-                reporter = OperationalReporter(db_path)
-                available = []
-                if hasattr(reporter, "weekly_report"):
-                    available.append("weekly")
-                if hasattr(reporter, "monthly_report"):
-                    available.append("monthly")
-                if hasattr(reporter, "service_health_report"):
-                    available.append("service_health")
-                reports = [r for r in reports if r["report_type"] in available]
-    except Exception:
-        pass
-    return {"reports": reports}
+    return {
+        "reports": [
+            {
+                "name": "Weekly report",
+                "report_type": "weekly",
+                "payload": {"window": {"label": "Last 7 days"}},
+            },
+            {
+                "name": "Monthly report",
+                "report_type": "monthly",
+                "payload": {"window": {"label": "Last 30 days"}},
+            },
+        ]
+    }
 
 
 def build_notifications_context(services: DashboardServices) -> dict[str, Any]:
@@ -1835,9 +1746,13 @@ def create_app(
         # Set broadcast callback on incident manager
         im = getattr(fastapi_app.state.services, "incident_manager", None)
         if im is not None:
+            app_loop = asyncio.get_running_loop()
 
-            async def _incident_broadcast(event_type: str, payload: dict[str, Any]) -> None:
-                await incident_broadcast_task(fastapi_app, event_type, payload)
+            def _incident_broadcast(event_type: str, payload: dict[str, Any]) -> None:
+                asyncio.run_coroutine_threadsafe(
+                    incident_broadcast_task(fastapi_app, event_type, payload),
+                    app_loop,
+                )
 
             im.broadcast_callback = _incident_broadcast
 
@@ -1858,24 +1773,6 @@ def create_app(
 
         orchestrator = AgentOrchestrator(repo=fastapi_app.state.services.platform_repository)
         fastapi_app.state.agent_orchestrator = orchestrator
-
-        # Initialize AI Governance
-        from src.ai_governance import GovernanceManager
-        from src.governance_seed import seed_governance
-
-        governance = GovernanceManager(
-            database_path=(
-                fastapi_app.state.services.platform_repository.database_path
-                if getattr(fastapi_app.state.services, "platform_repository", None) is not None
-                else "aegisnex.db"
-            )
-        )
-        fastapi_app.state.governance = governance
-        try:
-            seed_counts = seed_governance(governance)
-            logger.info("Governance seed complete: %s", seed_counts)
-        except Exception:
-            logger.exception("Governance seeding failed (non-fatal)")
 
         # Start autonomous pipeline
         pipeline = getattr(fastapi_app.state.services, "autonomous_pipeline", None)
@@ -1914,7 +1811,10 @@ def create_app(
     from src.telemetry.collector import TelemetryCollector
     from src.telemetry.middleware import TelemetryMiddleware
 
-    telemetry_collector = TelemetryCollector(telemetry_db_path or "telemetry.db")
+    if not telemetry_db_path:
+        data_dir = os.getenv("AEGISNEX_DATA_DIR", "").strip()
+        telemetry_db_path = str(Path(data_dir) / "telemetry.db") if data_dir else "telemetry.db"
+    telemetry_collector = TelemetryCollector(telemetry_db_path)
     app.add_middleware(TelemetryMiddleware, collector=telemetry_collector)
     app.add_middleware(AuthModeMiddleware)
     app.state.limiter = limiter
@@ -1969,13 +1869,6 @@ def create_app(
     app.state.monitoring_engine_task = None
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-    # Include modular routers
-    from src.routers.auth import router as auth_router
-    from src.routers.monitoring import router as monitoring_router
-
-    app.include_router(auth_router)
-    app.include_router(monitoring_router)
 
     # ---- Helper functions ----
     def current_user(request: FastAPIRequest) -> Any:
@@ -2121,7 +2014,7 @@ def create_app(
     # ---- WebSocket ----
     @app.websocket("/ws/dashboard")
     async def dashboard_websocket(websocket: WebSocket) -> None:
-        token = _websocket_token(websocket)
+        token = _websocket_token(websocket, allow_query=False)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             await websocket.close(code=4001, reason="Authentication required")
             return
@@ -2144,7 +2037,7 @@ def create_app(
 
     @app.websocket("/ws/incidents")
     async def incidents_websocket(websocket: WebSocket) -> None:
-        token = _websocket_token(websocket)
+        token = _websocket_token(websocket, allow_query=False)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             await websocket.close(code=4001, reason="Authentication required")
             return
@@ -2170,7 +2063,7 @@ def create_app(
 
     @app.websocket("/ws/containers")
     async def containers_websocket(websocket: WebSocket) -> None:
-        token = _websocket_token(websocket)
+        token = _websocket_token(websocket, allow_query=False)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             await websocket.close(code=4001, reason="Authentication required")
             return
@@ -2198,7 +2091,7 @@ def create_app(
 
     @app.websocket("/ws/targets")
     async def targets_websocket(websocket: WebSocket) -> None:
-        token = _websocket_token(websocket)
+        token = _websocket_token(websocket, allow_query=False)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             await websocket.close(code=4001, reason="Authentication required")
             return
@@ -2224,7 +2117,7 @@ def create_app(
 
     @app.websocket("/ws/containers/{name}/logs")
     async def container_logs_websocket(websocket: WebSocket, name: str) -> None:
-        token = _websocket_token(websocket)
+        token = _websocket_token(websocket, allow_query=False)
         if not token or app.state.auth_manager.get_user_from_token(token) is None:
             await websocket.close(code=4001, reason="Authentication required")
             return
@@ -2324,6 +2217,7 @@ def create_app(
                 {
                     "access_token": access_token,
                     "token_type": "bearer",
+                    "refresh_token": refresh_token,
                 }
             ),
             media_type="application/json",
@@ -2335,7 +2229,6 @@ def create_app(
         return response
 
     @app.post("/api/auth/demo-login")
-    @limiter.limit("5/minute")
     async def api_demo_login(request: FastAPIRequest) -> Any:
         if not demo_auth_enabled():
             raise HTTPException(status_code=404, detail="Demo login is not enabled")
@@ -2345,16 +2238,16 @@ def create_app(
             raise HTTPException(
                 status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD."
             )
+        # Demo login always resolves to a dedicated, restricted read_only
+        # account - never the real admin - regardless of AEGISNEX_DEMO_USERNAME.
         result = app.state.auth_manager.login(username, password)
         if result is None:
-            try:
+            with suppress(AuthError):
                 app.state.auth_manager.user_store.seed_demo_user(username, password)
-            except AuthError:
-                pass
             result = app.state.auth_manager.login(username, password)
         if result is None:
             raise HTTPException(status_code=500, detail="Demo login is unavailable")
-        _user, access_token, refresh_token = result
+        user, access_token, refresh_token = result
         repo = getattr(app.state.services, "platform_repository", None)
         if repo is not None and hasattr(repo, "record_audit_log"):
             repo.record_audit_log(username, "login", "session", username, {"mode": "demo"})
@@ -2365,7 +2258,9 @@ def create_app(
         if tenant_manager is not None and tenant_membership_required() and not user.is_superuser:
             try:
                 if not tenant_manager.get_user_tenants(user.id):
-                    demo_org = tenant_manager.create_organization("Demo Workspace", domain="demo.aegisnex.local")
+                    demo_org = tenant_manager.create_organization(
+                        "Demo Workspace", domain="demo.aegisnex.local"
+                    )
                     tenant_manager.assign_user_to_org(user.id, demo_org.id, role="read_only")
             except Exception:
                 logger.warning("Failed to assign demo user to a demo organization", exc_info=True)
@@ -2374,6 +2269,7 @@ def create_app(
                 {
                     "access_token": access_token,
                     "token_type": "bearer",
+                    "refresh_token": refresh_token,
                 }
             ),
             media_type="application/json",
@@ -2447,8 +2343,7 @@ def create_app(
             repo.record_audit_log(
                 user.email, "sso_login", "session", user.email, {"provider": profile.issuer}
             )
-        frontend_url = os.getenv("AEGISNEX_FRONTEND_URL", "/").strip() or "/"
-        response = RedirectResponse(url=f"{frontend_url.rstrip('/')}/dashboard", status_code=302)
+        response = RedirectResponse(url=frontend_redirect_url("/dashboard"), status_code=302)
         _clear_auth_cookies(response)
         _set_auth_cookie(response, access_token, app.state.auth_manager.token_ttl_seconds)
         _set_refresh_cookie(
@@ -2484,9 +2379,10 @@ def create_app(
         return response
 
     @app.post("/api/auth/refresh")
-    @limiter.limit("10/minute")
     async def auth_refresh(request: FastAPIRequest) -> Any:
-        refresh_token = request.cookies.get("aegisnex_refresh", "")
+        refresh_token = request.cookies.get("aegisnex_refresh") or request.headers.get(
+            "x-refresh-token", ""
+        )
         if not refresh_token:
             raise HTTPException(status_code=401, detail="Refresh token required")
         refreshed = app.state.auth_manager.refresh_session(refresh_token)
@@ -2645,44 +2541,25 @@ def create_app(
     @app.get("/api/system-health")
     def api_system_health(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            ctx = api_context_fn()
-            return {
-                "timestamp": ctx["timestamp"],
-                "health_score": ctx["health_score"],
-                "metrics": ctx["metrics"],
-                "active_incident_count": len(ctx["active_incidents"]),
-                "running_container_count": len(ctx["running_containers"]),
-            }
-        except Exception as exc:
-            return {
-                "error": str(exc),
-                "timestamp": utc_now(),
-                "health_score": 0,
-                "metrics": {},
-                "active_incident_count": 0,
-                "running_container_count": 0,
-            }
+        ctx = api_context_fn()
+        return {
+            "timestamp": ctx["timestamp"],
+            "health_score": ctx["health_score"],
+            "metrics": ctx["metrics"],
+            "active_incident_count": len(ctx["active_incidents"]),
+            "running_container_count": len(ctx["running_containers"]),
+        }
 
     @app.get("/api/containers")
     def api_containers(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            ctx = api_context_fn()
-            return {
-                "timestamp": ctx["timestamp"],
-                "containers": ctx["containers"],
-                "running_containers": ctx["running_containers"],
-                "count": len(ctx["containers"]),
-            }
-        except Exception as exc:
-            return {
-                "error": str(exc),
-                "timestamp": utc_now(),
-                "containers": [],
-                "running_containers": [],
-                "count": 0,
-            }
+        ctx = api_context_fn()
+        return {
+            "timestamp": ctx["timestamp"],
+            "containers": ctx["containers"],
+            "running_containers": ctx["running_containers"],
+            "count": len(ctx["containers"]),
+        }
 
     @app.get("/api/incidents")
     def api_incidents(request: FastAPIRequest) -> dict[str, Any]:
@@ -2695,24 +2572,57 @@ def create_app(
             try:
                 org_id = int(str(org_id_param))
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Invalid org_id")
+                raise HTTPException(status_code=400, detail="Invalid org_id") from None
             require_org_access(request, org_id)
         limit = max(1, min(limit, 1000))
         repo = app.state.services.platform_repository
         if repo is None:
             ctx = api_context_fn()
-            incidents = [] if org_id is not None else ctx["active_incidents"] + ctx["resolved_incidents"]
+            incidents = (
+                [] if org_id is not None else ctx["active_incidents"] + ctx["resolved_incidents"]
+            )
             incidents.sort(key=lambda r: str(r.get("timestamp", "")), reverse=True)
-            active = [i for i in incidents if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}]
-            resolved = [i for i in incidents if i.get("incident_status", i.get("status")) == "resolved"]
-            return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": incidents[:6], "incidents": incidents[:limit], "active_count": len(active), "resolved_count": len(resolved), "count": len(incidents), "limit": limit, "offset": offset}
+            active = [
+                i
+                for i in incidents
+                if i.get("incident_status", i.get("status")) in {"active", "acknowledged"}
+            ]
+            resolved = [
+                i for i in incidents if i.get("incident_status", i.get("status")) == "resolved"
+            ]
+            return {
+                "active_incidents": active,
+                "resolved_incidents": resolved,
+                "recent_incidents": incidents[:6],
+                "incidents": incidents[:limit],
+                "active_count": len(active),
+                "resolved_count": len(resolved),
+                "count": len(incidents),
+                "limit": limit,
+                "offset": offset,
+            }
         all_incidents = repo.list_incidents(limit=limit, offset=offset, org_id=org_id)
         total_count = repo.count_incidents(org_id=org_id)
-        active = [i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}]
+        active = [
+            i for i in all_incidents if i.get("incident_status") in {"active", "acknowledged"}
+        ]
         resolved = [i for i in all_incidents if i.get("incident_status") == "resolved"]
-        active_count = repo.count_incidents(incident_status="active", org_id=org_id) + repo.count_incidents(incident_status="acknowledged", org_id=org_id)
+        active_count = repo.count_incidents(
+            incident_status="active", org_id=org_id
+        ) + repo.count_incidents(incident_status="acknowledged", org_id=org_id)
         resolved_count = repo.count_incidents(incident_status="resolved", org_id=org_id)
-        return {"active_incidents": active, "resolved_incidents": resolved, "recent_incidents": all_incidents[:6], "incidents": all_incidents, "active_count": active_count, "resolved_count": resolved_count, "count": total_count, "total": total_count, "limit": limit, "offset": offset}
+        return {
+            "active_incidents": active,
+            "resolved_incidents": resolved,
+            "recent_incidents": all_incidents[:6],
+            "incidents": all_incidents,
+            "active_count": active_count,
+            "resolved_count": resolved_count,
+            "count": total_count,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+        }
 
     @app.get("/api/incidents/{incident_id}")
     def api_incident_detail(incident_id: str, request: FastAPIRequest) -> Any:
@@ -2758,7 +2668,7 @@ def create_app(
             try:
                 org_id = int(org_id_value)
             except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Invalid org_id")
+                raise HTTPException(status_code=400, detail="Invalid org_id") from None
             require_org_access(request, org_id)
             mgr: TenantManager = request.app.state.tenant_manager
             try:
@@ -2769,10 +2679,8 @@ def create_app(
         if existing is None:
             return Response(content="Incident not found", status_code=404)
         updated = repo.assign_incident_org(incident_id, org_id, org_name)
-        try:
+        with suppress(KeyError):
             app.state.services.incident_manager.assign_client(incident_id, org_id, org_name)
-        except KeyError:
-            pass
         repo.record_audit_log(
             user.email,
             "assign_client",
@@ -2790,8 +2698,8 @@ def create_app(
         if incident is None:
             raise HTTPException(status_code=404, detail="Incident not found")
 
-        from src.intelligence.providers.factory import create_provider, get_default_provider
         from src.intelligence.providers.base import Message
+        from src.intelligence.providers.factory import create_provider, get_default_provider
 
         provider_name = get_default_provider()
         try:
@@ -2799,7 +2707,9 @@ def create_app(
         except Exception as exc:
             logger.warning(
                 "incident.explain provider unavailable incident_id=%s provider=%s error_type=%s",
-                incident_id, provider_name, type(exc).__name__,
+                incident_id,
+                provider_name,
+                type(exc).__name__,
             )
             raise HTTPException(
                 status_code=503,
@@ -2807,7 +2717,7 @@ def create_app(
                     f"AI explanation unavailable: provider '{provider_name}' is not configured. "
                     f"Set AEGIS_AI_{provider_name.upper()}_API_KEY on the backend and retry."
                 ),
-            )
+            ) from exc
 
         evidence = _incident_evidence(app.state.services, incident)
         system_prompt = (
@@ -2823,18 +2733,25 @@ def create_app(
             "Never recommend a destructive or irreversible action."
         )
         try:
-            response = provider.chat([
-                Message(role="system", content=system_prompt),
-                Message(role="user", content=f"Incident evidence:\n{json.dumps(evidence, indent=2, default=str)}"),
-            ])
+            response = provider.chat(
+                [
+                    Message(role="system", content=system_prompt),
+                    Message(
+                        role="user",
+                        content=f"Incident evidence:\n{json.dumps(evidence, indent=2, default=str)}",
+                    ),
+                ]
+            )
         except Exception:
             logger.exception(
-                "incident.explain provider call failed incident_id=%s provider=%s", incident_id, provider_name,
+                "incident.explain provider call failed incident_id=%s provider=%s",
+                incident_id,
+                provider_name,
             )
             raise HTTPException(
                 status_code=502,
                 detail=f"AI provider '{provider_name}' request failed. Check server logs for details.",
-            )
+            ) from None
 
         repo = app.state.services.platform_repository
         confidence = _evidence_confidence(evidence)
@@ -2849,7 +2766,9 @@ def create_app(
         }
         logger.info(
             "incident.explain succeeded incident_id=%s provider=%s model=%s",
-            incident_id, provider_name, getattr(provider.config, "model", ""),
+            incident_id,
+            provider_name,
+            getattr(provider.config, "model", ""),
         )
 
         # Record this real AI action in the governance action audit. Best-effort:
@@ -2860,6 +2779,7 @@ def create_app(
             model = getattr(provider.config, "model", "")
             _ensure_incident_ai_agent_registered(gov, provider_name, model, tenant)
             from src.ai_governance import AgentAction
+
             gov.record_action(
                 AgentAction(
                     action_id=f"incident-explain-{incident_id}-{utc_now()}",
@@ -2877,7 +2797,9 @@ def create_app(
                 tenant_id=tenant,
             )
         except Exception:
-            logger.exception("incident.explain governance recording failed incident_id=%s", incident_id)
+            logger.exception(
+                "incident.explain governance recording failed incident_id=%s", incident_id
+            )
 
         return result
 
@@ -2893,7 +2815,7 @@ def create_app(
         try:
             payload = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from None
         plan = payload.get("plan")
         if not isinstance(plan, dict):
             raise HTTPException(status_code=400, detail="plan (object) is required")
@@ -2935,7 +2857,8 @@ def create_app(
                 except Exception:
                     logger.exception(
                         "incident.propose_remediation policy evaluation failed incident_id=%s action=%s",
-                        incident_id, action_name,
+                        incident_id,
+                        action_name,
                     )
             classified_actions.append({**action, "governance": governance})
 
@@ -2946,8 +2869,9 @@ def create_app(
         ai_rationale = None
         provider_name = None
         try:
-            from src.intelligence.providers.factory import create_provider, get_default_provider
             from src.intelligence.providers.base import Message
+            from src.intelligence.providers.factory import create_provider, get_default_provider
+
             provider_name = get_default_provider()
             provider = create_provider()
             evidence = _incident_evidence(app.state.services, incident)
@@ -2956,15 +2880,25 @@ def create_app(
                 "write a one or two sentence rationale for why these steps are reasonable given "
                 "the evidence. Do not propose new actions. Do not claim a confirmed root cause."
             )
-            response = provider.chat([
-                Message(role="system", content=prompt),
-                Message(role="user", content=json.dumps({"evidence": evidence, "plan": {**plan, "actions": classified_actions}}, default=str)),
-            ])
+            response = provider.chat(
+                [
+                    Message(role="system", content=prompt),
+                    Message(
+                        role="user",
+                        content=json.dumps(
+                            {"evidence": evidence, "plan": {**plan, "actions": classified_actions}},
+                            default=str,
+                        ),
+                    ),
+                ]
+            )
             ai_rationale = response.content
         except Exception as exc:
             logger.info(
                 "incident.propose_remediation proceeding without AI rationale incident_id=%s provider=%s error_type=%s",
-                incident_id, provider_name, type(exc).__name__,
+                incident_id,
+                provider_name,
+                type(exc).__name__,
             )
 
         enriched_plan = {**plan, "actions": classified_actions}
@@ -2973,14 +2907,20 @@ def create_app(
 
         try:
             updated = app.state.services.incident_manager.propose_remediation(
-                incident_id, enriched_plan, proposed_by=proposed_by, confidence=confidence,
+                incident_id,
+                enriched_plan,
+                proposed_by=proposed_by,
+                confidence=confidence,
             )
         except KeyError:
-            raise HTTPException(status_code=404, detail="Incident not found")
+            raise HTTPException(status_code=404, detail="Incident not found") from None
 
         logger.info(
             "incident.propose_remediation succeeded incident_id=%s actions=%d proposed_by=%s ai_rationale=%s",
-            incident_id, len(classified_actions), proposed_by, bool(ai_rationale),
+            incident_id,
+            len(classified_actions),
+            proposed_by,
+            bool(ai_rationale),
         )
         message = "Diagnostic plan proposed and pending approval."
         if not ai_rationale:
@@ -2990,17 +2930,25 @@ def create_app(
         # governance action audit - one governance record per action
         # actually evaluated, using its real policy verdict. Best-effort:
         # a governance bookkeeping failure must never block the proposal.
-        governance_action_ids: List[str] = []
+        governance_action_ids: list[str] = []
         try:
             gov = governance_manager()
             tenant = governance_tenant_id(request)
             if not provider_name:
-                from src.intelligence.providers.factory import get_default_provider as _get_default_provider
+                from src.intelligence.providers.factory import (
+                    get_default_provider as _get_default_provider,
+                )
+
                 provider_name = _get_default_provider()
             resolved_provider = provider_name
-            model = os.getenv(f"AEGIS_AI_{resolved_provider.upper()}_MODEL", "") if resolved_provider else ""
+            model = (
+                os.getenv(f"AEGIS_AI_{resolved_provider.upper()}_MODEL", "")
+                if resolved_provider
+                else ""
+            )
             _ensure_incident_ai_agent_registered(gov, resolved_provider, model, tenant)
             from src.ai_governance import AgentAction
+
             for index, action in enumerate(classified_actions):
                 governance_info = action.get("governance", {})
                 gov_action_id = f"incident-remediation-{incident_id}-{utc_now()}-{index}"
@@ -3011,18 +2959,25 @@ def create_app(
                         action_type="propose_remediation",
                         action_summary=str(action.get("action", "diagnostic_action")),
                         target_resource=f"incident:{incident_id}",
-                        inputs=json.dumps({"action": action.get("action"), "target": action.get("target")}),
+                        inputs=json.dumps(
+                            {"action": action.get("action"), "target": action.get("target")}
+                        ),
                         outputs=json.dumps({"governance": governance_info}),
                         reasoning=str(governance_info.get("reason", "")),
                         confidence_score=confidence,
-                        policy_verdict=_POLICY_TO_GOVERNANCE_VERDICT.get(governance_info.get("verdict"), "pending_approval"),
+                        policy_verdict=_POLICY_TO_GOVERNANCE_VERDICT.get(
+                            governance_info.get("verdict"), "pending_approval"
+                        ),
                         status="success",
                     ),
                     tenant_id=tenant,
                 )
                 governance_action_ids.append(gov_action_id)
         except Exception:
-            logger.exception("incident.propose_remediation governance recording failed incident_id=%s", incident_id)
+            logger.exception(
+                "incident.propose_remediation governance recording failed incident_id=%s",
+                incident_id,
+            )
 
         # Queue this real, already-classified plan for a real human decision
         # via the existing Approvals page/API - this is the "real queue" the
@@ -3032,6 +2987,7 @@ def create_app(
             repo = app.state.services.platform_repository
             if repo is not None:
                 from uuid import uuid4
+
                 new_approval_id = f"incident-remediation-{incident_id}-{uuid4().hex[:12]}"
                 repo.create_approval_request(
                     new_approval_id,
@@ -3046,423 +3002,22 @@ def create_app(
                     },
                 )
         except Exception:
-            logger.exception("incident.propose_remediation approval queueing failed incident_id=%s", incident_id)
+            logger.exception(
+                "incident.propose_remediation approval queueing failed incident_id=%s", incident_id
+            )
 
         return {"incident": updated.to_dict(), "message": message}
 
     @app.get("/api/metrics")
-    def api_metrics(request: FastAPIRequest) -> Dict[str, Any]:
-        require_role(*VIEWER_ROLES)(request)
-        ctx = api_context_fn()
-        return {"timestamp": ctx["timestamp"], "metrics": ctx["metrics"], "network": ctx["network"], "chart_data": ctx["chart_data"]["metrics"]}
-
-    @app.get("/api/metrics/history")
-    def api_metrics_history(request: FastAPIRequest) -> Dict[str, Any]:
-        require_role(*VIEWER_ROLES)(request)
-        minutes = int(request.query_params.get("minutes", 60))
-        minutes = max(1, min(minutes, 1440))
-        repo = app.state.services.platform_repository
-        if repo is None:
-            return Response(content="Platform database unavailable", status_code=503)
-        try:
-            payload = await request.json()
-        except Exception:
-            return Response(content="Invalid JSON body", status_code=400)
-        raw_org_id = payload.get("org_id")
-        org_id = int(raw_org_id) if raw_org_id not in (None, "", 0, "0") else None
-        org_name = None
-        if org_id is not None:
-            try:
-                mgr: TenantManager = request.app.state.tenant_manager
-                org = mgr.get_organization(org_id)
-                org_name = org.name
-            except ValueError:
-                return Response(content="Client organization not found", status_code=404)
-        result = repo.assign_incident_org(incident_id, org_id, org_name, actor=user.email)
-        if result is None:
-            return Response(content="Incident not found", status_code=404)
-        with suppress(KeyError):
-            request.app.state.services.incident_manager.update_incident(
-                incident_id,
-                org_id=org_id,
-                org_name=org_name,
-            )
-        return result
-
-    @app.post("/api/incidents/{incident_id}/explain")
-    async def api_incident_explain(incident_id: str, request: FastAPIRequest) -> Any:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        incident = repo.get_incident(incident_id) if repo is not None else None
-        if incident is None:
-            for item in app.state.services.incident_manager.list_incidents():
-                if item.incident_id == incident_id:
-                    incident = item.to_dict()
-                    break
-        if incident is None:
-            return Response(content="Incident not found", status_code=404)
-        try:
-            from src.intelligence.providers.base import Message
-            from src.intelligence.retrieval.rag import RAGEngine
-
-            rag = RAGEngine(repo=repo)
-            query = (
-                f"Incident {incident.get('incident_id', '')}: "
-                f"{incident.get('description', '')} "
-                f"service={incident.get('service_name', '')} "
-                f"type={incident.get('incident_type', '')} "
-                f"severity={incident.get('severity', '')}"
-            )
-            retrieval = rag.retrieve(query, limit=5)
-            similar_incidents = [d for d in retrieval.documents if d.source_type == "incident"]
-            runbooks = [d for d in retrieval.documents if d.source_type == "runbook"]
-            audit_logs = [d for d in retrieval.documents if d.source_type == "audit"]
-            context_text = retrieval.context_text
-            provider = getattr(rag, "_provider", None)
-            if provider is not None:
-                from src.intelligence.retrieval.rag import SYSTEM_PROMPT_TEMPLATE
-
-                system_prompt = SYSTEM_PROMPT_TEMPLATE.format(context=context_text)
-                messages = [
-                    Message(role="system", content=system_prompt),
-                    Message(
-                        role="user",
-                        content=(
-                            f"Analyze this incident and provide:\n"
-                            f"1. **Root Cause Analysis**: What likely caused this incident based on the evidence.\n"
-                            f"2. **Similar Past Incidents**: Reference any similar incidents from the context.\n"
-                            f"3. **Recommended Actions**: Specific steps to resolve and prevent recurrence.\n"
-                            f"4. **Risk Assessment**: Severity and potential impact if unresolved.\n\n"
-                            f"Incident Details:\n"
-                            f"- Service: {incident.get('service_name', 'unknown')}\n"
-                            f"- Type: {incident.get('incident_type', 'unknown')}\n"
-                            f"- Severity: {incident.get('severity', 'unknown')}\n"
-                            f"- Description: {incident.get('description', 'No description')}\n"
-                            f"- Status: {incident.get('incident_status', incident.get('status', 'active'))}\n"
-                            f"- Created: {incident.get('timestamp', 'unknown')}\n"
-                        ),
-                    ),
-                ]
-                ai_response = provider.chat(messages).content
-            else:
-                ai_response = (
-                    f"**Incident Analysis** (rule-based — configure AEGIS_AI_PROVIDER for LLM analysis)\n\n"
-                    f"**Service**: {incident.get('service_name', 'unknown')}\n"
-                    f"**Type**: {incident.get('incident_type', 'unknown')}\n"
-                    f"**Severity**: {incident.get('severity', 'unknown')}\n"
-                    f"**Description**: {incident.get('description', 'No description')}\n\n"
-                    f"**Similar Past Incidents Found**: {len(similar_incidents)}\n"
-                )
-                for doc in similar_incidents[:3]:
-                    ai_response += f"- {doc.content[:200]}\n"
-                if runbooks:
-                    ai_response += f"\n**Relevant Runbooks**: {len(runbooks)}\n"
-                    for doc in runbooks[:2]:
-                        ai_response += f"- {doc.metadata.get('title', doc.source)}\n"
-            result = {
-                "incident_id": incident_id,
-                "analysis": ai_response,
-                "similar_incidents": [
-                    {"source": d.source, "content": d.content[:300], "relevance": d.relevance_score}
-                    for d in similar_incidents[:5]
-                ],
-                "runbooks": [
-                    {
-                        "source": d.source,
-                        "title": d.metadata.get("title", ""),
-                        "content": d.content[:200],
-                    }
-                    for d in runbooks[:3]
-                ],
-                "audit_context": [
-                    {"content": d.content[:200], "timestamp": d.timestamp} for d in audit_logs[:3]
-                ],
-                "confidence": sum(d.relevance_score for d in retrieval.documents)
-                / max(len(retrieval.documents), 1),
-                "timestamp": utc_now(),
-            }
-            if repo is not None and hasattr(repo, "record_audit_log"):
-                repo.record_audit_log(
-                    "system",
-                    "incident.explain",
-                    "incident",
-                    incident_id,
-                    {"similar_count": len(similar_incidents), "runbook_count": len(runbooks)},
-                )
-            return result
-        except Exception as exc:
-            get_logger(__name__).warning("Incident explain error: %s", exc)
-            return {
-                "incident_id": incident_id,
-                "analysis": f"Analysis failed: {exc}",
-                "similar_incidents": [],
-                "runbooks": [],
-                "audit_context": [],
-                "confidence": 0.0,
-                "timestamp": utc_now(),
-            }
-
-    @app.post("/api/incidents/{incident_id}/propose-remediation")
-    async def api_propose_remediation(incident_id: str, request: FastAPIRequest) -> Any:
-        require_role(*OPERATOR_ROLES)(request)
-        body = await request.json()
-        proposed_by = body.get("proposed_by", "system")
-        remediation_plan = body.get("plan", {})
-        confidence = float(body.get("confidence", 0.0))
-        if not _is_diagnostics_only_plan(remediation_plan):
-            return Response(
-                content="Only diagnostics-only remediation plans are supported in this iteration",
-                status_code=400,
-            )
-        incident_manager = app.state.services.incident_manager
-        repo = getattr(app.state.services, "platform_repository", None)
-        try:
-            incident = incident_manager.propose_remediation(
-                incident_id,
-                proposed_by,
-                remediation_plan,
-                confidence,
-            )
-            approval = None
-            if repo is not None and hasattr(repo, "create_approval_request"):
-                approval_id = f"incident-diagnostics-{uuid.uuid4().hex[:12]}"
-                approval = repo.create_approval_request(
-                    approval_id=approval_id,
-                    request_type="incident_diagnostic_remediation",
-                    requester=str(proposed_by),
-                    summary=f"Approve diagnostic evidence collection for {incident.service_name}",
-                    details={
-                        "incident_id": incident.incident_id,
-                        "service_name": incident.service_name,
-                        "incident_type": incident.incident_type,
-                        "severity": incident.severity,
-                        "mode": "diagnostics_only",
-                        "read_only": True,
-                        "actions": remediation_plan.get("actions", []),
-                    },
-                )
-            return {
-                "incident": incident.to_dict(),
-                "approval": approval,
-                "message": "Diagnostics plan proposed",
-            }
-        except KeyError:
-            return Response(content="Incident not found", status_code=404)
-        except Exception as exc:
-            return Response(content=f"Failed to propose remediation: {exc}", status_code=500)
-
-    @app.post("/api/incidents/{incident_id}/approve-remediation")
-    async def api_approve_remediation(incident_id: str, request: FastAPIRequest) -> Any:
-        require_role(*OPERATOR_ROLES)(request)
-        body = (
-            await request.json()
-            if request.headers.get("content-type", "").startswith("application/json")
-            else {}
-        )
-        actor = body.get(
-            "actor",
-            request.user.get("username", "unknown") if hasattr(request, "user") else "system",
-        )
-        incident_manager = app.state.services.incident_manager
-        try:
-            incident = incident_manager.approve_remediation(incident_id, actor)
-            return {"incident": incident.to_dict(), "message": "Remediation approved"}
-        except KeyError:
-            return Response(content="Incident not found", status_code=404)
-        except ValueError as exc:
-            return Response(content=str(exc), status_code=400)
-        except Exception as exc:
-            return Response(content=f"Failed to approve remediation: {exc}", status_code=500)
-
-    @app.post("/api/incidents/{incident_id}/reject-remediation")
-    async def api_reject_remediation(incident_id: str, request: FastAPIRequest) -> Any:
-        require_role(*OPERATOR_ROLES)(request)
-        body = (
-            await request.json()
-            if request.headers.get("content-type", "").startswith("application/json")
-            else {}
-        )
-        actor = body.get(
-            "actor",
-            request.user.get("username", "unknown") if hasattr(request, "user") else "system",
-        )
-        reason = body.get("reason", "")
-        incident_manager = app.state.services.incident_manager
-        try:
-            incident = incident_manager.reject_remediation(incident_id, actor, reason)
-            return {"incident": incident.to_dict(), "message": "Remediation rejected"}
-        except KeyError:
-            return Response(content="Incident not found", status_code=404)
-        except ValueError as exc:
-            return Response(content=str(exc), status_code=400)
-        except Exception as exc:
-            return Response(content=f"Failed to reject remediation: {exc}", status_code=500)
-
-    @app.post("/api/incidents/{incident_id}/execute-remediation")
-    async def api_execute_remediation(incident_id: str, request: FastAPIRequest) -> Any:
-        require_role(*OPERATOR_ROLES)(request)
-        body = (
-            await request.json()
-            if request.headers.get("content-type", "").startswith("application/json")
-            else {}
-        )
-        incident_manager = app.state.services.incident_manager
-        pipeline = getattr(app.state.services, "autonomous_pipeline", None)
-        try:
-            incident_obj = None
-            for inc in incident_manager.list_incidents():
-                if inc.incident_id == incident_id:
-                    incident_obj = inc
-                    break
-            if incident_obj is None:
-                return Response(content="Incident not found", status_code=404)
-            if incident_obj.remediation_approval_status != "approved":
-                return Response(content="Remediation not approved", status_code=400)
-            plan = incident_obj.proposed_remediation or {}
-            if not _is_diagnostics_only_plan(plan):
-                return Response(
-                    content="Only approved diagnostics-only plans can be executed from this endpoint",
-                    status_code=400,
-                )
-            if plan.get("mode") == "diagnostics_only":
-                timeline = []
-                repo = getattr(app.state.services, "platform_repository", None)
-                if repo is not None and hasattr(repo, "list_incident_transitions"):
-                    timeline = repo.list_incident_transitions(incident_id)
-                execution_result = {
-                    "mode": "diagnostics_only",
-                    "read_only": True,
-                    "incident_id": incident_obj.incident_id,
-                    "service_name": incident_obj.service_name,
-                    "incident_type": incident_obj.incident_type,
-                    "severity": incident_obj.severity,
-                    "status": incident_obj.status,
-                    "description": incident_obj.description,
-                    "health_check_results": incident_obj.health_check_results,
-                    "timeline": timeline,
-                    "executed_at": utc_now(),
-                    "evidence_packet": {
-                        "source": "incident_record",
-                        "title": f"Diagnostic evidence packet for {incident_obj.service_name}",
-                        "summary": (
-                            "Read-only evidence collection completed from the incident record, "
-                            "health check results, and status timeline."
-                        ),
-                        "approval_required": True,
-                        "infrastructure_mutated": False,
-                        "artifact_type": "diagnostic_evidence",
-                        "evidence_counts": {
-                            "health_check_results": len(incident_obj.health_check_results or []),
-                            "timeline_events": len(timeline),
-                        },
-                    },
-                }
-                successful = True
-            elif pipeline and hasattr(pipeline, "_execute_remediation"):
-                execution_result = await pipeline._execute_remediation(
-                    plan, body.get("correlation_id")
-                )
-                successful = bool(execution_result)
-            else:
-                execution_result = {"message": "No pipeline available, marked as executed"}
-                successful = True
-            incident_manager.mark_remediation_executed(incident_id, successful, execution_result)
-            repo = getattr(app.state.services, "platform_repository", None)
-            if repo is not None and hasattr(repo, "record_audit_log"):
-                repo.record_audit_log(
-                    "system",
-                    "incident.diagnostics_collected",
-                    "incident",
-                    incident_id,
-                    {
-                        "mode": plan.get("mode"),
-                        "read_only": plan.get("read_only"),
-                        "successful": successful,
-                    },
-                )
-            return {
-                "incident": incident_manager._get_required(incident_id).to_dict(),
-                "execution_result": execution_result,
-                "successful": successful,
-            }
-        except KeyError:
-            return Response(content="Incident not found", status_code=404)
-        except Exception as exc:
-            return Response(content=f"Failed to execute remediation: {exc}", status_code=500)
-
-    @app.get("/api/learning/entries")
-    async def api_learning_entries(request: FastAPIRequest) -> Any:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        entries = []
-        if repo and hasattr(repo, "get_knowledge_entries"):
-            try:
-                entries = repo.get_knowledge_entries()
-            except Exception:
-                entries = []
-        return {"entries": entries, "count": len(entries), "timestamp": utc_now()}
-
-    @app.get("/api/learning/stats")
-    async def api_learning_stats(request: FastAPIRequest) -> Any:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        history = getattr(app.state.services, "execution_history", None)
-        stats = {
-            "knowledge_entries": 0,
-            "total_executions": 0,
-            "successful_executions": 0,
-            "failed_executions": 0,
-            "avg_confidence": 0.0,
-        }
-        if repo and hasattr(repo, "get_knowledge_entries"):
-            try:
-                entries = repo.get_knowledge_entries()
-                stats["knowledge_entries"] = len(entries)
-                confidences = [
-                    e.get("confidence", 0.0)
-                    for e in entries
-                    if isinstance(e, dict) and e.get("confidence")
-                ]
-                if confidences:
-                    stats["avg_confidence"] = sum(confidences) / len(confidences)
-            except Exception:
-                pass
-        if history and hasattr(history, "get_stats"):
-            try:
-                h_stats = history.get_stats()
-                stats["total_executions"] = h_stats.get("total", 0)
-                stats["successful_executions"] = h_stats.get("completed", 0)
-                stats["failed_executions"] = h_stats.get("failed", 0)
-            except Exception:
-                pass
-        incident_manager = app.state.services.incident_manager
-        all_incidents = incident_manager.list_incidents()
-        stats["total_incidents"] = len(all_incidents)
-        stats["incidents_with_remediation"] = sum(
-            1 for i in all_incidents if i.remediation_attempted
-        )
-        stats["incidents_with_proposals"] = sum(1 for i in all_incidents if i.proposed_remediation)
-        return {"stats": stats, "timestamp": utc_now()}
-
-    @app.get("/api/metrics")
     def api_metrics(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            ctx = api_context_fn()
-            return {
-                "timestamp": ctx["timestamp"],
-                "metrics": ctx["metrics"],
-                "network": ctx["network"],
-                "chart_data": ctx["chart_data"]["metrics"],
-            }
-        except Exception as exc:
-            return {
-                "error": str(exc),
-                "timestamp": utc_now(),
-                "metrics": {},
-                "network": {},
-                "chart_data": {},
-            }
+        ctx = api_context_fn()
+        return {
+            "timestamp": ctx["timestamp"],
+            "metrics": ctx["metrics"],
+            "network": ctx["network"],
+            "chart_data": ctx["chart_data"]["metrics"],
+        }
 
     @app.get("/api/metrics/history")
     def api_metrics_history(request: FastAPIRequest) -> dict[str, Any]:
@@ -3779,6 +3334,7 @@ def create_app(
             uptime_seconds = None
         return {
             "os": f"{platform.system()} {platform.release()}",
+            "hostname": socket.gethostname(),
             "uptime_seconds": uptime_seconds,
             "docker_version": docker_version,
         }
@@ -3844,8 +3400,6 @@ def create_app(
     @app.post("/api/containers/{name}/start")
     def api_container_start(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
-        import uuid
-
         mc_id = f"mc-docker-start-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -3895,8 +3449,6 @@ def create_app(
     @app.post("/api/containers/{name}/stop")
     def api_container_stop(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
-        import uuid
-
         mc_id = f"mc-docker-stop-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -3946,8 +3498,6 @@ def create_app(
     @app.post("/api/containers/{name}/restart")
     def api_container_restart(name: str, request: FastAPIRequest) -> Any:
         user = require_role(*OPERATOR_ROLES)(request)
-        import uuid
-
         mc_id = f"mc-docker-restart-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -4033,12 +3583,9 @@ def create_app(
     @app.get("/api/observability")
     def api_observability(request: FastAPIRequest) -> Any:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            from src.observability import get_tracker
+        from src.observability import get_tracker
 
-            return get_tracker().get_summary()
-        except Exception as exc:
-            return {"error": str(exc), "summary": {}}
+        return get_tracker().get_summary()
 
     # ---- Operator: monitoring targets ----
     @app.post("/api/monitoring-targets")
@@ -4329,7 +3876,7 @@ def create_app(
     def api_update_user_role(user_id: int, request: FastAPIRequest) -> Any:
         user = require_role(*ADMIN_ROLES)(request)
         from fastapi import HTTPException
-        from src.auth import Role
+
         if user.role != Role.SUPER_ADMIN.value:
             raise HTTPException(status_code=403, detail="Only super_admin can change user roles")
         role = request.query_params.get("role", "")
@@ -4343,8 +3890,8 @@ def create_app(
         try:
             with store._connect() as conn:
                 conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user_id))
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail="Failed to update user role") from exc
+        except Exception:
+            raise HTTPException(status_code=500, detail="Failed to update user role") from None
         app.state.services.platform_repository.record_audit_log(
             user.email, "update_role", "user", str(user_id), {"role": normalized_role}
         )
@@ -4417,7 +3964,9 @@ def create_app(
         role = str(payload.get("role", "read_only")).strip().lower()
         normalized_role = Role.from_str(role).value
         if normalized_role == Role.SUPER_ADMIN.value and user.role != Role.SUPER_ADMIN.value:
-            return Response(content="Only super_admin can create super_admin API keys", status_code=403)
+            return Response(
+                content="Only super_admin can create super_admin API keys", status_code=403
+            )
         scopes = payload.get("scopes", ["commandmesh:chat"])
         if isinstance(scopes, str):
             scopes = [scope.strip() for scope in scopes.split(",") if scope.strip()]
@@ -4471,15 +4020,14 @@ def create_app(
                 parsed_scopes = [
                     scope.strip() for scope in parsed_scopes.split(",") if scope.strip()
                 ]
-            if (
-                isinstance(parsed_scopes, list)
-                and "*" in [str(scope).strip() for scope in parsed_scopes]
-                and user.role != "super_admin"
-            ):
-                return Response(
-                    content="Only super_admin can assign wildcard API key scope",
-                    status_code=403,
-                )
+            if isinstance(parsed_scopes, list) and "*" in [
+                str(scope).strip() for scope in parsed_scopes
+            ]:
+                if user.role != "super_admin":
+                    return Response(
+                        content="Only super_admin can assign wildcard API key scope",
+                        status_code=403,
+                    )
         result = repo.update_api_key(key_id, payload, actor=user.email)
         if result is None:
             return Response(content="API key not found", status_code=404)
@@ -4561,7 +4109,9 @@ def create_app(
             return Response(content="email is required", status_code=400)
         normalized_role = Role.from_str(role).value
         if normalized_role == Role.SUPER_ADMIN.value and user.role != Role.SUPER_ADMIN.value:
-            return Response(content="Only super_admin can invite super_admin users", status_code=403)
+            return Response(
+                content="Only super_admin can invite super_admin users", status_code=403
+            )
         token = secrets.token_urlsafe(32)
         org_id = payload.get("org_id")
         invite = repo.create_invite(
@@ -4579,7 +4129,6 @@ def create_app(
         return {"invites": invites, "count": len(invites)}
 
     @app.post("/api/invites/accept")
-    @limiter.limit("5/minute")
     async def api_accept_invite(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -4624,7 +4173,6 @@ def create_app(
 
     # ---- Enterprise: Password Reset ----
     @app.post("/api/password-reset/request")
-    @limiter.limit("3/minute")
     async def api_request_password_reset(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -4644,7 +4192,6 @@ def create_app(
         return {"status": "ok", "message": "If the email exists, a reset link has been sent"}
 
     @app.post("/api/password-reset/confirm")
-    @limiter.limit("5/minute")
     async def api_confirm_password_reset(request: FastAPIRequest) -> Any:
         try:
             payload = await request.json()
@@ -4756,7 +4303,10 @@ def create_app(
             return {"approvals": [], "count": 0}
         status = request.query_params.get("status") or None
         limit = int(request.query_params.get("limit", 50))
-        approvals = [_normalize_approval_row(a) for a in repo.list_approval_requests(status=status, limit=limit)]
+        approvals = [
+            _normalize_approval_row(a)
+            for a in repo.list_approval_requests(status=status, limit=limit)
+        ]
         return {"approvals": approvals, "count": len(approvals)}
 
     @app.post("/api/approvals/{approval_id}/respond")
@@ -4768,7 +4318,7 @@ def create_app(
         try:
             payload = await request.json()
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from None
         decision = str(payload.get("decision", "")).strip().lower()
         if decision not in ("approved", "rejected"):
             raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
@@ -4783,7 +4333,9 @@ def create_app(
                 detail=f"Approval request already {existing.get('status')}; decisions are final.",
             )
 
-        result = repo.respond_approval(approval_id, decision, reviewed_by=user.email, comment=comment)
+        result = repo.respond_approval(
+            approval_id, decision, reviewed_by=user.email, comment=comment
+        )
         if result is None:
             raise HTTPException(status_code=404, detail="Approval request not found")
 
@@ -4804,13 +4356,16 @@ def create_app(
                     gov.update_action(gov_action_id, tenant_id=tenant, policy_verdict=new_verdict)
             linked_incident_id = details.get("incident_id")
             if linked_incident_id:
-                try:
+                with suppress(KeyError):
                     app.state.services.incident_manager.record_remediation_decision(
-                        linked_incident_id, decision, reviewed_by=user.email,
+                        linked_incident_id,
+                        decision,
+                        reviewed_by=user.email,
                     )
-                except KeyError:
-                    pass
-                if decision == "approved" and result.get("request_type") == "incident_diagnostic_remediation":
+                if (
+                    decision == "approved"
+                    and result.get("request_type") == "incident_diagnostic_remediation"
+                ):
                     _execute_approved_diagnostics(
                         app.state.services,
                         str(linked_incident_id),
@@ -4823,7 +4378,9 @@ def create_app(
 
         logger.info(
             "approval.respond succeeded approval_id=%s decision=%s reviewed_by=%s",
-            approval_id, decision, user.email,
+            approval_id,
+            decision,
+            user.email,
         )
         return _normalize_approval_row(result)
 
@@ -5140,7 +4697,7 @@ def create_app(
     # ---- AI Intelligence Engine ----
     _ai_pending_approvals: dict[str, dict[str, Any]] = {}
 
-    # ── Mission Control Integration Helpers ──
+    # â”€â”€ Mission Control Integration Helpers â”€â”€
 
     def _mc_repo() -> Any:
         return getattr(app.state.services, "platform_repository", None)
@@ -5227,7 +4784,11 @@ def create_app(
             get_logger(__name__).warning("MC finish error: %s", exc)
 
     def _mc_complete_stage(
-        execution: Any, stage_id: str, status: str = "completed", **kw: Any
+        execution: Any,
+        stage_id: str,
+        status: str = "completed",
+        broadcast: bool = True,
+        **kw: Any,
     ) -> None:
         from src.mission_control import complete_stage, update_execution
 
@@ -5251,13 +4812,15 @@ def create_app(
                 stats = get_execution_stats(repo)
                 asyncio.create_task(
                     ws_mgr.broadcast(
-                        {"type": "mc_stats_update", "stats": stats}, channel="mission_control"
+                        {"type": "execution_update", "stats": stats}, channel="mission_control"
                     )
                 )
         except Exception:
             pass
 
-    def _track_workforce_execution_in_mc(request: FastAPIRequest, agent: Any, execution: Any) -> None:
+    def _track_workforce_execution_in_mc(
+        request: FastAPIRequest, agent: Any, execution: Any
+    ) -> None:
         from src.ai_workforce import ExecutionResult
         from src.mission_control import create_execution
 
@@ -5265,7 +4828,9 @@ def create_app(
         if repo is None:
             return
         try:
-            agent_label = str(getattr(agent, "name", "") or "").strip() or getattr(execution, "agent_id", "")
+            agent_label = str(getattr(agent, "name", "") or "").strip() or getattr(
+                execution, "agent_id", ""
+            )
             mc_exec = create_execution(
                 repo=repo,
                 execution_id=execution.execution_id,
@@ -5282,9 +4847,13 @@ def create_app(
                 execution_type="agent_dispatch",
                 organization=_mc_org(request),
                 agents=[agent_label] if agent_label else [execution.agent_id],
-                audit_links={"workforce_execution": f"/api/workforce/agents/{execution.agent_id}/executions"},
+                audit_links={
+                    "workforce_execution": f"/api/workforce/agents/{execution.agent_id}/executions"
+                },
             )
-            mc_status = "completed" if execution.status == ExecutionResult.SUCCESS.value else "failed"
+            mc_status = (
+                "completed" if execution.status == ExecutionResult.SUCCESS.value else "failed"
+            )
             stage_status = "completed" if mc_status == "completed" else "failed"
             _mc_complete_stage(
                 mc_exec,
@@ -5298,7 +4867,10 @@ def create_app(
                 estimated_cost=execution.cost,
                 summary=(execution.response or execution.error or execution.task)[:300],
                 connected_tools=execution.tools_used or [],
-                inputs={"task": execution.task, "simulate": execution.metadata.get("mode") != "live"},
+                inputs={
+                    "task": execution.task,
+                    "simulate": execution.metadata.get("mode") != "live",
+                },
                 outputs={"response": execution.response, "error": execution.error},
             )
             _finish_mc_execution(
@@ -5329,6 +4901,7 @@ def create_app(
         if not agent_id or gov.get_agent(agent_id, tenant_id=tenant_id) is not None:
             return
         from src.ai_governance import AIAgent
+
         gov.register_agent(
             AIAgent(
                 agent_id=agent_id,
@@ -5345,7 +4918,9 @@ def create_app(
             tenant_id=tenant_id,
         )
 
-    def _track_workforce_execution_in_governance(request: FastAPIRequest, agent: Any, execution: Any) -> None:
+    def _track_workforce_execution_in_governance(
+        request: FastAPIRequest, agent: Any, execution: Any
+    ) -> None:
         """Record a real Workforce Playground execution in Governance and Audit Logs.
 
         Best-effort and isolated per subsystem - a governance or audit
@@ -5366,14 +4941,17 @@ def create_app(
 
         try:
             gov = governance_manager()
-            try:
+            with suppress(Exception):
                 _ensure_workforce_agent_governance_registered(gov, agent, tenant)
-            except Exception:
-                pass  # likely a concurrent first-execution race; registration already exists or is in flight
+            # likely a concurrent first-execution race; registration already exists or is in flight
             verdict, reason = gov.evaluate_policies(
-                agent_id, WORKFORCE_GOVERNANCE_ACTION_TYPE, f"workforce_agent:{agent_id}", tenant_id=tenant,
+                agent_id,
+                WORKFORCE_GOVERNANCE_ACTION_TYPE,
+                f"workforce_agent:{agent_id}",
+                tenant_id=tenant,
             )
             from src.ai_governance import AgentAction
+
             gov.record_action(
                 AgentAction(
                     action_id=f"workforce-{execution.execution_id}",
@@ -5381,14 +4959,18 @@ def create_app(
                     action_type=WORKFORCE_GOVERNANCE_ACTION_TYPE,
                     action_summary=f"Playground execution for {getattr(agent, 'name', agent_id)}",
                     target_resource=f"workforce_agent:{agent_id}",
-                    inputs=json.dumps({
-                        "execution_id": execution.execution_id,
-                        "simulate": execution.metadata.get("mode") != "live",
-                    }),
-                    outputs=json.dumps({
-                        "status": execution.status,
-                        "tools_used": execution.tools_used,
-                    }),
+                    inputs=json.dumps(
+                        {
+                            "execution_id": execution.execution_id,
+                            "simulate": execution.metadata.get("mode") != "live",
+                        }
+                    ),
+                    outputs=json.dumps(
+                        {
+                            "status": execution.status,
+                            "tools_used": execution.tools_used,
+                        }
+                    ),
                     reasoning=reason or "",
                     confidence_score=execution.confidence,
                     policy_verdict=verdict,
@@ -5399,7 +4981,9 @@ def create_app(
             )
         except Exception:
             get_logger(__name__).warning(
-                "Workforce governance recording failed execution_id=%s", execution.execution_id, exc_info=True,
+                "Workforce governance recording failed execution_id=%s",
+                execution.execution_id,
+                exc_info=True,
             )
 
         try:
@@ -5427,7 +5011,9 @@ def create_app(
                 )
         except Exception:
             get_logger(__name__).warning(
-                "Workforce audit logging failed execution_id=%s", execution.execution_id, exc_info=True,
+                "Workforce audit logging failed execution_id=%s",
+                execution.execution_id,
+                exc_info=True,
             )
 
     @app.post("/api/ai/chat")
@@ -5440,8 +5026,6 @@ def create_app(
         user_request = str(payload.get("request", "")).strip()
         if not user_request:
             return Response(content="request is required", status_code=400)
-        import uuid
-
         mc_id = f"mc-chat-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "chat")
         if mc_exec is not None:
@@ -5536,8 +5120,6 @@ def create_app(
         user_request = str(payload.get("request", "")).strip()
         if not user_request:
             return Response(content="request is required", status_code=400)
-        import uuid
-
         mc_id = f"mc-analyze-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "analyze")
         repo = getattr(app.state.services, "platform_repository", None)
@@ -5624,8 +5206,6 @@ def create_app(
         user_request = str(payload.get("request", "")).strip()
         if not user_request:
             return Response(content="request is required", status_code=400)
-        import uuid
-
         mc_id = f"mc-plan-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(request, mc_id, user_request, "plan")
         repo = getattr(app.state.services, "platform_repository", None)
@@ -5669,7 +5249,7 @@ def create_app(
             )
         return result
 
-    # ── Mission Control Routes ──
+    # â”€â”€ Mission Control Routes â”€â”€
 
     @app.get("/api/mission-control/executions")
     def api_mc_executions(request: FastAPIRequest) -> Any:
@@ -5684,7 +5264,7 @@ def create_app(
         user = request.query_params.get("user") or None
         exec_type = request.query_params.get("execution_type") or None
         org = request.query_params.get("organization") or None
-        days = request.query_params.get("days", type=int) or None
+        days = _query_int(request, "days")
         from src.mission_control import count_executions, list_executions
 
         try:
@@ -5952,7 +5532,7 @@ def create_app(
             if manager is not None:
                 manager.disconnect(websocket, channel="mission_control")
 
-    # ── Integrate MC into knowledge search ──
+    # â”€â”€ Integrate MC into knowledge search â”€â”€
 
     _original_knowledge_search = None
 
@@ -5962,8 +5542,6 @@ def create_app(
         query = request.query_params.get("q", "").strip()
         limit = int(request.query_params.get("limit", 10))
         limit = max(1, min(limit, 100))
-        import uuid
-
         mc_id = f"mc-kb-{uuid.uuid4().hex[:12]}"
 
         repo_store: tuple = _get_knowledge_services()
@@ -6079,7 +5657,7 @@ def create_app(
 
             from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
 
-            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
+            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
             store = SQLiteMemoryStore(db_path=db_path)
             if not query:
                 if memory_type == "conversations":
@@ -6230,8 +5808,6 @@ def create_app(
             repo.record_audit_log(
                 user.email if user else "anonymous", "approve", "ai_approval", approval_id, {}
             )
-        import uuid
-
         mc_id = f"mc-gov-approve-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -6271,8 +5847,6 @@ def create_app(
             repo.record_audit_log(
                 user.email if user else "anonymous", "reject", "ai_approval", approval_id, {}
             )
-        import uuid
-
         mc_id = f"mc-gov-reject-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -6388,7 +5962,7 @@ def create_app(
 
             from src.intelligence.memory.sqlite_memory import SQLiteMemoryStore
 
-            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
+            db_path = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
             store = SQLiteMemoryStore(db_path=db_path)
             conversations = store.get_recent_conversations(limit=20)
             learnings = store.get_recent_learnings(limit=20)
@@ -6456,7 +6030,7 @@ def create_app(
         from src.knowledge.indexer import KnowledgeIndexer
         from src.knowledge.retriever import KnowledgeRetriever
 
-        mem_db = os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
+        mem_db = os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
         store = SQLiteMemoryStore(db_path=mem_db)
         rag = RAGEngine()
         try:
@@ -6741,8 +6315,6 @@ def create_app(
         agent_id = str(payload.get("agent_id", ""))
         action_type = str(payload.get("action_type", ""))
         target = str(payload.get("target", ""))
-        import uuid
-
         mc_id = f"mc-gov-eval-{uuid.uuid4().hex[:12]}"
         mc_exec = _start_mc_execution(
             request,
@@ -7034,7 +6606,7 @@ def create_app(
             from src.search.engine import SearchEngine
 
             repo = app.state.services.platform_repository
-            mem_db = _os.getenv("AEGIS_AI_MEMORY_DB", "aegisnex.db")
+            mem_db = _os.getenv("AEGIS_AI_MEMORY_DB", "ai_memory.db")
             store = SQLiteMemoryStore(db_path=mem_db)
             engine = SearchEngine(repo=repo, memory_store=store)
             results = engine.search(q, domain=domain, limit=limit)
@@ -7126,12 +6698,9 @@ def create_app(
     @app.get("/api/agents")
     def api_list_agents(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
-            agents = orchestrator.list_agents()
-            return {"agents": agents, "count": len(agents)}
-        except Exception as exc:
-            return {"error": str(exc), "agents": [], "count": 0}
+        orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
+        agents = orchestrator.list_agents()
+        return {"agents": agents, "count": len(agents)}
 
     @app.post("/api/agents/dispatch")
     async def api_dispatch_agent(request: FastAPIRequest) -> Any:
@@ -7180,12 +6749,9 @@ def create_app(
     @app.get("/api/agents/state")
     def api_agent_state(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
-        try:
-            orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
-            state = orchestrator.get_shared_state()
-            return {"state": state}
-        except Exception as exc:
-            return {"error": str(exc), "state": {}}
+        orchestrator: AgentOrchestrator = request.app.state.agent_orchestrator
+        state = orchestrator.get_shared_state()
+        return {"state": state}
 
     @app.post("/api/agents/fan-out")
     async def api_fan_out_agents(request: FastAPIRequest) -> Any:
@@ -8170,1134 +7736,7 @@ def create_app(
             "docker": {"status": "connected" if docker_ok else "disconnected"},
         }
 
-    # =========================================================================
-    # AI Governance Routes
-    # =========================================================================
-
-    def _get_governance(request: FastAPIRequest):
-        gov = getattr(request.app.state, "governance", None)
-        if gov is None:
-            from src.ai_governance import GovernanceManager
-
-            gov = GovernanceManager()
-            request.app.state.governance = gov
-        return gov
-
-    def _governance_tenant_id(request: FastAPIRequest) -> str:
-        user = require_auth(request, request.app.state.auth_manager)
-        direct_org_id = getattr(user, "org_id", None)
-        if direct_org_id is not None:
-            return f"org:{direct_org_id}"
-        tenant_manager = getattr(request.app.state, "tenant_manager", None)
-        if tenant_manager is not None and getattr(user, "id", 0) > 0:
-            try:
-                tenants = tenant_manager.get_user_tenants(user.id)
-            except Exception:
-                tenants = []
-            if tenants:
-                return f"org:{tenants[0].org_id}"
-        return "default"
-
-    def _create_governance_approval(
-        request: FastAPIRequest,
-        *,
-        requester: str,
-        summary: str,
-        details: dict[str, Any],
-    ) -> str | None:
-        services = getattr(request.app.state, "services", None)
-        repo = getattr(services, "platform_repository", None)
-        if repo is None or not hasattr(repo, "create_approval_request"):
-            return None
-        import uuid
-
-        approval_id = f"gov-{uuid.uuid4().hex[:12]}"
-        repo.create_approval_request(
-            approval_id=approval_id,
-            request_type="ai_governance_action",
-            requester=requester,
-            summary=summary,
-            details=details,
-        )
-        return approval_id
-
-    @app.get("/api/governance/stats")
-    async def governance_stats(request: FastAPIRequest):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        return gov.get_agent_stats(tenant_id=tenant_id)
-
-    @app.get("/api/governance/agents")
-    async def governance_list_agents(
-        request: FastAPIRequest,
-        status: str | None = None,
-        risk_level: str | None = None,
-        team: str | None = None,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        agents = gov.list_agents(
-            status=status, risk_level=risk_level, team=team, tenant_id=tenant_id
-        )
-        return {"agents": [a.to_dict() for a in agents]}
-
-    @app.post("/api/governance/agents")
-    async def governance_register_agent(request: FastAPIRequest):
-        require_role(*OPERATOR_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        from src.ai_governance import AIAgent
-
-        agent = AIAgent(
-            agent_id=body.get("agent_id", ""),
-            name=body.get("name", ""),
-            agent_type=body.get("agent_type", "general"),
-            description=body.get("description", ""),
-            owner=body.get("owner", "system"),
-            team=body.get("team", "platform"),
-            department=body.get("department", body.get("team", "platform")),
-            purpose=body.get("purpose", body.get("description", "")),
-            provider=body.get("provider", "openai"),
-            model=body.get("model", "gpt-4o-mini"),
-            version=body.get("version", "1.0.0"),
-            status=body.get("status", "active"),
-            risk_level=body.get("risk_level", "medium"),
-            trust_score=float(body.get("trust_score", 50)),
-            daily_budget=float(body.get("daily_budget", 25.0)),
-            monthly_budget=float(body.get("monthly_budget", 750.0)),
-            average_cost=float(body.get("average_cost", 0.0)),
-            average_latency=float(body.get("average_latency", 0.0)),
-            success_rate=float(body.get("success_rate", 100.0)),
-            permissions=json.dumps(body.get("permissions", [])),
-            connected_tools=json.dumps(body.get("connected_tools", body.get("allowed_tools", []))),
-            policies=json.dumps(body.get("policies", [])),
-            approval_required=bool(body.get("approval_required", False)),
-            allowed_tools=json.dumps(body.get("allowed_tools", [])),
-            allowed_resources=json.dumps(body.get("allowed_resources", [])),
-            max_actions_per_hour=int(body.get("max_actions_per_hour", 100)),
-        )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        if gov.get_agent(agent.agent_id, tenant_id=tenant_id):
-            raise HTTPException(status_code=409, detail="Agent already registered")
-        result = gov.register_agent(agent, tenant_id=tenant_id)
-        if result is None:
-            raise HTTPException(status_code=500, detail="Failed to register agent")
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email,
-                "register_agent",
-                "ai_agent",
-                agent.agent_id,
-                {"name": agent.name, "tenant_id": tenant_id},
-            )
-        return result.to_dict()
-
-    @app.get("/api/governance/agents/{agent_id}")
-    async def governance_get_agent(request: FastAPIRequest, agent_id: str):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        agent = gov.get_agent(agent_id, tenant_id=tenant_id)
-        if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        return agent.to_dict()
-
-    @app.get("/api/governance/agents/{agent_id}/history")
-    async def governance_get_agent_history(request: FastAPIRequest, agent_id: str, limit: int = 50):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        if not gov.get_agent(agent_id, tenant_id=tenant_id):
-            raise HTTPException(status_code=404, detail="Agent not found")
-        history = gov.get_agent_history(
-            agent_id, limit=max(1, min(limit, 500)), tenant_id=tenant_id
-        )
-        return {"agent_id": agent_id, "history": [a.to_dict() for a in history]}
-
-    @app.get("/api/governance/agents/{agent_id}/policies")
-    async def governance_get_agent_policies(request: FastAPIRequest, agent_id: str):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        if not gov.get_agent(agent_id, tenant_id=tenant_id):
-            raise HTTPException(status_code=404, detail="Agent not found")
-        policies = gov.get_agent_policies(agent_id, tenant_id=tenant_id)
-        return {"agent_id": agent_id, "policies": [p.to_dict() for p in policies]}
-
-    @app.get("/api/governance/agents/{agent_id}/tools")
-    async def governance_get_agent_tools(request: FastAPIRequest, agent_id: str):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        if not gov.get_agent(agent_id, tenant_id=tenant_id):
-            raise HTTPException(status_code=404, detail="Agent not found")
-        return gov.get_agent_tools(agent_id, tenant_id=tenant_id)
-
-    @app.get("/api/governance/agents/{agent_id}/metrics")
-    async def governance_get_agent_metrics(request: FastAPIRequest, agent_id: str):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        metrics = gov.get_agent_metrics(agent_id, tenant_id=tenant_id)
-        if metrics is None:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        return metrics
-
-    @app.put("/api/governance/agents/{agent_id}")
-    async def governance_update_agent(request: FastAPIRequest, agent_id: str):
-        require_role(*OPERATOR_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        fields = {}
-        for key in (
-            "name",
-            "description",
-            "owner",
-            "team",
-            "department",
-            "purpose",
-            "provider",
-            "model",
-            "version",
-            "status",
-            "risk_level",
-            "trust_score",
-            "daily_budget",
-            "monthly_budget",
-            "average_cost",
-            "average_latency",
-            "success_rate",
-            "approval_required",
-            "max_actions_per_hour",
-        ):
-            if key in body:
-                fields[key] = body[key]
-        if "allowed_tools" in body:
-            fields["allowed_tools"] = json.dumps(body["allowed_tools"])
-        if "allowed_resources" in body:
-            fields["allowed_resources"] = json.dumps(body["allowed_resources"])
-        if "permissions" in body:
-            fields["permissions"] = json.dumps(body["permissions"])
-        if "connected_tools" in body:
-            fields["connected_tools"] = json.dumps(body["connected_tools"])
-        if "policies" in body:
-            fields["policies"] = json.dumps(body["policies"])
-        ok = gov.update_agent(agent_id, tenant_id=tenant_id, **fields)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email, "update_agent", "ai_agent", agent_id, {**fields, "tenant_id": tenant_id}
-            )
-        return {"status": "updated"}
-
-    @app.delete("/api/governance/agents/{agent_id}")
-    async def governance_delete_agent(request: FastAPIRequest, agent_id: str):
-        require_role(*ADMIN_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        ok = gov.delete_agent(agent_id, tenant_id=tenant_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Agent not found")
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email, "delete_agent", "ai_agent", agent_id, {"tenant_id": tenant_id}
-            )
-        return {"status": "deleted"}
-
-    @app.get("/api/governance/actions")
-    async def governance_list_actions(
-        request: FastAPIRequest,
-        agent_id: str | None = None,
-        action_type: str | None = None,
-        verdict: str | None = None,
-        limit: int = 100,
-        offset: int = 0,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        actions = gov.list_actions(
-            agent_id=agent_id,
-            action_type=action_type,
-            verdict=verdict,
-            limit=limit,
-            offset=offset,
-            tenant_id=tenant_id,
-        )
-        return {"actions": [a.to_dict() for a in actions]}
-
-    @app.get("/api/governance/actions/stats")
-    async def governance_action_stats(
-        request: FastAPIRequest,
-        agent_id: str | None = None,
-        hours: int = 24,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        return gov.get_action_stats(agent_id=agent_id, hours=hours, tenant_id=tenant_id)
-
-    @app.get("/api/governance/audit/verify")
-    async def governance_audit_verify(request: FastAPIRequest):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        return gov.verify_action_audit_chain(tenant_id=tenant_id)
-
-    @app.get("/api/governance/audit/export.csv")
-    async def governance_audit_export_csv(request: FastAPIRequest, limit: int = 5000):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        content = gov.export_action_audit_csv(tenant_id=tenant_id, limit=limit)
-        return Response(
-            content=content,
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=commandmesh_action_audit.csv"},
-        )
-
-    @app.get("/api/governance/costs/summary")
-    async def governance_cost_summary(
-        request: FastAPIRequest,
-        agent_id: str | None = None,
-        limit: int = 1000,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        actions = gov.list_actions(
-            agent_id=agent_id,
-            action_type="chat_completion",
-            limit=max(1, min(limit, 5000)),
-            tenant_id=tenant_id,
-        )
-        summary: dict[str, Any] = {
-            "tenant_id": tenant_id,
-            "total_calls": 0,
-            "estimated_selected_usd": 0.0,
-            "estimated_requested_usd": 0.0,
-            "estimated_savings_usd": 0.0,
-            "by_agent": {},
-            "by_model": {},
-            "by_provider": {},
-            "by_tier": {},
-        }
-
-        def _bucket(name: str, key: str) -> dict[str, Any]:
-            return summary[name].setdefault(
-                key or "unknown",
-                {
-                    "calls": 0,
-                    "estimated_selected_usd": 0.0,
-                    "estimated_requested_usd": 0.0,
-                    "estimated_savings_usd": 0.0,
-                },
-            )
-
-        for action in actions:
-            try:
-                outputs = (
-                    json.loads(action.outputs)
-                    if isinstance(action.outputs, str)
-                    else action.outputs
-                )
-            except Exception:
-                outputs = {}
-            if not isinstance(outputs, dict):
-                continue
-            cost = outputs.get("cost") if isinstance(outputs.get("cost"), dict) else {}
-            routing = outputs.get("routing") if isinstance(outputs.get("routing"), dict) else {}
-            selected = float(cost.get("estimated_selected_usd", 0.0) or 0.0)
-            requested = float(cost.get("estimated_requested_usd", selected) or selected)
-            savings = float(cost.get("estimated_savings_usd", requested - selected) or 0.0)
-            summary["total_calls"] += 1
-            summary["estimated_selected_usd"] += selected
-            summary["estimated_requested_usd"] += requested
-            summary["estimated_savings_usd"] += savings
-            groups = {
-                "by_agent": action.agent_id,
-                "by_model": str(
-                    routing.get("selected_model") or action.target_resource.replace("model:", "")
-                ),
-                "by_provider": str(
-                    outputs.get("provider") or routing.get("selected_provider") or "unknown"
-                ),
-                "by_tier": str(routing.get("selected_tier") or "unknown"),
-            }
-            for group, key in groups.items():
-                bucket = _bucket(group, key)
-                bucket["calls"] += 1
-                bucket["estimated_selected_usd"] += selected
-                bucket["estimated_requested_usd"] += requested
-                bucket["estimated_savings_usd"] += savings
-
-        for key in ("estimated_selected_usd", "estimated_requested_usd", "estimated_savings_usd"):
-            summary[key] = round(summary[key], 8)
-        for group in ("by_agent", "by_model", "by_provider", "by_tier"):
-            for bucket in summary[group].values():
-                for key in (
-                    "estimated_selected_usd",
-                    "estimated_requested_usd",
-                    "estimated_savings_usd",
-                ):
-                    bucket[key] = round(bucket[key], 8)
-        return summary
-
-    @app.post("/api/governance/actions")
-    async def governance_record_action(request: FastAPIRequest):
-        require_role(*OPERATOR_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        from src.ai_governance import AgentAction
-
-        action = AgentAction(
-            action_id=body.get("action_id", ""),
-            agent_id=body.get("agent_id", ""),
-            action_type=body.get("action_type", "unknown"),
-            action_summary=body.get("action_summary", ""),
-            target_resource=body.get("target_resource", ""),
-            inputs=json.dumps(body.get("inputs", {})),
-            outputs=json.dumps(body.get("outputs", {})),
-            reasoning=body.get("reasoning", ""),
-            confidence_score=float(body.get("confidence_score", 0)),
-            policy_verdict=body.get("policy_verdict", "allowed"),
-            status=body.get("status", "success"),
-            duration_ms=float(body.get("duration_ms", 0)),
-        )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        result = gov.record_action(action, tenant_id=tenant_id)
-        response = result.to_dict()
-        if result.policy_verdict == "pending_approval":
-            user = require_auth(request, request.app.state.auth_manager)
-            approval_id = _create_governance_approval(
-                request,
-                requester=user.email,
-                summary=f"AI governance approval required for {result.agent_id}: {result.action_summary}",
-                details={
-                    "tenant_id": tenant_id,
-                    "agent_id": result.agent_id,
-                    "action_id": result.action_id,
-                    "action_type": result.action_type,
-                    "target_resource": result.target_resource,
-                    "policy_verdict": result.policy_verdict,
-                },
-            )
-            if approval_id:
-                response["approval_id"] = approval_id
-        return response
-
-    @app.post("/api/governance/evaluate")
-    async def governance_evaluate_action(request: FastAPIRequest):
-        require_role(*VIEWER_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        verdict, reason = gov.evaluate_policies(
-            agent_id=body.get("agent_id", ""),
-            action_type=body.get("action_type", ""),
-            target=body.get("target", ""),
-            tenant_id=tenant_id,
-        )
-        response: dict[str, Any] = {"verdict": verdict, "reason": reason}
-        if verdict == "pending_approval":
-            user = require_auth(request, request.app.state.auth_manager)
-            approval_id = _create_governance_approval(
-                request,
-                requester=user.email,
-                summary=f"AI governance approval required for {body.get('agent_id', '')}: {body.get('action_type', '')}",
-                details={
-                    "tenant_id": tenant_id,
-                    "agent_id": body.get("agent_id", ""),
-                    "action_type": body.get("action_type", ""),
-                    "target": body.get("target", ""),
-                    "reason": reason,
-                },
-            )
-            if approval_id:
-                response["approval_id"] = approval_id
-        return response
-
-    @app.get("/api/governance/policies")
-    async def governance_list_policies(
-        request: FastAPIRequest,
-        enabled_only: bool = False,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        policies = gov.list_policies(enabled_only=enabled_only, tenant_id=tenant_id)
-        return {"policies": [p.to_dict() for p in policies]}
-
-    @app.post("/api/governance/policies")
-    async def governance_create_policy(request: FastAPIRequest):
-        require_role(*ADMIN_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        from src.ai_governance import AgentPolicy
-
-        policy = AgentPolicy(
-            policy_id=0,
-            name=body.get("name", ""),
-            description=body.get("description", ""),
-            policy_type=body.get("policy_type", "access_control"),
-            target_agents=json.dumps(body.get("target_agents", ["*"])),
-            conditions=json.dumps(body.get("conditions", {})),
-            effect=body.get("effect", "allow"),
-            priority=int(body.get("priority", 100)),
-            enabled=body.get("enabled", True),
-        )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        try:
-            result = gov.create_policy(policy, tenant_id=tenant_id)
-        except Exception as e:
-            raise HTTPException(status_code=409, detail=str(e)) from e
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email, "create_policy", "ai_policy", policy.name, {"tenant_id": tenant_id}
-            )
-        return result.to_dict()
-
-    @app.put("/api/governance/policies/{name}")
-    async def governance_update_policy(request: FastAPIRequest, name: str):
-        require_role(*ADMIN_ROLES)(request)
-        try:
-            body = await request.json()
-        except Exception:
-            return Response(
-                content="Invalid JSON body", status_code=400, media_type="application/json"
-            )
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        fields = {}
-        for key in ("description", "policy_type", "effect", "priority", "enabled"):
-            if key in body:
-                fields[key] = body[key]
-        if "target_agents" in body:
-            fields["target_agents"] = json.dumps(body["target_agents"])
-        if "conditions" in body:
-            fields["conditions"] = json.dumps(body["conditions"])
-        ok = gov.update_policy(name, tenant_id=tenant_id, **fields)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Policy not found")
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email, "update_policy", "ai_policy", name, {"tenant_id": tenant_id}
-            )
-        return {"status": "updated"}
-
-    @app.delete("/api/governance/policies/{name}")
-    async def governance_delete_policy(request: FastAPIRequest, name: str):
-        require_role(*ADMIN_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        ok = gov.delete_policy(name, tenant_id=tenant_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="Policy not found")
-        user = require_auth(request, request.app.state.auth_manager)
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email, "delete_policy", "ai_policy", name, {"tenant_id": tenant_id}
-            )
-        return {"status": "deleted"}
-
-    @app.get("/api/governance/anomalies")
-    async def governance_list_anomalies(
-        request: FastAPIRequest,
-        agent_id: str | None = None,
-        status: str | None = None,
-        severity: str | None = None,
-        limit: int = 50,
-    ):
-        require_role(*VIEWER_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        anomalies = gov.list_anomalies(
-            agent_id=agent_id, status=status, severity=severity, limit=limit, tenant_id=tenant_id
-        )
-        return {"anomalies": [a.to_dict() for a in anomalies]}
-
-    @app.post("/api/governance/anomalies/detect")
-    async def governance_detect_anomalies(
-        request: FastAPIRequest,
-        agent_id: str | None = None,
-        window_hours: int = 1,
-    ):
-        require_role(*OPERATOR_ROLES)(request)
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        detected = gov.detect_anomalies(
-            agent_id=agent_id, window_hours=window_hours, tenant_id=tenant_id
-        )
-        return {"detected": detected, "count": len(detected)}
-
-    @app.put("/api/governance/anomalies/{anomaly_id}/resolve")
-    async def governance_resolve_anomaly(request: FastAPIRequest, anomaly_id: int):
-        require_role(*OPERATOR_ROLES)(request)
-        body = (
-            await request.json()
-            if request.headers.get("content-type") == "application/json"
-            else {}
-        )
-        user = require_auth(request, request.app.state.auth_manager)
-        gov = _get_governance(request)
-        status = body.get("status", "resolved")
-        tenant_id = _governance_tenant_id(request)
-        ok = gov.resolve_anomaly(
-            anomaly_id, resolved_by=user.email, status=status, tenant_id=tenant_id
-        )
-        if not ok:
-            raise HTTPException(status_code=404, detail="Anomaly not found")
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email,
-                "resolve_anomaly",
-                "ai_anomaly",
-                str(anomaly_id),
-                {"status": status, "tenant_id": tenant_id},
-            )
-        return {"status": "resolved"}
-
-    # =========================================================================
-    # CommandMesh OpenAI-compatible Proxy
-    # =========================================================================
-
-    def _message_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict):
-                    value = item.get("text") or item.get("content") or ""
-                    if value:
-                        parts.append(str(value))
-            return "\n".join(parts)
-        return str(content or "")
-
-    def _proxy_agent_id(request: FastAPIRequest, body: dict[str, Any]) -> tuple[str, bool]:
-        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
-        header_agent = request.headers.get("X-Agent-ID") or request.headers.get("X-Aegis-Agent-ID")
-        agent_id = str(metadata.get("agent_id") or header_agent or "openai-proxy-agent").strip()
-        return agent_id, agent_id == "openai-proxy-agent"
-
-    def _ensure_default_proxy_agent(gov: Any, tenant_id: str, agent_id: str) -> None:
-        if gov.get_agent(agent_id, tenant_id=tenant_id):
-            return
-        from src.ai_governance import AIAgent, RiskLevel
-
-        gov.register_agent(
-            AIAgent(
-                agent_id=agent_id,
-                name="OpenAI Proxy Agent",
-                agent_type="proxy",
-                description="Default CommandMesh proxy identity for OpenAI-compatible model calls",
-                owner="platform",
-                team="ai-platform",
-                risk_level=RiskLevel.MEDIUM.value,
-                trust_score=70.0,
-                allowed_tools=json.dumps(["chat_completion"]),
-                allowed_resources=json.dumps(["/v1/chat/completions"]),
-                max_actions_per_hour=500,
-            ),
-            tenant_id=tenant_id,
-        )
-
-    def _openai_error(
-        message: str, status_code: int, error_type: str = "commandmesh_policy_error", **extra: Any
-    ) -> Response:
-        payload = {
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": error_type,
-                **extra,
-            }
-        }
-        return Response(
-            content=json.dumps(payload), status_code=status_code, media_type="application/json"
-        )
-
-    @app.post("/v1/chat/completions")
-    @app.post("/api/v1/chat/completions")
-    async def commandmesh_chat_completions(request: FastAPIRequest) -> Any:
-        user = require_auth(request, request.app.state.auth_manager)
-        try:
-            body = await request.json()
-        except Exception:
-            return _openai_error("Invalid JSON body", 400, "invalid_request_error")
-        if not isinstance(body, dict):
-            return _openai_error("Request body must be a JSON object", 400, "invalid_request_error")
-        if body.get("stream"):
-            return _openai_error(
-                "Streaming chat completions are not supported by CommandMesh proxy v1",
-                400,
-                "unsupported_feature",
-            )
-
-        raw_messages = body.get("messages", [])
-        if not isinstance(raw_messages, list) or not raw_messages:
-            return _openai_error("messages must be a non-empty array", 400, "invalid_request_error")
-
-        from src.ai_governance import ActionVerdict, AgentAction
-        from src.commandmesh_routing import decide_route, estimate_cost_usd
-        from src.intelligence.providers.base import Message
-
-        gov = _get_governance(request)
-        tenant_id = _governance_tenant_id(request)
-        agent_id, is_default_agent = _proxy_agent_id(request, body)
-        if is_default_agent:
-            _ensure_default_proxy_agent(gov, tenant_id, agent_id)
-
-        messages = [
-            Message(
-                role=str(item.get("role", "user")),
-                content=_message_text(item.get("content")),
-                name=str(item["name"]) if isinstance(item, dict) and item.get("name") else None,
-            )
-            for item in raw_messages
-            if isinstance(item, dict)
-        ]
-        if not messages:
-            return _openai_error(
-                "messages must contain valid message objects", 400, "invalid_request_error"
-            )
-
-        requested_model = str(body.get("model") or "").strip()
-        requested_provider = str(
-            body.get("provider")
-            or os.getenv("AEGIS_COMMANDMESH_PROVIDER")
-            or os.getenv("AEGIS_AI_PROVIDER", "openai")
-        )
-        prompt_text = "\n".join(m.content for m in messages)
-        estimated_prompt_tokens = len(re.findall(r"\w+|[^\w\s]", prompt_text, re.UNICODE))
-        tools = body.get("tools") if isinstance(body.get("tools"), list) else None
-        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
-        route = decide_route(
-            requested_provider=requested_provider,
-            requested_model=requested_model,
-            prompt_text=prompt_text,
-            prompt_tokens=estimated_prompt_tokens,
-            has_tools=bool(tools),
-            metadata=metadata,
-        )
-
-        target_resource = f"model:{route.selected_model or 'default'}"
-        verdict, reason = gov.evaluate_policies(
-            agent_id, "chat_completion", target_resource, tenant_id=tenant_id
-        )
-        action_id = f"cmpl-{__import__('uuid').uuid4().hex[:16]}"
-
-        if verdict != ActionVerdict.ALLOWED.value:
-            approval_id = None
-            if verdict == ActionVerdict.PENDING_APPROVAL.value:
-                approval_id = _create_governance_approval(
-                    request,
-                    requester=user.email,
-                    summary=f"Model call requires approval for {agent_id}",
-                    details={
-                        "tenant_id": tenant_id,
-                        "agent_id": agent_id,
-                        "action_id": action_id,
-                        "action_type": "chat_completion",
-                        "target_resource": target_resource,
-                        "requested_model": requested_model,
-                        "selected_model": route.selected_model,
-                        "selected_provider": route.selected_provider,
-                        "route_reason": route.reason,
-                        "reason": reason,
-                    },
-                )
-            gov.record_action(
-                AgentAction(
-                    action_id=action_id,
-                    agent_id=agent_id,
-                    action_type="chat_completion",
-                    action_summary=f"Blocked model call to {target_resource}",
-                    target_resource=target_resource,
-                    inputs=json.dumps(
-                        {
-                            "requested_model": requested_model,
-                            "selected_model": route.selected_model,
-                            "message_count": len(raw_messages),
-                            "route_reason": route.reason,
-                        }
-                    ),
-                    outputs=json.dumps(
-                        {"verdict": verdict, "reason": reason, "approval_id": approval_id}
-                    ),
-                    reasoning=reason or "",
-                    confidence_score=1.0,
-                    policy_verdict=verdict,
-                    status="blocked"
-                    if verdict == ActionVerdict.DENIED.value
-                    else "pending_approval",
-                ),
-                tenant_id=tenant_id,
-            )
-            return _openai_error(
-                reason or "CommandMesh policy blocked this model call",
-                403,
-                verdict,
-                approval_id=approval_id,
-            )
-
-        provider_factory = getattr(request.app.state, "commandmesh_provider_factory", None)
-        if provider_factory is None:
-            from src.intelligence.providers.factory import create_provider
-
-            provider_factory = create_provider
-        provider = provider_factory(route.selected_provider)
-        kwargs = {
-            "model": route.selected_model or None,
-            "temperature": body.get("temperature"),
-            "max_tokens": body.get("max_tokens"),
-        }
-        kwargs = {key: value for key, value in kwargs.items() if value is not None}
-        started = datetime.now(UTC)
-        if tools:
-            reply = provider.chat_with_tools(messages, tools, **kwargs)
-        else:
-            reply = provider.chat(messages, **kwargs)
-        duration_ms = (datetime.now(UTC) - started).total_seconds() * 1000
-
-        prompt_tokens = provider.count_tokens(prompt_text)
-        completion_tokens = provider.count_tokens(reply.content)
-        selected_cost = estimate_cost_usd(
-            prompt_tokens,
-            completion_tokens,
-            route.input_cost_per_million,
-            route.output_cost_per_million,
-        )
-        requested_cost = estimate_cost_usd(
-            prompt_tokens,
-            completion_tokens,
-            route.requested_input_cost_per_million,
-            route.requested_output_cost_per_million,
-        )
-        response_model = (
-            route.selected_model
-            or getattr(getattr(provider, "config", None), "model", "")
-            or "default"
-        )
-        message: dict[str, Any] = {"role": reply.role or "assistant", "content": reply.content}
-        if reply.tool_calls:
-            message["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": call.args
-                        if isinstance(call.args, str)
-                        else json.dumps(call.args),
-                    },
-                }
-                for call in reply.tool_calls
-            ]
-        payload = {
-            "id": action_id,
-            "object": "chat.completion",
-            "created": int(datetime.now(UTC).timestamp()),
-            "model": response_model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": message,
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
-            "commandmesh": {
-                "tenant_id": tenant_id,
-                "agent_id": agent_id,
-                "provider": getattr(provider, "provider_name", route.selected_provider),
-                "policy_verdict": verdict,
-                "policy_reason": reason,
-                "duration_ms": round(duration_ms, 2),
-                "routing": {
-                    "requested_provider": route.requested_provider,
-                    "requested_model": route.requested_model,
-                    "selected_provider": route.selected_provider,
-                    "selected_model": response_model,
-                    "selected_tier": route.selected_tier,
-                    "complexity": route.complexity.level,
-                    "complexity_score": route.complexity.score,
-                    "complexity_reasons": route.complexity.reasons,
-                    "reason": route.reason,
-                    "routing_disabled": route.routing_disabled,
-                },
-                "cost": {
-                    "estimated_selected_usd": selected_cost,
-                    "estimated_requested_usd": requested_cost,
-                    "estimated_savings_usd": round(requested_cost - selected_cost, 8),
-                    "selected_input_cost_per_million": route.input_cost_per_million,
-                    "selected_output_cost_per_million": route.output_cost_per_million,
-                },
-            },
-        }
-        gov.record_action(
-            AgentAction(
-                action_id=action_id,
-                agent_id=agent_id,
-                action_type="chat_completion",
-                action_summary=f"Proxied model call to {response_model}",
-                target_resource=f"model:{response_model}",
-                inputs=json.dumps(
-                    {
-                        "requested_model": requested_model,
-                        "selected_model": response_model,
-                        "message_count": len(messages),
-                        "prompt_tokens": prompt_tokens,
-                        "route_reason": route.reason,
-                    }
-                ),
-                outputs=json.dumps(
-                    {
-                        "completion_tokens": completion_tokens,
-                        "provider": getattr(provider, "provider_name", route.selected_provider),
-                        "routing": payload["commandmesh"]["routing"],
-                        "cost": payload["commandmesh"]["cost"],
-                    }
-                ),
-                reasoning=reason or "Allowed by CommandMesh policy",
-                confidence_score=1.0,
-                policy_verdict=verdict,
-                status="success",
-                duration_ms=duration_ms,
-            ),
-            tenant_id=tenant_id,
-        )
-        repo = getattr(request.app.state.services, "platform_repository", None)
-        if repo is not None:
-            repo.record_audit_log(
-                user.email,
-                "commandmesh_chat_completion",
-                "model_call",
-                action_id,
-                {
-                    "tenant_id": tenant_id,
-                    "agent_id": agent_id,
-                    "model": response_model,
-                    "provider": getattr(provider, "provider_name", route.selected_provider),
-                    "policy_verdict": verdict,
-                    "route_reason": route.reason,
-                    "selected_tier": route.selected_tier,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "estimated_cost_usd": selected_cost,
-                },
-            )
-        return payload
-
-    # ---- Mission Control ----
-    from src.mission_control import (
-        count_executions as mc_count_executions,
-    )
-    from src.mission_control import (
-        delete_execution as mc_delete_execution,
-    )
-    from src.mission_control import (
-        ensure_table as mc_ensure_table,
-    )
-    from src.mission_control import (
-        get_execution as mc_get_execution,
-    )
-    from src.mission_control import (
-        get_execution_stats as mc_get_execution_stats,
-    )
-    from src.mission_control import (
-        list_executions as mc_list_executions,
-    )
-
-    @app.on_event("startup")
-    def _init_mission_control():
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is not None:
-            with suppress(Exception):
-                mc_ensure_table(repo)
-
-    @app.get("/api/mission-control/executions")
-    def api_mc_list_executions(request: FastAPIRequest) -> dict[str, Any]:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is None:
-            return {"executions": [], "count": 0, "total": 0, "limit": 50, "offset": 0}
-        try:
-            limit = int(request.query_params.get("limit", 50))
-            offset = int(request.query_params.get("offset", 0))
-            status = request.query_params.get("status") or None
-            search = request.query_params.get("search") or None
-            user = request.query_params.get("user") or None
-            limit = max(1, min(limit, 200))
-            executions = mc_list_executions(
-                repo, limit=limit, offset=offset, status=status, search=search, user=user
-            )
-            total = mc_count_executions(repo, status=status, search=search, user=user)
-            return {
-                "executions": [e.to_dict() for e in executions],
-                "count": len(executions),
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            }
-        except Exception as exc:
-            get_logger(__name__).warning("MC list error: %s", exc)
-            return {"executions": [], "count": 0, "total": 0, "limit": 50, "offset": 0}
-
-    @app.get("/api/mission-control/executions/{execution_id}")
-    def api_mc_get_execution(execution_id: str, request: FastAPIRequest) -> Any:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is None:
-            return Response(content="Service unavailable", status_code=503)
-        try:
-            execution = mc_get_execution(repo, execution_id)
-            if execution is None:
-                return Response(content="Execution not found", status_code=404)
-            stats = mc_get_execution_stats(repo)
-            return {"execution": execution.to_dict(), "stats": stats}
-        except Exception as exc:
-            get_logger(__name__).warning("MC get error: %s", exc)
-            return Response(content="Internal error", status_code=500)
-
-    @app.get("/api/mission-control/executions/{execution_id}/export")
-    def api_mc_export_execution(execution_id: str, request: FastAPIRequest) -> Any:
-        require_role(*VIEWER_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is None:
-            return Response(content="Service unavailable", status_code=503)
-        try:
-            execution = mc_get_execution(repo, execution_id)
-            if execution is None:
-                return Response(content="Execution not found", status_code=404)
-            from starlette.responses import Response as StarletteResponse
-
-            export_data = json.dumps(execution.to_dict(), indent=2, default=str)
-            return StarletteResponse(
-                content=export_data,
-                media_type="application/json",
-                headers={
-                    "Content-Disposition": f"attachment; filename=execution-{execution_id}.json"
-                },
-            )
-        except Exception as exc:
-            get_logger(__name__).warning("MC export error: %s", exc)
-            return Response(content="Internal error", status_code=500)
-
-    @app.delete("/api/mission-control/executions/{execution_id}")
-    def api_mc_delete_execution(execution_id: str, request: FastAPIRequest) -> dict[str, Any]:
-        require_role(*ADMIN_ROLES)(request)
-        repo = getattr(app.state.services, "platform_repository", None)
-        if repo is None:
-            return {"error": "Service unavailable"}
-        try:
-            mc_delete_execution(repo, execution_id)
-            return {"status": "deleted", "execution_id": execution_id}
-        except Exception as exc:
-            get_logger(__name__).warning("MC delete error: %s", exc)
-            return {"error": str(exc)}
-
-    # ---- Mission Control WebSocket ----
-
-    @app.websocket("/ws/mission-control")
-    async def ws_mission_control(websocket: FastAPIRequest) -> None:
-        token = _websocket_token(websocket)
-        if token is None:
-            await websocket.accept()
-            await websocket.close(code=4001)
-            return
-        user, _ = authenticate_request(websocket, auth_manager)
-        if user is None:
-            await websocket.accept()
-            await websocket.close(code=4001)
-            return
-        manager: WebSocketManager = app.state.websocket_manager
-        await manager.connect(websocket, channel="mission-control")
-        try:
-            repo = getattr(app.state.services, "platform_repository", None)
-            if repo is not None:
-                executions = mc_list_executions(repo, limit=20)
-                await websocket.send_json(
-                    {
-                        "type": "execution_list",
-                        "timestamp": utc_now(),
-                        "payload": {
-                            "executions": [e.to_dict() for e in executions],
-                            "count": len(executions),
-                        },
-                    }
-                )
-            while True:
-                data = await websocket.receive_text()
-                try:
-                    msg = json.loads(data)
-                    if msg.get("type") == "ping":
-                        await websocket.send_json({"type": "pong", "timestamp": utc_now()})
-                except json.JSONDecodeError:
-                    pass
-        except WebSocketDisconnect:
-            pass
-        except Exception:
-            pass
-        finally:
-            manager.disconnect(websocket, channel="mission-control")
-
     return app
 
 
-if "pytest" in sys.modules:
-    app = None
-else:
-    try:
-        app = create_app()
-    except (RuntimeError, AttributeError):
-        import traceback
-
-        traceback.print_exc()
-        app = None
+app = create_app()

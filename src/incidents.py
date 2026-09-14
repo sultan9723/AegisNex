@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -28,19 +30,19 @@ class Incident:
     remediation_attempted: bool
     remediation_successful: bool
     status: str
-    acknowledged_by: Optional[str] = None
-    acknowledged_at: Optional[str] = None
-    resolved_by: Optional[str] = None
-    resolved_timestamp: Optional[str] = None
-    resolution_notes: Optional[str] = None
-    proposed_remediation: Optional[Dict[str, Any]] = None
-    remediation_proposed_by: Optional[str] = None
-    remediation_proposed_at: Optional[str] = None
-    remediation_approval_status: Optional[str] = None
-    remediation_plan_confidence: Optional[float] = None
-    org_id: Optional[int] = None
-    org_name: Optional[str] = None
-    remediation_history: List[Dict[str, Any]] | None = None
+    acknowledged_by: str | None = None
+    acknowledged_at: str | None = None
+    resolved_by: str | None = None
+    resolved_timestamp: str | None = None
+    resolution_notes: str | None = None
+    proposed_remediation: dict[str, Any] | None = None
+    remediation_proposed_by: str | None = None
+    remediation_proposed_at: str | None = None
+    remediation_approval_status: str | None = None
+    remediation_plan_confidence: float | None = None
+    org_id: int | None = None
+    org_name: str | None = None
+    remediation_history: list[dict[str, Any]] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> Incident:
@@ -111,6 +113,21 @@ class IncidentManager:
         self.incidents: list[Incident] = self._load_incidents()
         self.notification_events: list[dict[str, Any]] = self._load_notification_events()
 
+    def _broadcast_incident_event(self, event_type: str, incident: Incident) -> None:
+        if not self.broadcast_callback:
+            return
+        try:
+            result = self.broadcast_callback(event_type, incident.to_dict())
+            if inspect.isawaitable(result):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    asyncio.run(result)
+                else:
+                    loop.create_task(result)
+        except Exception:
+            pass
+
     def create_incident(
         self,
         severity: str,
@@ -165,14 +182,6 @@ class IncidentManager:
             "resolved_by",
             "resolved_timestamp",
             "resolution_notes",
-            "proposed_remediation",
-            "remediation_proposed_by",
-            "remediation_proposed_at",
-            "remediation_approval_status",
-            "remediation_plan_confidence",
-            "remediation_history",
-            "org_id",
-            "org_name",
         }
         for key, value in updates.items():
             if key in allowed_fields:
@@ -239,159 +248,119 @@ class IncidentManager:
     def propose_remediation(
         self,
         incident_id: str,
-        proposed_by: str,
-        remediation_plan: dict[str, Any],
+        plan: dict[str, Any],
+        proposed_by: str = "system",
         confidence: float = 0.0,
     ) -> Incident:
+        """Store a diagnostic/remediation plan on the incident as pending approval.
+
+        This never executes anything - it only records the proposal so an
+        operator can review and approve/reject it later. Governance
+        classification of the plan's individual actions happens separately
+        via AppPolicyEngine before this is called.
+        """
         incident = self._get_required(incident_id)
-        if incident.remediation_history is None:
-            incident.remediation_history = []
-        if incident.proposed_remediation:
-            incident.remediation_history.append(
-                {
-                    "plan": incident.proposed_remediation,
-                    "proposed_by": incident.remediation_proposed_by,
-                    "proposed_at": incident.remediation_proposed_at,
-                    "approval_status": incident.remediation_approval_status,
-                    "outcome": "superseded",
-                }
-            )
-        incident.proposed_remediation = remediation_plan
+        incident.proposed_remediation = plan
         incident.remediation_proposed_by = proposed_by
         incident.remediation_proposed_at = utc_timestamp()
         incident.remediation_approval_status = "pending"
         incident.remediation_plan_confidence = confidence
         self._save_incidents()
         self._save_incident_to_storage(incident)
-        self._record_transition(
-            incident,
-            incident.status,
-            incident.status,
-            proposed_by,
-            {"reason": "remediation_proposed", "confidence": confidence},
-        )
-        if self.broadcast_callback:
-            try:
-                import asyncio
-
-                asyncio.ensure_future(
-                    self.broadcast_callback("remediation_proposed", incident.to_dict())
-                )
-            except Exception:
-                pass
-        return incident
-
-    def approve_remediation(self, incident_id: str, actor: str = "system") -> Incident:
-        incident = self._get_required(incident_id)
-        if incident.remediation_approval_status != "pending":
-            raise ValueError(
-                f"Cannot approve remediation with status: {incident.remediation_approval_status}"
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                proposed_by,
+                "incident.remediation_proposed",
+                "incident",
+                incident.incident_id,
+                {"mode": plan.get("mode"), "action_count": len(plan.get("actions", []) or [])},
             )
-        incident.remediation_approval_status = "approved"
-        self._save_incidents()
-        self._save_incident_to_storage(incident)
-        self._record_transition(
-            incident,
-            incident.status,
-            incident.status,
-            actor,
-            {"reason": "remediation_approved"},
-        )
-        if self.broadcast_callback:
-            try:
-                import asyncio
-
-                asyncio.ensure_future(
-                    self.broadcast_callback("remediation_approved", incident.to_dict())
-                )
-            except Exception:
-                pass
         return incident
 
-    def reject_remediation(
-        self, incident_id: str, actor: str = "system", reason: str = ""
-    ) -> Incident:
-        incident = self._get_required(incident_id)
-        if incident.remediation_approval_status != "pending":
-            raise ValueError(
-                f"Cannot reject remediation with status: {incident.remediation_approval_status}"
-            )
-        if incident.remediation_history is None:
-            incident.remediation_history = []
-        incident.remediation_history.append(
-            {
-                "plan": incident.proposed_remediation,
-                "proposed_by": incident.remediation_proposed_by,
-                "proposed_at": incident.remediation_proposed_at,
-                "approval_status": "rejected",
-                "rejected_by": actor,
-                "rejected_at": utc_timestamp(),
-                "rejection_reason": reason,
-            }
-        )
-        incident.proposed_remediation = None
-        incident.remediation_proposed_by = None
-        incident.remediation_proposed_at = None
-        incident.remediation_approval_status = "rejected"
-        incident.remediation_plan_confidence = None
-        self._save_incidents()
-        self._save_incident_to_storage(incident)
-        self._record_transition(
-            incident,
-            incident.status,
-            incident.status,
-            actor,
-            {"reason": "remediation_rejected", "rejection_reason": reason},
-        )
-        if self.broadcast_callback:
-            try:
-                import asyncio
-
-                asyncio.ensure_future(
-                    self.broadcast_callback("remediation_rejected", incident.to_dict())
-                )
-            except Exception:
-                pass
-        return incident
-
-    def mark_remediation_executed(
+    def record_remediation_decision(
         self,
         incident_id: str,
-        successful: bool,
-        details: dict[str, Any] | None = None,
+        decision: str,
+        reviewed_by: str = "system",
     ) -> Incident:
+        """Reflect a real human approve/reject decision on the incident.
+
+        This only updates the incident's own remediation_approval_status;
+        execution of an approved diagnostics-only plan is orchestrated by
+        the approval route after this state synchronization.
+        """
         incident = self._get_required(incident_id)
-        incident.remediation_attempted = True
-        incident.remediation_successful = successful
-        if incident.remediation_history is None:
-            incident.remediation_history = []
-        incident.remediation_history.append(
-            {
-                "plan": incident.proposed_remediation,
-                "proposed_by": incident.remediation_proposed_by,
-                "proposed_at": incident.remediation_proposed_at,
-                "approval_status": "executed",
-                "executed_at": utc_timestamp(),
-                "successful": successful,
-                "details": details or {},
-            }
-        )
-        incident.proposed_remediation = None
-        incident.remediation_proposed_by = None
-        incident.remediation_proposed_at = None
-        incident.remediation_approval_status = "executed"
-        incident.remediation_plan_confidence = None
+        incident.remediation_approval_status = decision
         self._save_incidents()
         self._save_incident_to_storage(incident)
-        if self.broadcast_callback:
-            try:
-                import asyncio
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                reviewed_by,
+                f"incident.remediation_{decision}",
+                "incident",
+                incident.incident_id,
+                {},
+            )
+        return incident
 
-                asyncio.ensure_future(
-                    self.broadcast_callback("remediation_executed", incident.to_dict())
-                )
-            except Exception:
-                pass
+    def record_diagnostic_evidence(
+        self,
+        incident_id: str,
+        evidence_packet: dict[str, Any],
+        actor: str = "system",
+        incident_snapshot: dict[str, Any] | None = None,
+        approval_id: str | None = None,
+    ) -> Incident:
+        """Persist one approved, read-only diagnostic evidence packet."""
+        try:
+            incident = self._get_required(incident_id)
+        except KeyError:
+            if not incident_snapshot:
+                raise
+            incident = Incident.from_dict(incident_snapshot)
+            self.incidents.append(incident)
+
+        history = list(incident.remediation_history or [])
+        if approval_id and any(
+            entry.get("approval_id") == approval_id for entry in history if isinstance(entry, dict)
+        ):
+            return incident
+        history.append(
+            {
+                "executed_at": utc_timestamp(),
+                "action": "prepare_evidence_packet",
+                "actor": actor,
+                "approval_id": approval_id,
+                "mode": "diagnostics_only",
+                "successful": True,
+                "details": {"evidence_packet": evidence_packet},
+            }
+        )
+        incident.remediation_history = history
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
+        if self.storage_repository and hasattr(self.storage_repository, "record_audit_log"):
+            self.storage_repository.record_audit_log(
+                actor,
+                "incident.diagnostic_evidence_collected",
+                "incident",
+                incident.incident_id,
+                {"mode": "diagnostics_only", "action": "prepare_evidence_packet"},
+            )
+        return incident
+
+    def assign_client(
+        self,
+        incident_id: str,
+        org_id: int | None,
+        org_name: str | None = None,
+    ) -> Incident:
+        """Keep the incident manager's durable snapshot aligned with the client index."""
+        incident = self._get_required(incident_id)
+        incident.org_id = org_id
+        incident.org_name = org_name
+        self._save_incidents()
+        self._save_incident_to_storage(incident)
         return incident
 
     def propose_remediation(
@@ -627,15 +596,7 @@ class IncidentManager:
             provider.notify_incident_created(incident) for provider in self.notification_providers
         ]
         self._record_notification_results("incident_created", incident, results)
-        if self.broadcast_callback:
-            try:
-                import asyncio
-
-                asyncio.ensure_future(
-                    self.broadcast_callback("incident_created", incident.to_dict())
-                )
-            except Exception:
-                pass
+        self._broadcast_incident_event("incident_created", incident)
         return results
 
     def _notify_resolved(self, incident: Incident) -> list[NotificationResult]:
@@ -643,15 +604,7 @@ class IncidentManager:
             provider.notify_incident_resolved(incident) for provider in self.notification_providers
         ]
         self._record_notification_results("incident_resolved", incident, results)
-        if self.broadcast_callback:
-            try:
-                import asyncio
-
-                asyncio.ensure_future(
-                    self.broadcast_callback("incident_resolved", incident.to_dict())
-                )
-            except Exception:
-                pass
+        self._broadcast_incident_event("incident_resolved", incident)
         return results
 
     def _record_notification_results(

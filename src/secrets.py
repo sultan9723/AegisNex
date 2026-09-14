@@ -25,7 +25,7 @@ class SecretManager:
         if not secret_key:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY environment variable is required for secret management. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
         stripped = secret_key.strip().encode("ascii")
         try:
@@ -33,14 +33,14 @@ class SecretManager:
         except Exception as exc:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY must be a valid base64url-encoded Fernet key. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             ) from exc
         if len(key_bytes) != 32:
             raise RuntimeError(
                 "AEGISNEX_SECRET_KEY must decode to exactly 32 bytes (a valid Fernet key). "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+                'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
             )
-            return base64.urlsafe_b64encode(kdf.derive(secret_key.encode()))
+        return base64.urlsafe_b64encode(key_bytes)
 
     def _get_fernet(self) -> Fernet:
         if self._fernet is None:

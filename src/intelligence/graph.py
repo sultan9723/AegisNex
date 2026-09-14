@@ -33,6 +33,7 @@ from src.intelligence.nodes import (
 from src.intelligence.state import AgentState, initial_state
 from src.platform_db import PlatformRepository
 
+
 def _reflection_node(state: AgentState, repo: PlatformRepository | None = None) -> AgentState:
     return self_corrector_node(state, repo=repo)
 
@@ -316,7 +317,7 @@ def reset_graph() -> None:
     """No-op: build_graph() no longer caches (see build_graph's docstring
     comment). Kept as a harmless public function since existing callers
     import and call it."""
-    return None
+    return
 
 
 def get_workflows() -> dict[str, Any]:

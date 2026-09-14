@@ -166,7 +166,12 @@ def _incident_tool(
     """
     try:
         if repo is None:
-            return {"status": "error", "error": "Repository not available", "incidents": [], "count": 0}
+            return {
+                "status": "error",
+                "error": "Repository not available",
+                "incidents": [],
+                "count": 0,
+            }
         if action == "get" and incident_id:
             incident = repo.get_incident(incident_id)
             if incident:
@@ -176,7 +181,9 @@ def _incident_tool(
             active = repo.list_incidents(incident_status="active")
             acknowledged = repo.list_incidents(incident_status="acknowledged")
             incidents = sorted(
-                active + acknowledged, key=lambda i: str(i.get("timestamp", "")), reverse=True,
+                active + acknowledged,
+                key=lambda i: str(i.get("timestamp", "")),
+                reverse=True,
             )
             return {"incidents": incidents, "count": len(incidents)}
         if action == "list":

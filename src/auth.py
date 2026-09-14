@@ -10,7 +10,6 @@ import logging
 import os
 import secrets
 import sqlite3
-import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +25,14 @@ import jwt as pyjwt
 from src.enterprise_auth import is_production_environment
 from src.session import SessionStore
 
+try:
+    import hashlib as _hashlib
+    import secrets as _secrets
+
+    _HAVE_HASH = True
+except ImportError:
+    _HAVE_HASH = False
+
 
 def generate_api_key() -> tuple[str, str, str]:
     """Generate a new API key.
@@ -35,15 +42,15 @@ def generate_api_key() -> tuple[str, str, str]:
         to the user, key_hash is the stored hash, and key_prefix is a
         human-readable prefix for identification.
     """
-    raw = secrets.token_hex(32)
+    raw = _secrets.token_hex(32)
     key_prefix = raw[:8]
     full_key = f"anx_{raw}"
-    key_hash = hashlib.sha256(full_key.encode()).hexdigest()
+    key_hash = _hashlib.sha256(full_key.encode()).hexdigest()
     return full_key, key_hash, key_prefix
 
 
 def hash_api_key(key: str) -> str:
-    return hashlib.sha256(key.encode()).hexdigest()
+    return _hashlib.sha256(key.encode()).hexdigest()
 
 
 def utc_timestamp() -> str:
@@ -140,53 +147,38 @@ class AuthError(ValueError):
 class TokenBlacklist:
     """In-memory token blacklist with DB persistence for revocations."""
 
-    def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
+    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
         self.database_path = Path(database_path)
         self._cache: set[str] = set()
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
-        connection = sqlite3.connect(self.database_path, timeout=30)
+        connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
         with contextlib.suppress(sqlite3.OperationalError):
-            connection.execute("PRAGMA busy_timeout=30000")
+            connection.execute("PRAGMA busy_timeout=10000")
         return connection
 
     def _initialize(self) -> None:
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                with self._connect() as connection:
-                    connection.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS token_blacklist (
-                            jti TEXT PRIMARY KEY,
-                            expires_at INTEGER NOT NULL,
-                            revoked_at TEXT NOT NULL
-                        )
-                        """
-                    )
-                with self._connect() as connection:
-                    now = int(datetime.now(UTC).timestamp())
-                    try:
-                        connection.execute(
-                            "DELETE FROM token_blacklist WHERE expires_at < ?", (now,)
-                        )
-                    except sqlite3.OperationalError as exc:
-                        _logger.warning("Token blacklist cleanup skipped: %s", exc)
-                    rows = connection.execute(
-                        "SELECT jti FROM token_blacklist WHERE expires_at >= ?", (now,)
-                    ).fetchall()
-                    self._cache = {str(row["jti"]) for row in rows}
-                return
-            except sqlite3.OperationalError as exc:
-                last_error = exc
-                if "locked" not in str(exc).lower() or attempt == 2:
-                    break
-                time.sleep(0.25 * (2**attempt))
-        _logger.warning("Token blacklist unavailable during startup: %s", last_error)
-        self._cache = set()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_blacklist (
+                    jti TEXT PRIMARY KEY,
+                    expires_at INTEGER NOT NULL,
+                    revoked_at TEXT NOT NULL
+                )
+                """
+            )
+        # Warm the cache from DB
+        with self._connect() as connection:
+            now = int(datetime.now(UTC).timestamp())
+            connection.execute("DELETE FROM token_blacklist WHERE expires_at < ?", (now,))
+            rows = connection.execute(
+                "SELECT jti FROM token_blacklist WHERE expires_at >= ?", (now,)
+            ).fetchall()
+            self._cache = {str(row["jti"]) for row in rows}
 
     def revoke(self, jti: str, expires_at: int) -> None:
         with self._connect() as connection:
@@ -213,7 +205,7 @@ class TokenBlacklist:
 class UserStore:
     """SQLite user repository with role support."""
 
-    def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
+    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -284,8 +276,8 @@ class UserStore:
         normalized_email = normalize_email(email)
         if not normalized_email:
             raise AuthError("Email is required.")
-        if len(password) < 12:
-            raise AuthError("Password must be at least 12 characters.")
+        if len(password) < 8:
+            raise AuthError("Password must be at least 8 characters.")
         normalized_role = Role.from_str(role).value
         try:
             with self._connect() as connection:
@@ -351,8 +343,8 @@ class UserStore:
             return cursor.rowcount > 0
 
     def update_password(self, user_id: int, new_password: str) -> bool:
-        if len(new_password) < 12:
-            raise AuthError("Password must be at least 12 characters.")
+        if len(new_password) < 8:
+            raise AuthError("Password must be at least 8 characters.")
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET hashed_password = ? WHERE id = ?",

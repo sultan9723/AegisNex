@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
-from typing import Any
+from typing import Any, Mapping
 
 from src.dns_monitor import DnsMonitor
 from src.failsafe import safe_import
@@ -114,15 +113,26 @@ class MonitoringEngine:
         except Exception:
             pass
 
-    def _sync_system_incident(self, incident_type: str, is_breached: bool, severity: str, description: str) -> None:
-        active = [i for i in self.incident_manager.get_active_incidents() if i.incident_type == incident_type and i.service_name == "system"]
+    def _sync_system_incident(
+        self, incident_type: str, is_breached: bool, severity: str, description: str
+    ) -> None:
+        active = [
+            i
+            for i in self.incident_manager.get_active_incidents()
+            if i.incident_type == incident_type and i.service_name == "system"
+        ]
         if is_breached:
             # Any breach resets the recovery streak - the condition is
             # still ongoing, even if it briefly dipped below threshold
             # before spiking again.
             self._recovery_streak[incident_type] = 0
             if not active:
-                self.incident_manager.create_incident(severity=severity, service_name="system", incident_type=incident_type, description=description)
+                self.incident_manager.create_incident(
+                    severity=severity,
+                    service_name="system",
+                    incident_type=incident_type,
+                    description=description,
+                )
             return
 
         if not active:
@@ -134,7 +144,9 @@ class MonitoringEngine:
         if streak < self.RECOVERY_STREAK_REQUIRED:
             return
         for incident in active:
-            self.incident_manager.resolve_incident(incident.incident_id, actor="system", resolution_notes="System metric recovered.")
+            self.incident_manager.resolve_incident(
+                incident.incident_id, actor="system", resolution_notes="System metric recovered."
+            )
         self._recovery_streak[incident_type] = 0
 
     def run_target(self, target_id: int, actor: str = "system") -> dict[str, Any] | None:
@@ -156,7 +168,9 @@ class MonitoringEngine:
         )
         return result
 
-    def _get_or_create_monitor(self, target_type: str, name: str, address: str, target: Mapping[str, Any]) -> Any:
+    def _get_or_create_monitor(
+        self, target_type: str, name: str, address: str, target: Mapping[str, Any]
+    ) -> Any:
         # incident_manager is deliberately NOT passed to these protocol
         # monitors here: each of them (HttpEndpointMonitor, TcpTargetMonitor,
         # SslCertificateMonitor, DnsMonitor, ContainerHealthMonitor) is

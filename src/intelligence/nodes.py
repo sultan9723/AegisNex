@@ -324,15 +324,21 @@ def _match_intent_categories(request: str) -> list[str]:
     if "incident" in request or "alert" in request:
         matched.append("incident")
     if (
-        "cpu" in request or "memory" in request or "disk" in request
-        or "metric" in request or "performance" in request
+        "cpu" in request
+        or "memory" in request
+        or "disk" in request
+        or "metric" in request
+        or "performance" in request
     ):
         matched.append("metrics")
     if "docker" in request or "container" in request:
         matched.append("docker")
     if (
-        "target" in request or "monitor" in request or "http" in request
-        or "ssl" in request or "tcp" in request
+        "target" in request
+        or "monitor" in request
+        or "http" in request
+        or "ssl" in request
+        or "tcp" in request
     ):
         matched.append("target")
     if "audit" in request or "log" in request:
@@ -472,16 +478,12 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                     steps += ["docker", "health"]
                     parallel_batches += [["docker", "health"]]
                     objective_parts.append("Inspect Docker containers")
-                    logger.add_decision(
-                        "planning", "docker_inspection", "Pattern: container query"
-                    )
+                    logger.add_decision("planning", "docker_inspection", "Pattern: container query")
                 elif category == "target":
                     steps += ["target", "incident"]
                     parallel_batches += [["target", "incident"]]
                     objective_parts.append("Check monitoring targets")
-                    logger.add_decision(
-                        "planning", "targets_check", "Pattern: monitoring targets"
-                    )
+                    logger.add_decision("planning", "targets_check", "Pattern: monitoring targets")
                 elif category == "audit":
                     steps += ["audit"]
                     objective_parts.append("Review audit logs")
@@ -492,9 +494,7 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                         logger.add_decision("planning", "weekly_report", "Pattern: weekly report")
                     elif "monthly" in request:
                         steps += ["report"]
-                        logger.add_decision(
-                            "planning", "monthly_report", "Pattern: monthly report"
-                        )
+                        logger.add_decision("planning", "monthly_report", "Pattern: monthly report")
                     else:
                         steps += ["report", "incident", "metrics"]
                         parallel_batches += [["incident", "metrics"], ["report"]]
@@ -503,16 +503,12 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                 elif category == "notification":
                     steps += ["notification"]
                     objective_parts.append("Check notification status")
-                    logger.add_decision(
-                        "planning", "notification_check", "Pattern: notifications"
-                    )
+                    logger.add_decision("planning", "notification_check", "Pattern: notifications")
                 elif category == "health":
                     steps += ["health", "metrics", "incident"]
                     parallel_batches += [["health", "metrics"], ["incident"]]
                     objective_parts.append("Assess overall system health")
-                    logger.add_decision(
-                        "planning", "health_assessment", "Pattern: health/status"
-                    )
+                    logger.add_decision("planning", "health_assessment", "Pattern: health/status")
 
             if required_categories:
                 # De-dupe while preserving first-seen order - several
@@ -524,7 +520,8 @@ def plan_node(state: AgentState, repo: PlatformRepository | None = None) -> Agen
                 objective = "; ".join(dict.fromkeys(objective_parts))
                 if len(required_categories) > 1:
                     logger.add_decision(
-                        "planning", "multi_intent",
+                        "planning",
+                        "multi_intent",
                         f"Request spans {len(required_categories)} categories: "
                         f"{', '.join(required_categories)}",
                     )
@@ -786,7 +783,8 @@ def verifier_node(state: AgentState) -> AgentState:
         required_categories = state.get("required_categories", [])
         successful_tool_names = {n for n, r in tool_results.items() if r.get("status") == "ok"}
         covered_categories = [
-            c for c in required_categories
+            c
+            for c in required_categories
             if any(t in successful_tool_names for t in _CATEGORY_TOOLS.get(c, ()))
         ]
         uncovered_categories = [c for c in required_categories if c not in covered_categories]
@@ -816,12 +814,15 @@ def verifier_node(state: AgentState) -> AgentState:
                 f"requested area(s) never retrieved ({', '.join(uncovered_categories)})"
             )
             logger.add_decision(
-                "verification", "objective_coverage_gap",
+                "verification",
+                "objective_coverage_gap",
                 f"Uncovered categories: {', '.join(uncovered_categories)}",
             )
             observations.append(confidence_verdict)
         elif confidence >= 0.8:
-            confidence_verdict = "High confidence: all requested areas covered, tools completed successfully"
+            confidence_verdict = (
+                "High confidence: all requested areas covered, tools completed successfully"
+            )
             logger.add_decision(
                 "verification", "confidence_level", "high", f"Confidence: {confidence:.0%}"
             )

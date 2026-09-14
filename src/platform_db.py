@@ -12,11 +12,10 @@ import logging
 import os
 import sqlite3
 import time
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 from src.incidents import utc_timestamp
@@ -150,8 +149,6 @@ DATABASE_MODELS = {
         (
             "incident_id",
             "timestamp",
-            "org_id",
-            "org_name",
             "severity",
             "service_name",
             "incident_type",
@@ -167,12 +164,6 @@ DATABASE_MODELS = {
             "resolved_at",
             "resolved_timestamp",
             "resolution_notes",
-            "proposed_remediation",
-            "remediation_proposed_by",
-            "remediation_proposed_at",
-            "remediation_approval_status",
-            "remediation_plan_confidence",
-            "remediation_history",
         ),
     ),
     "notifications": DatabaseModel(
@@ -288,9 +279,6 @@ class PlatformRepository:
         if self.backend == "sqlite":
             path = self._sqlite_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            self.database_path = path
-        else:
-            self.database_path = Path(self.settings.url)
         self._initialized = False
 
     def _sqlite_path(self) -> Path:
@@ -525,8 +513,6 @@ class PlatformRepository:
             CREATE TABLE IF NOT EXISTS incidents (
                 incident_id {text} PRIMARY KEY,
                 timestamp {text} NOT NULL,
-                org_id {integer},
-                org_name {text},
                 severity {text} NOT NULL,
                 service_name {text} NOT NULL,
                 incident_type {text} NOT NULL,
@@ -804,25 +790,10 @@ class PlatformRepository:
             "last_response_time_ms": "DOUBLE PRECISION" if self.backend == "postgresql" else "REAL",
             "last_successful_check_at": "TEXT",
         }
-        incident_columns = {
-            "org_id": "INTEGER",
-            "org_name": "TEXT",
-            "proposed_remediation": "TEXT",
-            "remediation_proposed_by": "TEXT",
-            "remediation_proposed_at": "TEXT",
-            "remediation_approval_status": "TEXT",
-            "remediation_plan_confidence": "DOUBLE PRECISION"
-            if self.backend == "postgresql"
-            else "REAL",
-            "remediation_history": "TEXT",
-        }
         if self.backend == "postgresql":
             monitoring_migrations = [
                 f"ALTER TABLE monitoring_targets ADD COLUMN IF NOT EXISTS {name} {column_type}"
                 for name, column_type in columns.items()
-            ] + [
-                f"ALTER TABLE incidents ADD COLUMN IF NOT EXISTS {name} {column_type}"
-                for name, column_type in incident_columns.items()
             ]
             return [
                 *monitoring_migrations,
@@ -885,12 +856,43 @@ class PlatformRepository:
             api_key_migrations.append(
                 "ALTER TABLE api_keys ADD COLUMN rate_limit_max INTEGER NOT NULL DEFAULT 100"
             )
+        incident_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(incidents)").fetchall()
+        }
+        incident_migrations = []
+        if "proposed_remediation" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN proposed_remediation TEXT")
+        if "remediation_proposed_by" not in incident_columns:
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_proposed_by TEXT"
+            )
+        if "remediation_proposed_at" not in incident_columns:
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_proposed_at TEXT"
+            )
+        if "remediation_approval_status" not in incident_columns:
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_approval_status TEXT"
+            )
+        if "remediation_plan_confidence" not in incident_columns:
+            incident_migrations.append(
+                "ALTER TABLE incidents ADD COLUMN remediation_plan_confidence REAL"
+            )
+        if "org_id" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN org_id INTEGER")
+        if "org_name" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN org_name TEXT")
+        if "remediation_history" not in incident_columns:
+            incident_migrations.append("ALTER TABLE incidents ADD COLUMN remediation_history TEXT")
         # Migrate legacy incident data
         updates = [
             "UPDATE incidents SET incident_status = status",
             "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
         ]
-        return alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
+        return (
+            alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
+        )
 
     @property
     def placeholder(self) -> str:
@@ -1665,8 +1667,6 @@ class PlatformRepository:
         incident_status = str(
             getattr(incident, "incident_status", getattr(incident, "status", "active"))
         )
-        org_id = getattr(incident, "org_id", None)
-        org_name = getattr(incident, "org_name", None)
         acknowledged_by = getattr(incident, "acknowledged_by", None)
         acknowledged_at = getattr(incident, "acknowledged_at", None)
         resolved_by = getattr(incident, "resolved_by", None)
@@ -1686,7 +1686,7 @@ class PlatformRepository:
         self._execute(
             f"""
             INSERT INTO incidents (
-                incident_id, timestamp, org_id, org_name, severity, service_name, incident_type,
+                incident_id, timestamp, severity, service_name, incident_type,
                 description, health_check_results, remediation_attempted,
                 remediation_successful, status, incident_status, acknowledged_by,
                 acknowledged_at, resolved_by, resolved_at, resolved_timestamp, resolution_notes,
@@ -1695,8 +1695,6 @@ class PlatformRepository:
             )
             VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
             ON CONFLICT(incident_id) DO UPDATE SET
-                org_id = excluded.org_id,
-                org_name = excluded.org_name,
                 severity = excluded.severity,
                 description = excluded.description,
                 health_check_results = excluded.health_check_results,
@@ -1722,8 +1720,6 @@ class PlatformRepository:
             (
                 incident.incident_id,
                 incident.timestamp,
-                org_id,
-                org_name,
                 incident.severity,
                 incident.service_name,
                 incident.incident_type,
@@ -1755,9 +1751,13 @@ class PlatformRepository:
         self._execute(f"DELETE FROM incidents WHERE incident_id = {p}", (incident_id,))
         return True
 
-    def list_incidents(self, incident_status: str | None = None,
-                       limit: int = 0, offset: int = 0,
-                       org_id: int | None = None) -> List[Dict[str, Any]]:
+    def list_incidents(
+        self,
+        incident_status: str | None = None,
+        limit: int = 0,
+        offset: int = 0,
+        org_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         """List incidents with optional pagination.
 
         Args:
@@ -1800,7 +1800,9 @@ class PlatformRepository:
         rows = self._fetch_all(sql, tuple(params))
         return int(rows[0]["cnt"]) if rows else 0
 
-    def assign_incident_org(self, incident_id: str, org_id: int | None, org_name: str | None = None) -> Dict[str, Any] | None:
+    def assign_incident_org(
+        self, incident_id: str, org_id: int | None, org_name: str | None = None
+    ) -> dict[str, Any] | None:
         self._execute(
             f"""
             UPDATE incidents
@@ -1811,7 +1813,7 @@ class PlatformRepository:
         )
         return self.get_incident(incident_id)
 
-    def get_incident(self, incident_id: str) -> Dict[str, Any] | None:
+    def get_incident(self, incident_id: str) -> dict[str, Any] | None:
         rows = self._fetch_all(
             f"SELECT * FROM incidents WHERE incident_id = {self.placeholder}",
             (incident_id,),
