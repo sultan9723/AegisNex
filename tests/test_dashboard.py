@@ -1,19 +1,21 @@
-import json
 import asyncio
-from datetime import datetime, timedelta, timezone
+import json
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from src.auth import AuthManager, UserStore
 from src.dashboard import (
     DashboardServices,
+    build_container_rows,
     build_dashboard_api_snapshot,
-    build_integrations_context,
     build_hourly_event_trend,
+    build_integrations_context,
     build_metric_trends,
     build_notification_statistics,
-    build_container_rows,
     build_realtime_event,
     build_realtime_events,
     build_remediation_actions,
@@ -24,7 +26,6 @@ from src.dashboard import (
     get_network_stats,
     load_restart_history,
 )
-from src.auth import AuthManager, UserStore
 from src.incidents import IncidentManager
 from src.platform_db import PlatformRepository
 
@@ -70,20 +71,16 @@ class FakeRepository:
         self.database_path = database_path
         self._sqlite_path = str(database_path)
         PlatformRepository(str(database_path))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self.rows = {
             "metrics_snapshots": [
                 {
-                    "timestamp": (now - timedelta(hours=2))
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "timestamp": (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z"),
                     "cpu_percent": 10.0,
                     "memory_percent": 20.0,
                 },
                 {
-                    "timestamp": (now - timedelta(hours=1))
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "timestamp": (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
                     "cpu_percent": 30.0,
                     "memory_percent": 40.0,
                 },
@@ -111,6 +108,7 @@ class FakeRepository:
 
     def _connect(self):
         import sqlite3
+
         return sqlite3.connect(str(self.database_path))
 
     def fetch_all(self, table_name):
@@ -118,6 +116,9 @@ class FakeRepository:
 
     def record_audit_log(self, actor, action, resource_type, resource_id, details=None, **kwargs):
         pass
+
+    def health_check(self):
+        return {"status": "connected"}
 
 
 def build_services(tmp_path: Path) -> DashboardServices:
@@ -315,7 +316,7 @@ def test_build_realtime_events_detects_dashboard_changes(tmp_path: Path, monkeyp
 
 
 def test_build_realtime_event_rejects_unknown_type() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Unsupported realtime event type"):
         build_realtime_event("unknown", {})
 
 
@@ -348,7 +349,7 @@ def test_build_metric_trends_uses_last_24h_rows() -> None:
             },
         ],
         {"cpu_percent": 1, "ram_percent": 2},
-        now=datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 6, 4, 12, 0, tzinfo=UTC),
     )
 
     assert trends["cpu"]["values"] == [25.0]
@@ -362,7 +363,7 @@ def test_build_hourly_event_trend_counts_rows_by_hour() -> None:
             {"timestamp": "2026-06-04T11:59:00Z"},
             {"timestamp": "2026-06-04T10:00:00Z"},
         ],
-        now=datetime(2026, 6, 4, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 6, 4, 12, 0, tzinfo=UTC),
     )
 
     assert len(trend["labels"]) == 24
@@ -424,11 +425,12 @@ def test_get_network_stats_returns_shape(monkeypatch) -> None:
 
 def _first_cookie(headers: dict[str, str], name: str) -> str:
     set_cookie = headers.get("set-cookie", "")
-    token_part = set_cookie.split(f"{name}=")[-1].split(";")[0]
-    return token_part
+    return set_cookie.split(f"{name}=")[-1].split(";")[0]
 
 
-@pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")
+@pytest.mark.skip(
+    reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening"
+)
 def test_dashboard_routes_render_pages(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
@@ -463,15 +465,11 @@ def test_dashboard_routes_render_pages(tmp_path: Path) -> None:
         ("/integrations", "Integrations"),
         ("/settings", "Settings"),
     ):
-        status_code, body, _ = asyncio.run(
-            asgi_request(app, "GET", path, cookies=cookies)
-        )
+        status_code, body, _ = asyncio.run(asgi_request(app, "GET", path, cookies=cookies))
         assert status_code == 200, f"Expected 200 for {path}, got {status_code}"
         assert expected in body
 
-    status_code, body, _ = asyncio.run(
-        asgi_request(app, "GET", "/", cookies=cookies)
-    )
+    status_code, body, _ = asyncio.run(asgi_request(app, "GET", "/", cookies=cookies))
     assert status_code == 200
     assert "CPU Trend 24h" in body
     assert "Memory Trend 24h" in body
@@ -487,7 +485,9 @@ def test_dashboard_routes_render_pages(tmp_path: Path) -> None:
     )
     assert report_status == 200
     assert '"report_type": "weekly"' in report_body
-    assert "attachment; filename=weekly_report.json" in report_headers.get("content-disposition", "")
+    assert "attachment; filename=weekly_report.json" in report_headers.get(
+        "content-disposition", ""
+    )
 
 
 def test_dashboard_routes_redirect_to_login_without_session(tmp_path: Path) -> None:
@@ -499,10 +499,90 @@ def test_dashboard_routes_redirect_to_login_without_session(tmp_path: Path) -> N
         auth_manager=AuthManager(UserStore(tmp_path / "users.db"), jwt_secret="test-secret"),
     )
 
-    status_code, body, headers = asyncio.run(asgi_request(app, "GET", "/"))
+    status_code, _body, headers = asyncio.run(asgi_request(app, "GET", "/"))
 
     assert status_code == 303
     assert headers["location"] == "/login"
+
+
+def create_production_test_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AEGISNEX_ENV", "production")
+    monkeypatch.setenv("AEGISNEX_LOCAL_AUTH_ENABLED", "true")
+    return create_app(
+        build_services(tmp_path),
+        auth_manager=AuthManager(
+            UserStore(tmp_path / "users.db"),
+            jwt_secret="test-secret-32chars-long-please!",
+        ),
+    )
+
+
+def test_tls_redirects_direct_http_production_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, _body, headers = asyncio.run(asgi_request(app, "GET", "/api/health/live"))
+
+    assert status_code == 301
+    assert headers["location"] == "https://testserver/api/health/live"
+
+
+def test_tls_redirect_skips_proxy_forwarded_https(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, body, headers = asyncio.run(
+        asgi_request(
+            app,
+            "GET",
+            "/api/health/live",
+            headers={"x-forwarded-proto": "https"},
+        )
+    )
+
+    assert status_code == 200
+    assert '"status":"alive"' in body
+    assert "location" not in headers
+
+
+def test_tls_redirect_skips_comma_separated_forwarded_https(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, body, headers = asyncio.run(
+        asgi_request(
+            app,
+            "GET",
+            "/api/health/live",
+            headers={"x-forwarded-proto": "https,http"},
+        )
+    )
+
+    assert status_code == 200
+    assert '"status":"alive"' in body
+    assert "location" not in headers
+
+
+def test_health_readiness_endpoint_behind_proxy_does_not_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, body, headers = asyncio.run(
+        asgi_request(
+            app,
+            "GET",
+            "/api/health/ready",
+            headers={"x-forwarded-proto": "https,http"},
+        )
+    )
+
+    assert status_code == 200
+    assert '"status":"ready"' in body
+    assert "location" not in headers
 
 
 def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> None:
@@ -516,16 +596,20 @@ def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> Non
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
 
-    user, access_token, _ = auth_manager.register("viewer@example.com", "password12345")
+    user, _, _ = auth_manager.register("viewer@example.com", "password12345")
     with auth_manager.user_store._connect() as connection:
         connection.execute("UPDATE users SET role = 'viewer' WHERE id = ?", (user.id,))
     legacy_token = auth_manager.create_access_token(auth_manager.user_store.get_user_by_id(user.id))
     cookies = {"aegisnex_session": legacy_token}
 
-    status_code, _body, _headers = asyncio.run(asgi_request(app, "GET", "/api/dashboard", cookies=cookies))
+    status_code, _body, _headers = asyncio.run(
+        asgi_request(app, "GET", "/api/dashboard", cookies=cookies)
+    )
     assert status_code == 200
 
-    status_code, _body, _headers = asyncio.run(asgi_request(app, "GET", "/api/reports", cookies=cookies))
+    status_code, _body, _headers = asyncio.run(
+        asgi_request(app, "GET", "/api/reports", cookies=cookies)
+    )
     assert status_code == 200
 
     assert auth_manager.get_user_from_token(legacy_token) is not None
@@ -541,7 +625,7 @@ def test_websocket_endpoints_accept_authenticated_cookie_token(tmp_path: Path) -
     )
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
-    user, token, _ = auth_manager.register("ops@example.com", "password12345")
+    _user, token, _ = auth_manager.register("ops@example.com", "password12345")
     assert auth_manager.get_user_from_token(token) is not None
 
     for path in ("/ws/dashboard", "/ws/targets", "/ws/incidents", "/ws/containers"):
@@ -560,21 +644,25 @@ def test_websocket_endpoints_reject_query_token_auth(tmp_path: Path) -> None:
     )
     services = build_services(tmp_path)
     app = create_app(services, auth_manager=auth_manager)
-    user, token, _ = auth_manager.register("ops@example.com", "password12345")
+    _user, token, _ = auth_manager.register("ops@example.com", "password12345")
 
-    messages = asyncio.run(asgi_websocket_handshake(app, "/ws/dashboard", token=token, use_query=True))
+    messages = asyncio.run(
+        asgi_websocket_handshake(app, "/ws/dashboard", token=token, use_query=True)
+    )
     assert any(message.get("code") == 4001 for message in messages)
 
 
-async def asgi_websocket_handshake(app, path: str, token: str | None = None, use_query: bool = False) -> list[dict]:
+async def asgi_websocket_handshake(
+    app, path: str, token: str | None = None, use_query: bool = False
+) -> list[dict]:
     messages: list[dict] = []
     request_sent = False
     query_string = b""
     headers = [(b"host", b"testserver"), (b"origin", b"http://localhost:3000")]
     if token and not use_query:
-        headers.append((b"cookie", f"aegisnex_session={token}".encode("utf-8")))
+        headers.append((b"cookie", f"aegisnex_session={token}".encode()))
     elif token and use_query:
-        query_string = f"token={token}".encode("utf-8")
+        query_string = f"token={token}".encode()
     scope = {
         "type": "websocket",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -598,14 +686,14 @@ async def asgi_websocket_handshake(app, path: str, token: str | None = None, use
     async def send(message):
         messages.append(message)
 
-    try:
+    with suppress(Exception):
         await app(scope, receive, send)
-    except Exception:
-        pass
     return messages
 
 
-@pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")
+@pytest.mark.skip(
+    reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening"
+)
 def test_dashboard_api_routes_return_live_context(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
@@ -620,7 +708,12 @@ def test_dashboard_api_routes_return_live_context(tmp_path: Path) -> None:
     _, _, token = auth_manager.register("test@example.com", "password12345")
 
     expected_shapes = {
-        "/api/system-health": ["health_score", "metrics", "active_incident_count", "running_container_count"],
+        "/api/system-health": [
+            "health_score",
+            "metrics",
+            "active_incident_count",
+            "running_container_count",
+        ],
         "/api/containers": ["containers", "running_containers", "count"],
         "/api/incidents": ["active_incidents", "resolved_incidents", "recent_incidents"],
         "/api/metrics": ["metrics", "network", "chart_data"],
@@ -640,7 +733,9 @@ def test_dashboard_api_routes_return_live_context(tmp_path: Path) -> None:
         for key in keys:
             assert key in payload
 
-    status_code, body, _headers = asyncio.run(asgi_request(app, "GET", "/api/system-health", cookies=cookies))
+    status_code, body, _headers = asyncio.run(
+        asgi_request(app, "GET", "/api/system-health", cookies=cookies)
+    )
     payload = json.loads(body)
 
     assert status_code == 200
@@ -649,7 +744,9 @@ def test_dashboard_api_routes_return_live_context(tmp_path: Path) -> None:
     assert payload["running_container_count"] == 1
 
 
-@pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")
+@pytest.mark.skip(
+    reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening"
+)
 def test_dashboard_api_routes_include_cors_headers(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
@@ -685,7 +782,9 @@ def test_dashboard_api_routes_include_cors_headers(tmp_path: Path) -> None:
         assert headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
-@pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")
+@pytest.mark.skip(
+    reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening"
+)
 def test_dashboard_incident_lifecycle_api_persists_actions(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
@@ -771,7 +870,9 @@ def test_dashboard_production_cors_defaults_to_no_browser_origins(monkeypatch) -
     assert get_cors_origins() == []
 
 
-@pytest.mark.skip(reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening")
+@pytest.mark.skip(
+    reason="Auth JWT validation has a pre-existing bug - auth module fix is out of scope for Phase 2 backend hardening"
+)
 def test_auth_pages_register_login_and_logout(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")
@@ -828,17 +929,22 @@ async def asgi_request(
     body: str = "",
     cookies: dict[str, str] | None = None,
     origin: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, str, dict[str, str]]:
     messages = []
     request_sent = False
-    headers = [(b"host", b"testserver")]
+    request_headers = [(b"host", b"testserver")]
     if origin:
-        headers.append((b"origin", origin.encode("utf-8")))
+        request_headers.append((b"origin", origin.encode("utf-8")))
+    if headers:
+        request_headers.extend(
+            (key.lower().encode("utf-8"), value.encode("utf-8")) for key, value in headers.items()
+        )
     if cookies:
         cookie_header = "; ".join(f"{key}={value}" for key, value in cookies.items())
-        headers.append((b"cookie", cookie_header.encode("utf-8")))
+        request_headers.append((b"cookie", cookie_header.encode("utf-8")))
     if method == "POST":
-        headers.append((b"content-type", b"application/x-www-form-urlencoded"))
+        request_headers.append((b"content-type", b"application/x-www-form-urlencoded"))
 
     scope = {
         "type": "http",
@@ -849,7 +955,7 @@ async def asgi_request(
         "path": path,
         "raw_path": path.encode("ascii"),
         "query_string": b"",
-        "headers": headers,
+        "headers": request_headers,
         "client": ("127.0.0.1", 12345),
         "server": ("testserver", 80),
         "root_path": "",
@@ -870,17 +976,12 @@ async def asgi_request(
         messages.append(message)
 
     await app(scope, receive, send)
-    start = next(
-        message for message in messages if message["type"] == "http.response.start"
-    )
+    start = next(message for message in messages if message["type"] == "http.response.start")
     status_code = start["status"]
     response_headers = {
-        key.decode("utf-8"): value.decode("utf-8")
-        for key, value in start.get("headers", [])
+        key.decode("utf-8"): value.decode("utf-8") for key, value in start.get("headers", [])
     }
     body = b"".join(
-        message.get("body", b"")
-        for message in messages
-        if message["type"] == "http.response.body"
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
     )
     return status_code, body.decode("utf-8"), response_headers

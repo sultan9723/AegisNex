@@ -85,13 +85,22 @@ DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS = 5.0
 class TLSRedirectMiddleware(BaseHTTPMiddleware):
     """Redirect HTTP to HTTPS when running in production mode."""
 
+    @staticmethod
+    def _forwarded_proto_values(header_value: str | None) -> set[str]:
+        if not header_value:
+            return set()
+        return {value.strip().lower() for value in header_value.split(",") if value.strip()}
+
+    def _request_is_https(self, request: FastAPIRequest) -> bool:
+        if request.url.scheme == "https":
+            return True
+        forwarded_proto = self._forwarded_proto_values(request.headers.get("x-forwarded-proto"))
+        return "https" in forwarded_proto
+
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
         if environment not in {"development", "dev", "local", "test"}:
-            if (
-                request.url.scheme != "https"
-                and request.headers.get("x-forwarded-proto") != "https"
-            ):
+            if not self._request_is_https(request):
                 url = request.url.replace(scheme="https")
                 return StarletteRedirect(url=url, status_code=301)
         return await call_next(request)
