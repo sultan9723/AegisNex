@@ -367,8 +367,7 @@ class PlatformRepository:
             self.settings.url,
             min_size=2,
             max_size=pool_size,
-            row_factory=dict_row,
-            kwargs={"connect_timeout": 5},
+            kwargs={"connect_timeout": 5, "row_factory": dict_row},
         )
         self._pg_pool = pool
         return pool.getconn()
