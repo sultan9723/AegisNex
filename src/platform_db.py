@@ -897,9 +897,16 @@ class PlatformRepository:
     def placeholder(self) -> str:
         return "%s" if self.backend == "postgresql" else "?"
 
+    def _prepare_sql(self, sql: str) -> str:
+        """Normalize repository SQL for the active DB driver."""
+        if self.backend != "postgresql":
+            return sql
+        return sql.replace("?", "%s")
+
     def _execute(self, sql: str, values: Iterable[Any] = ()) -> int | None:
         connection = self._connect()
         try:
+            sql = self._prepare_sql(sql)
             cursor = connection.execute(sql, tuple(values))
             if self.backend == "postgresql":
                 connection.commit()
@@ -913,6 +920,7 @@ class PlatformRepository:
     def _fetch_all(self, sql: str, values: Iterable[Any] = ()) -> list[dict[str, Any]]:
         connection = self._connect()
         try:
+            sql = self._prepare_sql(sql)
             rows = connection.execute(sql, tuple(values)).fetchall()
         finally:
             if self.backend == "postgresql":
@@ -932,7 +940,11 @@ class PlatformRepository:
         """
         if table_name not in ALLOWED_FETCH_TABLES:
             raise ValueError(f"Unsupported table: {table_name}")
-        sql = f"SELECT * FROM [{table_name}]"
+        sql = (
+            f'SELECT * FROM "{table_name}"'
+            if self.backend == "postgresql"
+            else f"SELECT * FROM [{table_name}]"
+        )
         params: list[Any] = []
         if limit > 0:
             sql += " LIMIT ?"
@@ -950,7 +962,8 @@ class PlatformRepository:
             )
         else:
             rows = self._fetch_all("SELECT name FROM sqlite_master WHERE type = 'table'")
-        return {str(row["name"] if self.backend == "postgresql" else row["name"]) for row in rows}
+        column = "table_name" if self.backend == "postgresql" else "name"
+        return {str(row[column]) for row in rows}
 
     def table_exists(self, table_name: str) -> bool:
         """Check if a table exists in the database."""

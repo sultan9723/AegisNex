@@ -30,30 +30,43 @@ class TenantManager:
         self._repo = repo
         self._ensure_tables()
 
+    @property
+    def _backend(self) -> str:
+        return getattr(self._repo, "backend", "sqlite")
+
     def _ensure_tables(self) -> None:
-        with self._repo._connect() as conn:
-            conn.executescript("""
+        pkey = (
+            "INTEGER PRIMARY KEY AUTOINCREMENT"
+            if self._backend == "sqlite"
+            else "SERIAL PRIMARY KEY"
+        )
+        for statement in [
+            f"""
                 CREATE TABLE IF NOT EXISTS organizations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {pkey},
                     name TEXT NOT NULL,
                     slug TEXT NOT NULL UNIQUE,
                     domain TEXT NOT NULL DEFAULT '',
-                    settings TEXT NOT NULL DEFAULT '{}',
+                    settings TEXT NOT NULL DEFAULT '{{}}',
                     is_active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL
-                );
+                )
+            """,
+            f"""
                 CREATE TABLE IF NOT EXISTS teams (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {pkey},
                     org_id INTEGER NOT NULL REFERENCES organizations(id),
                     name TEXT NOT NULL,
                     slug TEXT NOT NULL,
                     description TEXT NOT NULL DEFAULT '',
-                    settings TEXT NOT NULL DEFAULT '{}',
+                    settings TEXT NOT NULL DEFAULT '{{}}',
                     created_at TEXT NOT NULL,
                     UNIQUE(org_id, slug)
-                );
+                )
+            """,
+            f"""
                 CREATE TABLE IF NOT EXISTS projects (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {pkey},
                     org_id INTEGER NOT NULL REFERENCES organizations(id),
                     team_id INTEGER NOT NULL REFERENCES teams(id),
                     name TEXT NOT NULL,
@@ -61,31 +74,51 @@ class TenantManager:
                     description TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     UNIQUE(org_id, team_id, slug)
-                );
+                )
+            """,
+            f"""
                 CREATE TABLE IF NOT EXISTS tenant_users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id {pkey},
                     user_id INTEGER NOT NULL,
                     org_id INTEGER NOT NULL REFERENCES organizations(id),
                     role TEXT NOT NULL DEFAULT 'viewer',
-                    permissions TEXT NOT NULL DEFAULT '{}',
+                    permissions TEXT NOT NULL DEFAULT '{{}}',
                     UNIQUE(user_id, org_id)
-                );
+                )
+            """,
+            """
                 CREATE TABLE IF NOT EXISTS tenant_user_teams (
                     user_id INTEGER NOT NULL,
                     org_id INTEGER NOT NULL,
                     team_id INTEGER NOT NULL,
                     PRIMARY KEY (user_id, org_id, team_id)
-                );
-            """)
+                )
+            """,
+        ]:
+            self._execute(statement)
 
     def _p(self) -> str:
-        return self._repo.placeholder
+        return getattr(self._repo, "placeholder", "?")
 
     def _execute(self, sql: str, params: tuple = ()) -> int | None:
-        return self._repo._execute(sql, params)
+        execute = getattr(self._repo, "_execute", None)
+        if execute is not None:
+            return execute(sql, params)
+
+        with self._repo._connect() as conn:
+            cursor = conn.execute(sql, params)
+            conn.commit()
+            return cursor.lastrowid if hasattr(cursor, "lastrowid") else None
 
     def _fetch_all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
-        return self._repo._fetch_all(sql, params)
+        fetch_all = getattr(self._repo, "_fetch_all", None)
+        if fetch_all is not None:
+            return fetch_all(sql, params)
+
+        with self._repo._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            conn.commit()
+            return [dict(row) for row in rows]
 
     def _fetch_one(self, sql: str, params: tuple = ()) -> dict[str, Any] | None:
         rows = self._fetch_all(sql, params)
@@ -185,9 +218,9 @@ class TenantManager:
             fields["settings"] = json.dumps(fields["settings"], sort_keys=True)
         if "is_active" in fields:
             fields["is_active"] = 1 if fields["is_active"] else 0
-        set_clause = ", ".join(f"{k} = ?" for k in fields)
-        values = [*list(fields.values()), org_id]
         p = self._p()
+        set_clause = ", ".join(f"{k} = {p}" for k in fields)
+        values = [*list(fields.values()), org_id]
         self._execute(f"UPDATE organizations SET {set_clause} WHERE id = {p}", tuple(values))
         self._repo.record_audit_log("system", "update", "organization", str(org_id), fields)
         return self.get_organization(org_id)
@@ -281,10 +314,21 @@ class TenantManager:
 
         normalized = AuthRole.from_str(role).value
         role = normalized
-        self._execute(
-            f"INSERT OR REPLACE INTO tenant_users (user_id, org_id, role, permissions) VALUES ({p}, {p}, {p}, {p})",
-            (user_id, org_id, role, "{}"),
-        )
+        if self._backend == "postgresql":
+            self._execute(
+                f"""
+                INSERT INTO tenant_users (user_id, org_id, role, permissions)
+                VALUES ({p}, {p}, {p}, {p})
+                ON CONFLICT (user_id, org_id)
+                DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions
+                """,
+                (user_id, org_id, role, "{}"),
+            )
+        else:
+            self._execute(
+                f"INSERT OR REPLACE INTO tenant_users (user_id, org_id, role, permissions) VALUES ({p}, {p}, {p}, {p})",
+                (user_id, org_id, role, "{}"),
+            )
         row = self._fetch_one(
             f"SELECT * FROM tenant_users WHERE user_id = {p} AND org_id = {p}", (user_id, org_id)
         )

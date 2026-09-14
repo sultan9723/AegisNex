@@ -7047,8 +7047,9 @@ def create_app(
         p = request.app.state.services.platform_repository
         if p is None:
             return {"users": [], "count": 0}
+        placeholder = p.placeholder
         rows = p._fetch_all(
-            "SELECT u.id, u.email, tu.role FROM tenant_users tu JOIN users u ON u.id = tu.user_id WHERE tu.org_id = ?",
+            f"SELECT u.id, u.email, tu.role FROM tenant_users tu JOIN users u ON u.id = tu.user_id WHERE tu.org_id = {placeholder}",
             (org_id,),
         )
         return {"users": rows, "count": len(rows)}
