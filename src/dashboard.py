@@ -82,8 +82,31 @@ DEFAULT_WEBSOCKET_POLL_INTERVAL_SECONDS = 5.0
 # --- TLS Redirect Middleware ---
 
 
+def force_https_redirect_enabled() -> bool:
+    """Whether TLSRedirectMiddleware should actively redirect HTTP to HTTPS.
+
+    Defaults to disabled. Managed platforms such as Back4app terminate TLS at
+    their own edge/reverse proxy and forward requests to the container over
+    plain HTTP; unconditionally redirecting in that case sends the browser
+    back to the same public HTTPS URL, which the proxy again forwards as
+    HTTP, producing an infinite redirect loop. Set
+    ``AEGISNEX_FORCE_HTTPS_REDIRECT=true`` only for deployments that serve
+    HTTPS directly (no TLS-terminating proxy in front of the app).
+    """
+    return os.getenv("AEGISNEX_FORCE_HTTPS_REDIRECT", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class TLSRedirectMiddleware(BaseHTTPMiddleware):
-    """Redirect HTTP to HTTPS when running in production mode."""
+    """Redirect HTTP to HTTPS, but only when explicitly enabled.
+
+    See :func:`force_https_redirect_enabled` for why this is opt-in rather
+    than automatic in production.
+    """
 
     @staticmethod
     def _forwarded_proto_values(header_value: str | None) -> set[str]:
@@ -99,7 +122,7 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-        if environment not in {"development", "dev", "local", "test"}:
+        if environment not in {"development", "dev", "local", "test"} and force_https_redirect_enabled():
             if not self._request_is_https(request):
                 url = request.url.replace(scheme="https")
                 return StarletteRedirect(url=url, status_code=301)

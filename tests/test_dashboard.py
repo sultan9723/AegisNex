@@ -505,9 +505,17 @@ def test_dashboard_routes_redirect_to_login_without_session(tmp_path: Path) -> N
     assert headers["location"] == "/login"
 
 
-def create_production_test_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def create_production_test_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    force_https_redirect: bool = False,
+):
     monkeypatch.setenv("AEGISNEX_ENV", "production")
     monkeypatch.setenv("AEGISNEX_LOCAL_AUTH_ENABLED", "true")
+    monkeypatch.setenv(
+        "AEGISNEX_FORCE_HTTPS_REDIRECT", "true" if force_https_redirect else "false"
+    )
     return create_app(
         build_services(tmp_path),
         auth_manager=AuthManager(
@@ -517,10 +525,26 @@ def create_production_test_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
 
-def test_tls_redirects_direct_http_production_request(
+def test_tls_no_redirect_by_default_behind_managed_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = create_production_test_app(tmp_path, monkeypatch)
+    """Back4app-style deployment: TLS terminated at the platform edge, request
+    forwarded to the container as plain HTTP with no X-Forwarded-Proto header.
+    With AEGISNEX_FORCE_HTTPS_REDIRECT left at its default (false), the app
+    must not redirect, or the browser loops against the public HTTPS URL."""
+    app = create_production_test_app(tmp_path, monkeypatch, force_https_redirect=False)
+
+    status_code, body, headers = asyncio.run(asgi_request(app, "GET", "/api/health/live"))
+
+    assert status_code == 200
+    assert '"status":"alive"' in body
+    assert "location" not in headers
+
+
+def test_tls_redirects_direct_http_when_force_https_redirect_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch, force_https_redirect=True)
 
     status_code, _body, headers = asyncio.run(asgi_request(app, "GET", "/api/health/live"))
 
@@ -528,10 +552,10 @@ def test_tls_redirects_direct_http_production_request(
     assert headers["location"] == "https://testserver/api/health/live"
 
 
-def test_tls_redirect_skips_proxy_forwarded_https(
+def test_tls_redirect_skips_proxy_forwarded_https_when_force_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    app = create_production_test_app(tmp_path, monkeypatch)
+    app = create_production_test_app(tmp_path, monkeypatch, force_https_redirect=True)
 
     status_code, body, headers = asyncio.run(
         asgi_request(
@@ -547,7 +571,26 @@ def test_tls_redirect_skips_proxy_forwarded_https(
     assert "location" not in headers
 
 
-def test_tls_redirect_skips_comma_separated_forwarded_https(
+def test_tls_redirect_skips_comma_separated_forwarded_https_when_force_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch, force_https_redirect=True)
+
+    status_code, body, headers = asyncio.run(
+        asgi_request(
+            app,
+            "GET",
+            "/api/health/live",
+            headers={"x-forwarded-proto": "https,http"},
+        )
+    )
+
+    assert status_code == 200
+    assert '"status":"alive"' in body
+    assert "location" not in headers
+
+
+def test_health_live_endpoint_behind_managed_proxy_no_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = create_production_test_app(tmp_path, monkeypatch)
@@ -566,7 +609,7 @@ def test_tls_redirect_skips_comma_separated_forwarded_https(
     assert "location" not in headers
 
 
-def test_health_readiness_endpoint_behind_proxy_does_not_redirect(
+def test_health_ready_endpoint_behind_managed_proxy_no_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = create_production_test_app(tmp_path, monkeypatch)
