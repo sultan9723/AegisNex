@@ -1837,6 +1837,14 @@ def create_app(
 
     logger = get_logger(__name__)
     logger.info("AegisNex dashboard starting")
+    if demo_auth_enabled() and not os.getenv("AEGISNEX_DEMO_PASSWORD"):
+        # Surface this misconfiguration in boot logs immediately, rather
+        # than only as an opaque 503 the first time someone hits
+        # /api/auth/demo-login.
+        logger.warning(
+            "AEGISNEX_DEMO_ENABLED is true but AEGISNEX_DEMO_PASSWORD is not set: "
+            "POST /api/auth/demo-login will return 503 until AEGISNEX_DEMO_PASSWORD is configured."
+        )
 
     app.state.services = services or create_services()
     app.state.auth_manager = auth_manager or AuthManager()
@@ -2245,6 +2253,15 @@ def create_app(
         username = os.getenv("AEGISNEX_DEMO_USERNAME", "demo")
         password = os.getenv("AEGISNEX_DEMO_PASSWORD")
         if not password:
+            # This is the most common production cause of a demo-login 503:
+            # AEGISNEX_DEMO_ENABLED=true was set without also setting
+            # AEGISNEX_DEMO_PASSWORD. Logged server-side (no secret values
+            # exist to leak here) so it shows up next to the request in
+            # deployment logs instead of only as an opaque 503 to the client.
+            logger.warning(
+                "Demo login rejected: AEGISNEX_DEMO_ENABLED is true but "
+                "AEGISNEX_DEMO_PASSWORD is not set."
+            )
             raise HTTPException(
                 status_code=503, detail="Demo login is not configured. Set AEGISNEX_DEMO_PASSWORD."
             )
@@ -2252,10 +2269,25 @@ def create_app(
         # account - never the real admin - regardless of AEGISNEX_DEMO_USERNAME.
         result = app.state.auth_manager.login(username, password)
         if result is None:
-            with suppress(AuthError):
+            try:
                 app.state.auth_manager.user_store.seed_demo_user(username, password)
+            except AuthError:
+                pass
+            except Exception:
+                logger.error(
+                    "Demo login seeding failed unexpectedly for username=%r", username, exc_info=True
+                )
+                raise HTTPException(
+                    status_code=503, detail="Demo login is temporarily unavailable"
+                ) from None
             result = app.state.auth_manager.login(username, password)
         if result is None:
+            logger.error(
+                "Demo login failed after seeding: authenticate() returned no user for "
+                "username=%r. The demo account may exist with a password that no longer "
+                "matches AEGISNEX_DEMO_PASSWORD, or is_active may be false.",
+                username,
+            )
             raise HTTPException(status_code=500, detail="Demo login is unavailable")
         user, access_token, refresh_token = result
         repo = getattr(app.state.services, "platform_repository", None)

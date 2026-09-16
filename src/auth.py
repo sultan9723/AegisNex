@@ -524,15 +524,24 @@ class UserStore:
             )
         existing = self.get_user_by_email(username)
         if existing is None:
-            with self._connect() as connection:
-                connection.execute(
-                    """
-                    INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
-                    VALUES (?, ?, 1, 0, 1, 'read_only', ?)
-                    """,
-                    (username, hash_password(password), utc_timestamp()),
-                )
-            return
+            try:
+                with self._connect() as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                        VALUES (?, ?, 1, 0, 1, 'read_only', ?)
+                        """,
+                        (username, hash_password(password), utc_timestamp()),
+                    )
+                return
+            except sqlite3.IntegrityError:
+                # Two concurrent first-time demo-login requests can both see
+                # "no existing user" and both attempt this insert; the loser
+                # of that race isn't a real failure, just a concurrent
+                # winner - reconcile against what's there instead of raising.
+                existing = self.get_user_by_email(username)
+                if existing is None:
+                    raise
         # Internal automation account, not a real user's credential: keep it
         # in sync with the configured secret so rotating AEGISNEX_DEMO_PASSWORD
         # doesn't permanently lock demo login out.

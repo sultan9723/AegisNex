@@ -1,5 +1,8 @@
 from pathlib import Path
-from src.auth import AuthManager, UserStore, hash_password, verify_password
+
+import pytest
+
+from src.auth import AuthError, AuthManager, UserStore, hash_password, verify_password
 
 
 def test_password_hashing_verifies_and_does_not_store_plaintext() -> None:
@@ -135,3 +138,76 @@ def test_external_login_reuses_existing_identity(tmp_path: Path) -> None:
 
     assert second.id == first.id
     assert store.get_user_by_email("ops@example.com") is not None
+
+
+# --- UserStore.seed_demo_user ---
+# (called by POST /api/auth/demo-login the first time a demo session is
+# requested - see tests/test_demo_login.py for the HTTP-level behavior)
+
+
+def test_seed_demo_user_creates_restricted_read_only_account(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+
+    store.seed_demo_user("demo", "demo-secret-not-a-real-password")
+
+    user = store.get_user_by_email("demo")
+    assert user is not None
+    assert user.role == "read_only"
+    assert user.is_superuser is False
+    assert store.authenticate("demo", "demo-secret-not-a-real-password") == user
+
+
+def test_seed_demo_user_requires_password(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+
+    with pytest.raises(AuthError):
+        store.seed_demo_user("demo", "")
+
+    assert store.get_user_by_email("demo") is None
+
+
+def test_seed_demo_user_resyncs_password_when_rotated(tmp_path: Path) -> None:
+    store = UserStore(tmp_path / "users.db")
+    store.seed_demo_user("demo", "old-demo-password")
+
+    store.seed_demo_user("demo", "new-demo-password")
+
+    assert store.authenticate("demo", "old-demo-password") is None
+    assert store.authenticate("demo", "new-demo-password") is not None
+
+
+def test_seed_demo_user_survives_concurrent_insert_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two concurrent first-time demo-login requests can both see "no
+    existing user" and both attempt the INSERT; the one that loses the race
+    must reconcile against the winner's row instead of raising and turning
+    into an unhandled 500 in the demo-login route."""
+    store = UserStore(tmp_path / "users.db")
+
+    original_get_user_by_email = store.get_user_by_email
+    calls = {"count": 0}
+
+    def racy_get_user_by_email(email: str):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            # Simulate the TOCTOU window: report "no user yet" even though a
+            # concurrent request is about to (or already did) insert one.
+            connection = store._connect()
+            with connection:
+                connection.execute(
+                    "INSERT INTO users (email, hashed_password, is_active, is_superuser, "
+                    "is_verified, role, created_at) VALUES (?, ?, 1, 0, 1, 'read_only', ?)",
+                    (email.lower(), hash_password("winner-password"), "2026-01-01T00:00:00Z"),
+                )
+            return None
+        return original_get_user_by_email(email)
+
+    monkeypatch.setattr(store, "get_user_by_email", racy_get_user_by_email)
+
+    store.seed_demo_user("demo", "loser-password")
+
+    user = store.get_user_by_email("demo")
+    assert user is not None
+    assert user.role == "read_only"
+    assert user.is_superuser is False

@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -54,6 +55,64 @@ def test_demo_login_requires_password_configured(tmp_path: Path, monkeypatch) ->
     response = client.post("/api/auth/demo-login")
 
     assert response.status_code == 503
+
+
+class _RecordingHandler(logging.Handler):
+    """Collects log records directly from the src.dashboard logger.
+
+    src.dashboard.create_app() calls configure_logging(), which replaces
+    every handler on the *root* logger - including pytest's caplog handler,
+    which is attached there. A handler attached directly to the
+    "src.dashboard" logger itself is unaffected by that root-handler
+    replacement, so this is used instead of caplog for these two tests.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_demo_login_missing_password_logs_actionable_warning(tmp_path: Path, monkeypatch) -> None:
+    """The 503 a client sees ("Demo login is not configured...") must be
+    backed by a server-side log line naming the exact env var to set, so
+    this doesn't stay a mystery 503 in production log output."""
+    monkeypatch.setenv("AEGISNEX_DEMO_ENABLED", "true")
+    monkeypatch.delenv("AEGISNEX_DEMO_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AEGISNEX_DEMO_PASSWORD", raising=False)
+    app = make_app(tmp_path)
+    client = TestClient(app, base_url="https://testserver")
+
+    handler = _RecordingHandler()
+    dashboard_logger = logging.getLogger("src.dashboard")
+    dashboard_logger.addHandler(handler)
+    try:
+        response = client.post("/api/auth/demo-login")
+    finally:
+        dashboard_logger.removeHandler(handler)
+
+    assert response.status_code == 503
+    assert any("AEGISNEX_DEMO_PASSWORD" in record.getMessage() for record in handler.records)
+
+
+def test_demo_login_misconfiguration_logged_at_startup(tmp_path: Path, monkeypatch) -> None:
+    """Ops should see this in boot logs immediately on deploy, not only after
+    the first failed demo-login request."""
+    monkeypatch.setenv("AEGISNEX_DEMO_ENABLED", "true")
+    monkeypatch.delenv("AEGISNEX_DEMO_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AEGISNEX_DEMO_PASSWORD", raising=False)
+
+    handler = _RecordingHandler()
+    dashboard_logger = logging.getLogger("src.dashboard")
+    dashboard_logger.addHandler(handler)
+    try:
+        make_app(tmp_path)
+    finally:
+        dashboard_logger.removeHandler(handler)
+
+    assert any("AEGISNEX_DEMO_PASSWORD" in record.getMessage() for record in handler.records)
 
 
 def test_demo_login_enabled_issues_restricted_session(tmp_path: Path, monkeypatch) -> None:
