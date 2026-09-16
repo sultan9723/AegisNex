@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC
 from typing import Any
 
 import docker
 from docker import errors as docker_errors
+
+DOCKER_SCANNING_DISABLED_MESSAGE = "Docker scanning is disabled"
+
+
+def docker_scanner_enabled_from_env() -> bool:
+    """Whether Docker monitoring should be active.
+
+    Defaults to enabled so local development (where a Docker daemon is
+    normally reachable) keeps working unchanged. Managed cloud hosts (e.g.
+    Back4app) do not expose /var/run/docker.sock, so those deployments
+    should set AEGISNEX_DOCKER_SCANNER_ENABLED=false to stop the scanner
+    from repeatedly trying to reach a Docker daemon that will never be
+    there.
+    """
+    return os.getenv("AEGISNEX_DOCKER_SCANNER_ENABLED", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 class ScanContainer(dict):
@@ -26,18 +47,32 @@ class DockerScanner:
         include_all: bool = True,
         client_timeout_seconds: int = 10,
         restart_timeout_seconds: int = 10,
+        enabled: bool | None = None,
     ) -> None:
         self.logger = logger or logging.getLogger("agentx.docker")
         self.include_all = include_all
         self.client_timeout_seconds = client_timeout_seconds
         self.restart_timeout_seconds = restart_timeout_seconds
+        self.enabled = docker_scanner_enabled_from_env() if enabled is None else enabled
+        if not self.enabled:
+            self.logger.info(
+                "Docker scanning disabled (AEGISNEX_DOCKER_SCANNER_ENABLED=false); "
+                "skipping Docker daemon connections."
+            )
+
+    def _disabled_result(self, **extra: Any) -> dict[str, Any]:
+        return {"status": "disabled", "message": DOCKER_SCANNING_DISABLED_MESSAGE, **extra}
 
     def _client(self) -> Any:
+        if not self.enabled:
+            raise docker_errors.DockerException(DOCKER_SCANNING_DISABLED_MESSAGE)
         if not hasattr(self, "_docker_client") or self._docker_client is None:
             self._docker_client = docker.from_env(timeout=self.client_timeout_seconds)
         return self._docker_client
 
     def ensure_running(self, container_name: str) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(container=container_name)
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -81,6 +116,8 @@ class DockerScanner:
             }
 
     def run(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(containers=[])
         try:
             params = params or {}
             include_all = bool(params.get("include_all", self.include_all))
@@ -169,6 +206,10 @@ class DockerScanner:
         return result
 
     def get_health_status(self, container_name: str) -> str:
+        if not self.enabled:
+            # "none" mirrors the "no Docker health check configured" case so a
+            # disabled scanner never reports a fake healthy/unhealthy status.
+            return "none"
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -179,6 +220,8 @@ class DockerScanner:
             return "unknown"
 
     def restart_container(self, container_name: str) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(container=container_name)
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -263,6 +306,8 @@ class DockerScanner:
         return "unknown"
 
     def start_container(self, container_name: str) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(container=container_name)
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -281,6 +326,8 @@ class DockerScanner:
             return {"status": "error", "message": str(exc), "container": container_name}
 
     def stop_container(self, container_name: str) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(container=container_name)
         try:
             client = self._client()
             container = client.containers.get(container_name)
@@ -299,6 +346,8 @@ class DockerScanner:
             return {"status": "error", "message": str(exc), "container": container_name}
 
     def get_container_logs(self, container_name: str, tail: int = 100) -> dict[str, Any]:
+        if not self.enabled:
+            return self._disabled_result(container=container_name, logs=[], count=0)
         try:
             client = self._client()
             container = client.containers.get(container_name)

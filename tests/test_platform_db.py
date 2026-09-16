@@ -1,5 +1,8 @@
 from pathlib import Path
 import sqlite3
+from typing import Any
+
+import pytest
 
 from src.incidents import Incident
 from src.platform_db import PlatformRepository
@@ -167,3 +170,153 @@ def test_platform_repository_creates_fresh_schema_with_audit_columns(tmp_path: P
         actor="ops@example.com",
     )
     assert len(repository.list_audit_logs()) == 1
+
+
+# ============================================================================
+# PostgreSQL pooled-connection transaction handling
+#
+# A connection obtained from psycopg_pool must always be returned via
+# pool.putconn() (repository._close_connection), never closed directly and
+# never left mid-transaction. `with connection:` (psycopg3) commits/rolls
+# back *and closes* the physical connection on exit instead of returning it
+# to the pool - that silently leaks a pool slot. Returning a connection that
+# still has an open (uncommitted) transaction makes psycopg_pool log
+# "rolling back returned connection ... INTRANS" and pay for an extra
+# round-trip on every reuse. These tests simulate the postgresql backend
+# with a fake connection/pool so they run without a real Postgres server.
+# ============================================================================
+
+
+class FakePgCursor:
+    lastrowid = None
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self._rows = rows or []
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._rows
+
+
+class FakePgConnection:
+    def __init__(self, raise_on_execute: Exception | None = None) -> None:
+        self.raise_on_execute = raise_on_execute
+        self.commit_calls = 0
+        self.rollback_calls = 0
+        self.closed = False
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> FakePgCursor:
+        if self.raise_on_execute is not None:
+            raise self.raise_on_execute
+        return FakePgCursor()
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+
+    def rollback(self) -> None:
+        self.rollback_calls += 1
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _fake_postgres_repository(tmp_path: Path, connection: FakePgConnection) -> tuple[PlatformRepository, list[Any]]:
+    repository = PlatformRepository(f"sqlite:///{tmp_path / 'unused.db'}")
+    repository.backend = "postgresql"
+    repository._initialized = True
+    repository._connect = lambda: connection
+    returned: list[Any] = []
+    repository._close_connection = lambda conn: returned.append(conn)
+    return repository, returned
+
+
+def test_execute_commits_and_returns_connection_on_success(tmp_path: Path) -> None:
+    connection = FakePgConnection()
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    repository._execute("INSERT INTO x VALUES (?)", (1,))
+
+    assert connection.commit_calls == 1
+    assert connection.rollback_calls == 0
+    assert connection.closed is False
+    assert returned == [connection]
+
+
+def test_execute_rolls_back_and_still_returns_connection_on_error(tmp_path: Path) -> None:
+    connection = FakePgConnection(raise_on_execute=RuntimeError("boom"))
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    with pytest.raises(RuntimeError):
+        repository._execute("INSERT INTO x VALUES (?)", (1,))
+
+    assert connection.commit_calls == 0
+    assert connection.rollback_calls == 1
+    assert returned == [connection]
+
+
+def test_fetch_all_commits_and_returns_connection_on_success(tmp_path: Path) -> None:
+    connection = FakePgConnection()
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    rows = repository._fetch_all("SELECT * FROM x")
+
+    assert rows == []
+    assert connection.commit_calls == 1
+    assert connection.rollback_calls == 0
+    assert returned == [connection]
+
+
+def test_fetch_all_rolls_back_and_still_returns_connection_on_error(tmp_path: Path) -> None:
+    connection = FakePgConnection(raise_on_execute=RuntimeError("boom"))
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    with pytest.raises(RuntimeError):
+        repository._fetch_all("SELECT * FROM x")
+
+    assert connection.commit_calls == 0
+    assert connection.rollback_calls == 1
+    assert returned == [connection]
+
+
+def test_health_check_returns_connection_to_pool_instead_of_closing_it(tmp_path: Path) -> None:
+    connection = FakePgConnection()
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    result = repository.health_check()
+
+    assert result == {"status": "connected", "backend": "postgresql"}
+    assert connection.commit_calls == 1
+    assert connection.closed is False
+    assert returned == [connection]
+
+
+def test_health_check_failure_still_returns_connection_to_pool(tmp_path: Path) -> None:
+    connection = FakePgConnection(raise_on_execute=RuntimeError("no route to host"))
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    result = repository.health_check()
+
+    assert result["status"] == "disconnected"
+    assert connection.rollback_calls == 1
+    assert connection.closed is False
+    assert returned == [connection]
+
+
+def test_create_monitoring_target_returns_every_connection_to_pool(tmp_path: Path) -> None:
+    connection = FakePgConnection()
+    repository, returned = _fake_postgres_repository(tmp_path, connection)
+
+    repository.create_monitoring_target(
+        {
+            "name": "api",
+            "target_type": "http",
+            "address": "http://localhost:8000/health",
+            "expected_status": 200,
+        },
+        actor="ops@example.com",
+    )
+
+    # insert + the read-back lookup + the audit log write all reuse the same
+    # connection and must each be returned, never left checked out.
+    assert connection.closed is False
+    assert returned.count(connection) == len(returned)
+    assert len(returned) >= 3

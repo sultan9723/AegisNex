@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
 from docker import errors as docker_errors
 
-from src.docker_scanner import DockerScanner
+from src.docker_scanner import DockerScanner, docker_scanner_enabled_from_env
 
 
 class FakeContainer:
@@ -169,3 +170,97 @@ def test_restart_container_restarts_running_container() -> None:
         "action": "restarted",
         "current_status": "running",
     }
+
+
+# --- AEGISNEX_DOCKER_SCANNER_ENABLED (cloud deployments without a Docker daemon) ---
+
+
+def test_docker_scanner_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AEGISNEX_DOCKER_SCANNER_ENABLED", raising=False)
+    assert docker_scanner_enabled_from_env() is True
+
+
+@pytest.mark.parametrize("value", ["false", "False", "0", "no", "off"])
+def test_docker_scanner_enabled_from_env_disabled_values(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AEGISNEX_DOCKER_SCANNER_ENABLED", value)
+    assert docker_scanner_enabled_from_env() is False
+
+
+@pytest.mark.parametrize("value", ["true", "True", "1", "yes", "anything-else"])
+def test_docker_scanner_enabled_from_env_enabled_values(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AEGISNEX_DOCKER_SCANNER_ENABLED", value)
+    assert docker_scanner_enabled_from_env() is True
+
+
+def _fail_if_called() -> None:
+    raise AssertionError("DockerScanner attempted a Docker daemon connection while disabled")
+
+
+def test_disabled_scanner_never_attempts_client_connection() -> None:
+    scanner = DockerScanner(enabled=False)
+    scanner._client = lambda: _fail_if_called()
+
+    assert scanner.run() == {"status": "disabled", "message": "Docker scanning is disabled", "containers": []}
+    assert scanner.ensure_running("api") == {
+        "status": "disabled",
+        "message": "Docker scanning is disabled",
+        "container": "api",
+    }
+    assert scanner.restart_container("api") == {
+        "status": "disabled",
+        "message": "Docker scanning is disabled",
+        "container": "api",
+    }
+    assert scanner.start_container("api") == {
+        "status": "disabled",
+        "message": "Docker scanning is disabled",
+        "container": "api",
+    }
+    assert scanner.stop_container("api") == {
+        "status": "disabled",
+        "message": "Docker scanning is disabled",
+        "container": "api",
+    }
+    assert scanner.get_container_logs("api") == {
+        "status": "disabled",
+        "message": "Docker scanning is disabled",
+        "container": "api",
+        "logs": [],
+        "count": 0,
+    }
+    # "none" (not a fake "healthy"/"unhealthy") so callers don't misreport status.
+    assert scanner.get_health_status("api") == "none"
+
+
+def test_disabled_scanner_logs_one_info_message() -> None:
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.info_calls: list[str] = []
+
+        def info(self, msg: str, *args: object) -> None:
+            self.info_calls.append(msg % args if args else msg)
+
+    logger = RecordingLogger()
+    scanner = DockerScanner(logger=logger, enabled=False)
+
+    scanner.run()
+    scanner.run()
+    scanner.ensure_running("api")
+
+    assert len(logger.info_calls) == 1
+    assert "disabled" in logger.info_calls[0].lower()
+
+
+def test_scanner_enabled_by_default_reads_docker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AEGISNEX_DOCKER_SCANNER_ENABLED", raising=False)
+    container = FakeContainer(status="running")
+    scanner = DockerScanner()
+    scanner._client = lambda: FakeDockerClient({"api": container})
+
+    assert scanner.enabled is True
+    result = scanner.run()
+    assert result["status"] == "ok"

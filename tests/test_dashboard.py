@@ -628,6 +628,135 @@ def test_health_ready_endpoint_behind_managed_proxy_no_redirect(
     assert "location" not in headers
 
 
+def test_health_live_options_succeeds_without_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Back4app (and other managed hosts) probe readiness with OPTIONS; without
+    an explicit handler Starlette returns 405 for a method the route doesn't
+    declare."""
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, _body, headers = asyncio.run(asgi_request(app, "OPTIONS", "/api/health/live"))
+
+    assert status_code in (200, 204)
+    assert "location" not in headers
+
+
+def test_health_ready_options_succeeds_without_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, _body, headers = asyncio.run(asgi_request(app, "OPTIONS", "/api/health/ready"))
+
+    assert status_code in (200, 204)
+    assert "location" not in headers
+
+
+def test_health_options_does_not_weaken_auth_on_other_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding OPTIONS support to the health routes must not spill over: an
+    unauthenticated OPTIONS request to a real protected API route should not
+    suddenly succeed."""
+    app = create_production_test_app(tmp_path, monkeypatch)
+
+    status_code, _body, _headers = asyncio.run(
+        asgi_request(app, "OPTIONS", "/api/system-health")
+    )
+
+    assert status_code in (401, 404, 405)
+
+
+# --- AEGISNEX_DOCKER_SCANNER_ENABLED=false: cloud deployments with no Docker daemon ---
+
+
+def test_metrics_snapshot_task_skips_docker_when_scanner_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The periodic metrics-snapshot task (src.dashboard.save_metrics_snapshot_task)
+    is what repeatedly called docker_scanner.run() on Back4app, where no Docker
+    daemon is ever reachable. With AEGISNEX_DOCKER_SCANNER_ENABLED=false it must
+    keep recording other metrics (containers=0, incidents, hardware) without
+    ever touching the Docker client."""
+    from src.dashboard import save_metrics_snapshot_task
+    from src.docker_scanner import DockerScanner
+
+    monkeypatch.setenv("AEGISNEX_DOCKER_SCANNER_ENABLED", "false")
+    scanner = DockerScanner()
+    assert scanner.enabled is False
+    scanner._client = lambda: (_ for _ in ()).throw(
+        AssertionError("DockerScanner attempted a Docker daemon connection while disabled")
+    )
+
+    class RecordingRepo:
+        def __init__(self) -> None:
+            self.snapshots: list[dict] = []
+
+        def save_metrics_snapshot(self, metrics: dict) -> None:
+            self.snapshots.append(metrics)
+
+    repo = RecordingRepo()
+    incident_manager = IncidentManager(tmp_path / "incidents.json")
+    fake_app = SimpleNamespace(
+        state=SimpleNamespace(
+            services=SimpleNamespace(
+                platform_repository=repo,
+                monitor=FakeMonitor(),
+                docker_scanner=scanner,
+                incident_manager=incident_manager,
+            )
+        )
+    )
+
+    async def _raise_cancelled(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _raise_cancelled)
+
+    with suppress(asyncio.CancelledError):
+        asyncio.run(save_metrics_snapshot_task(fake_app, interval_seconds=0))
+
+    assert len(repo.snapshots) == 1
+    assert repo.snapshots[0]["aegisnex_containers_running"] == 0.0
+    assert repo.snapshots[0]["aegisnex_containers_stopped"] == 0.0
+
+
+def test_app_starts_with_docker_scanner_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full app startup/shutdown (FastAPI lifespan included) with the Docker
+    scanner disabled must succeed, and health endpoints must keep working -
+    this is the exact posture required for a Back4app deployment."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
+    from fastapi.testclient import TestClient
+
+    from src.docker_scanner import DockerScanner
+
+    monkeypatch.setenv("AEGISNEX_DOCKER_SCANNER_ENABLED", "false")
+    scanner = DockerScanner()
+    assert scanner.enabled is False
+    scanner._client = lambda: (_ for _ in ()).throw(
+        AssertionError("DockerScanner attempted a Docker daemon connection while disabled")
+    )
+
+    services = build_services(tmp_path)
+    services.docker_scanner = scanner
+    app = create_app(
+        services,
+        auth_manager=AuthManager(UserStore(tmp_path / "users.db"), jwt_secret="test-secret"),
+    )
+
+    with TestClient(app) as client:
+        live = client.get("/api/health/live")
+        assert live.status_code == 200
+        assert live.json()["status"] == "alive"
+
+        ready = client.get("/api/health/ready")
+        assert ready.status_code == 200
+
+
 def test_dashboard_and_websocket_allow_legacy_viewer_role(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")

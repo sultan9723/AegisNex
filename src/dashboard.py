@@ -20,7 +20,7 @@ from typing import Any, AsyncGenerator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.responses import RedirectResponse as StarletteRedirect
 
 from src.agents.orchestrator import AgentOrchestrator
@@ -7709,9 +7709,19 @@ def create_app(
         return agent.to_dict()
 
     # ---- Public health endpoints ----
+    # These also answer OPTIONS with no auth and no body: managed hosts (e.g.
+    # Back4app) probe container readiness with an OPTIONS request before/
+    # alongside GET, and without an explicit handler Starlette returns 405.
+    def _health_options() -> Response:
+        return Response(status_code=204, headers={"Allow": "GET, OPTIONS"})
+
     @app.get("/api/health")
     def api_health() -> dict[str, Any]:
         return {"status": "ok", "timestamp": utc_now(), "service": "aegisnex"}
+
+    @app.options("/api/health")
+    def api_health_options() -> Response:
+        return _health_options()
 
     @app.get("/api/health/ready")
     def api_health_ready() -> dict[str, Any]:
@@ -7722,9 +7732,17 @@ def create_app(
                 return {"status": "not_ready", "reason": "database_unavailable"}
         return {"status": "ready"}
 
+    @app.options("/api/health/ready")
+    def api_health_ready_options() -> Response:
+        return _health_options()
+
     @app.get("/api/health/live")
     def api_health_live() -> dict[str, Any]:
         return {"status": "alive"}
+
+    @app.options("/api/health/live")
+    def api_health_live_options() -> Response:
+        return _health_options()
 
     @app.get("/api/health/status")
     def api_health_status(request: FastAPIRequest) -> dict[str, Any]:

@@ -409,17 +409,22 @@ class PlatformRepository:
             return
         retries = 3
         for attempt in range(retries):
+            # A pooled PostgreSQL connection must be returned via
+            # _close_connection() (pool.putconn), never left to a bare
+            # `with connection:` exit - psycopg closes the physical
+            # connection on exit instead of returning it to the pool, which
+            # leaks a slot from the pool every time this runs.
+            connection = self._connect()
             try:
-                with self._connect() as connection:
-                    for statement in self._schema_statements():
-                        connection.execute(statement)
-                    for statement in self._migration_statements(connection):
-                        connection.execute(statement)
-                    connection.commit()
-                _logger.info("Database initialized successfully")
-                self._initialized = True
-                return
+                for statement in self._schema_statements():
+                    connection.execute(statement)
+                for statement in self._migration_statements(connection):
+                    connection.execute(statement)
             except sqlite3.OperationalError as exc:
+                with contextlib.suppress(Exception):
+                    connection.rollback()
+                if self.backend == "postgresql":
+                    self._close_connection(connection)
                 if "locked" in str(exc) and attempt < retries - 1:
                     wait = 0.5 * (2**attempt)
                     _logger.warning(
@@ -429,8 +434,21 @@ class PlatformRepository:
                         wait,
                     )
                     time.sleep(wait)
-                else:
-                    raise
+                    continue
+                raise
+            except Exception:
+                with contextlib.suppress(Exception):
+                    connection.rollback()
+                if self.backend == "postgresql":
+                    self._close_connection(connection)
+                raise
+            else:
+                connection.commit()
+                if self.backend == "postgresql":
+                    self._close_connection(connection)
+                _logger.info("Database initialized successfully")
+                self._initialized = True
+                return
 
     def _tables_exist(self) -> bool:
         """Check whether the schema has already been created."""
@@ -908,10 +926,12 @@ class PlatformRepository:
         try:
             sql = self._prepare_sql(sql)
             cursor = connection.execute(sql, tuple(values))
-            if self.backend == "postgresql":
-                connection.commit()
-            else:
-                connection.commit()
+        except Exception:
+            with contextlib.suppress(Exception):
+                connection.rollback()
+            raise
+        else:
+            connection.commit()
             return cursor.lastrowid if hasattr(cursor, "lastrowid") else None
         finally:
             if self.backend == "postgresql":
@@ -922,11 +942,15 @@ class PlatformRepository:
         try:
             sql = self._prepare_sql(sql)
             rows = connection.execute(sql, tuple(values)).fetchall()
+        except Exception:
+            with contextlib.suppress(Exception):
+                connection.rollback()
+            raise
+        else:
+            connection.commit()
         finally:
             if self.backend == "postgresql":
                 self._close_connection(connection)
-            else:
-                connection.commit()
         return [dict(row) for row in rows]
 
     # ========================================================================
@@ -1098,7 +1122,8 @@ class PlatformRepository:
         target = self._normalize_target(payload)
         now = utc_timestamp()
         p = self.placeholder
-        with self._connect() as connection:
+        connection = self._connect()
+        try:
             connection.execute(
                 f"""
                 INSERT INTO monitoring_targets (
@@ -1120,8 +1145,15 @@ class PlatformRepository:
                     now,
                 ),
             )
+        except Exception:
+            with contextlib.suppress(Exception):
+                connection.rollback()
+            raise
+        else:
+            connection.commit()
+        finally:
             if self.backend == "postgresql":
-                connection.commit()
+                self._close_connection(connection)
         created = self.get_monitoring_target_by_name(target["name"]) or target
         self.record_audit_log(
             actor, "create", "monitoring_target", str(created.get("id", target["name"])), created
@@ -2506,14 +2538,28 @@ class PlatformRepository:
     # ========================================================================
 
     def health_check(self) -> dict[str, Any]:
-        """Check database connectivity and return status."""
+        """Check database connectivity and return status.
+
+        Called on every /api/health/ready probe, so this must return its
+        connection to the pool (not close it) - a `with self._connect():`
+        block would close a pooled PostgreSQL connection on exit instead of
+        returning it, exhausting the pool under frequent readiness checks.
+        """
+        connection = None
         try:
-            with self._connect() as connection:
-                connection.execute("SELECT 1")
+            connection = self._connect()
+            connection.execute("SELECT 1")
+            connection.commit()
             return {"status": "connected", "backend": self.backend}
         except Exception as exc:
+            if connection is not None:
+                with contextlib.suppress(Exception):
+                    connection.rollback()
             _logger.warning("Database health check failed: %s", exc)
             return {"status": "disconnected", "backend": self.backend, "error": str(exc)}
+        finally:
+            if connection is not None and self.backend == "postgresql":
+                self._close_connection(connection)
 
     # ========================================================================
     # Normalization
