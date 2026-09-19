@@ -490,6 +490,27 @@ def test_dashboard_routes_render_pages(tmp_path: Path) -> None:
     )
 
 
+def test_create_app_default_auth_manager_shares_platform_repository(tmp_path: Path) -> None:
+    """Production wiring: when no auth_manager is passed explicitly,
+    create_app() must build one backed by the SAME platform_repository the
+    rest of the app uses (Neon/PostgreSQL in production), not a disconnected
+    local SQLite file - otherwise users/tokens would not survive a
+    container restart even though the database itself does."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("jinja2")
+    from src.platform_db import PlatformRepository
+
+    real_repo = PlatformRepository(f"sqlite:///{tmp_path / 'platform.db'}")
+    real_repo.initialize()
+    services = build_services(tmp_path)
+    services.platform_repository = real_repo
+
+    app = create_app(services)
+
+    assert app.state.auth_manager.user_store._repo is real_repo
+    assert app.state.auth_manager.blacklist._repo is real_repo
+
+
 def test_dashboard_routes_redirect_to_login_without_session(tmp_path: Path) -> None:
     pytest.importorskip("fastapi")
     pytest.importorskip("jinja2")

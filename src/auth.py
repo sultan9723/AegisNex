@@ -1,4 +1,12 @@
-"""SQLite-backed dashboard authentication helpers with PyJWT, RBAC, and token blacklisting."""
+"""Dashboard authentication helpers with PyJWT, RBAC, and token blacklisting.
+
+UserStore and TokenBlacklist default to a local SQLite file (convenient for
+local development and tests) but can be backed by a shared
+src.platform_db.PlatformRepository instead - pass repository=<PlatformRepository>
+to route persistence through that repository's configured backend (SQLite or
+PostgreSQL/Neon in production). See src.session.SessionStore for the same
+pattern applied to refresh-token sessions.
+"""
 
 from __future__ import annotations
 
@@ -145,12 +153,26 @@ class AuthError(ValueError):
 
 
 class TokenBlacklist:
-    """In-memory token blacklist with DB persistence for revocations."""
+    """In-memory token blacklist with DB persistence for revocations.
 
-    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
-        self.database_path = Path(database_path)
+    Backed by a local SQLite file by default, or by a shared
+    PlatformRepository (SQLite or PostgreSQL/Neon) when repository= is given.
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path = "aegisnex_users.db",
+        *,
+        repository: Any | None = None,
+    ) -> None:
+        self._repo = repository
         self._cache: set[str] = set()
-        self._initialize()
+        if repository is not None:
+            self.database_path = None
+            self._initialize_repo()
+        else:
+            self.database_path = Path(database_path)
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         _logger.debug("TokenBlacklist opening connection to %s", self.database_path)
@@ -180,7 +202,31 @@ class TokenBlacklist:
             ).fetchall()
             self._cache = {str(row["jti"]) for row in rows}
 
+    def _initialize_repo(self) -> None:
+        # token_blacklist is created by PlatformRepository's own schema
+        # (src/platform_db.py _schema_statements); just warm the cache.
+        p = self._repo.placeholder
+        now = int(datetime.now(UTC).timestamp())
+        self._repo._execute(f"DELETE FROM token_blacklist WHERE expires_at < {p}", (now,))
+        rows = self._repo._fetch_all(
+            f"SELECT jti FROM token_blacklist WHERE expires_at >= {p}", (now,)
+        )
+        self._cache = {str(row["jti"]) for row in rows}
+
     def revoke(self, jti: str, expires_at: int) -> None:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            existing = self._repo._fetch_all(
+                f"SELECT jti FROM token_blacklist WHERE jti = {p}", (jti,)
+            )
+            if not existing:
+                with contextlib.suppress(Exception):
+                    self._repo._execute(
+                        f"INSERT INTO token_blacklist (jti, expires_at, revoked_at) VALUES ({p}, {p}, {p})",
+                        (jti, expires_at, utc_timestamp()),
+                    )
+            self._cache.add(jti)
+            return
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR IGNORE INTO token_blacklist (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
@@ -194,21 +240,61 @@ class TokenBlacklist:
     def revoke_all_for_user(self, user_id: int, auth_manager: AuthManager) -> None:
         """Revoke all tokens for a user by adding a user-level revocation marker.
         This is called when a user is deactivated."""
+        key = f"user_revoke_{user_id}"
+        if self._repo is not None:
+            p = self._repo.placeholder
+            existing = self._repo._fetch_all(
+                f"SELECT jti FROM token_blacklist WHERE jti = {p}", (key,)
+            )
+            if existing:
+                self._repo._execute(
+                    f"UPDATE token_blacklist SET expires_at = {p}, revoked_at = {p} WHERE jti = {p}",
+                    (9999999999, utc_timestamp(), key),
+                )
+            else:
+                self._repo._execute(
+                    f"INSERT INTO token_blacklist (jti, expires_at, revoked_at) VALUES ({p}, {p}, {p})",
+                    (key, 9999999999, utc_timestamp()),
+                )
+            self._cache.add(key)
+            return
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO token_blacklist (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
-                (f"user_revoke_{user_id}", 9999999999, utc_timestamp()),
+                (key, 9999999999, utc_timestamp()),
             )
-        self._cache.add(f"user_revoke_{user_id}")
+        self._cache.add(key)
 
 
 class UserStore:
-    """SQLite user repository with role support."""
+    """User repository with role support.
 
-    def __init__(self, database_path: str | Path = "aegisnex_users.db") -> None:
-        self.database_path = Path(database_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+    Backed by a local SQLite file by default (useful for local development
+    and tests), or by a shared PlatformRepository (SQLite or
+    PostgreSQL/Neon) when repository= is given - the intended mode for any
+    deployment where users must survive a container restart.
+    """
+
+    def __init__(
+        self,
+        database_path: str | Path | None = "aegisnex_users.db",
+        *,
+        repository: Any | None = None,
+    ) -> None:
+        self._repo = repository
+        if repository is not None:
+            self.database_path = None
+            self._initialize_repo()
+        else:
+            self.database_path = Path(database_path or "aegisnex_users.db")
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
+
+    def _initialize_repo(self) -> None:
+        # users / external_identities are created by PlatformRepository's own
+        # schema (src/platform_db.py _schema_statements); just make sure it
+        # has run so a fresh repository can be used immediately.
+        self._repo.initialize()
 
     def _connect(self) -> sqlite3.Connection:
         _logger.debug("UserStore opening connection to %s", self.database_path)
@@ -279,6 +365,36 @@ class UserStore:
         if len(password) < 8:
             raise AuthError("Password must be at least 8 characters.")
         normalized_role = Role.from_str(role).value
+        if self._repo is not None:
+            p = self._repo.placeholder
+            if self._repo._fetch_all(
+                f"SELECT id FROM users WHERE email = {p}", (normalized_email,)
+            ):
+                raise AuthError("User already exists.")
+            try:
+                self._repo._execute(
+                    f"""
+                    INSERT INTO users (
+                        email, hashed_password, is_active, is_superuser, is_verified, role, created_at
+                    )
+                    VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
+                    """,
+                    (
+                        normalized_email,
+                        hash_password(password),
+                        True,
+                        normalized_role in ("super_admin", "administrator"),
+                        False,
+                        normalized_role,
+                        utc_timestamp(),
+                    ),
+                )
+            except Exception as exc:
+                raise AuthError("User already exists.") from exc
+            user = self.get_user_by_email(normalized_email)
+            if user is None:
+                raise AuthError("Failed to create user.")
+            return user
         try:
             with self._connect() as connection:
                 cursor = connection.execute(
@@ -319,6 +435,12 @@ class UserStore:
         return user
 
     def get_user_by_email(self, email: str) -> User | None:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            rows = self._repo._fetch_all(
+                f"SELECT * FROM users WHERE email = {p}", (normalize_email(email),)
+            )
+            return row_to_user(rows[0]) if rows else None
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM users WHERE email = ?",
@@ -327,6 +449,10 @@ class UserStore:
         return row_to_user(row)
 
     def get_user_by_id(self, user_id: int) -> User | None:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            rows = self._repo._fetch_all(f"SELECT * FROM users WHERE id = {p}", (user_id,))
+            return row_to_user(rows[0]) if rows else None
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM users WHERE id = ?",
@@ -335,6 +461,10 @@ class UserStore:
         return row_to_user(row)
 
     def deactivate_user(self, user_id: int) -> bool:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(f"UPDATE users SET is_active = {p} WHERE id = {p}", (False, user_id))
+            return self.get_user_by_id(user_id) is not None
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET is_active = 0 WHERE id = ?",
@@ -345,6 +475,13 @@ class UserStore:
     def update_password(self, user_id: int, new_password: str) -> bool:
         if len(new_password) < 8:
             raise AuthError("Password must be at least 8 characters.")
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(
+                f"UPDATE users SET hashed_password = {p} WHERE id = {p}",
+                (hash_password(new_password), user_id),
+            )
+            return self.get_user_by_id(user_id) is not None
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET hashed_password = ? WHERE id = ?",
@@ -353,13 +490,42 @@ class UserStore:
             return cursor.rowcount > 0
 
     def update_last_login(self, user_id: int) -> None:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(
+                f"UPDATE users SET last_login = {p} WHERE id = {p}", (utc_timestamp(), user_id)
+            )
+            return
         with self._connect() as connection:
             connection.execute(
                 "UPDATE users SET last_login = ? WHERE id = ?",
                 (utc_timestamp(), user_id),
             )
 
+    def update_role(self, user_id: int, role: str) -> bool:
+        """Set a user's role directly (admin role-management, invite acceptance)."""
+        normalized_role = Role.from_str(role).value
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(
+                f"UPDATE users SET role = {p} WHERE id = {p}", (normalized_role, user_id)
+            )
+            return self.get_user_by_id(user_id) is not None
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (normalized_role, user_id),
+            )
+            return cursor.rowcount > 0
+
     def update_display_name(self, user_id: int, display_name: str) -> bool:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(
+                f"UPDATE users SET display_name = {p} WHERE id = {p}",
+                (display_name.strip()[:64], user_id),
+            )
+            return self.get_user_by_id(user_id) is not None
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET display_name = ? WHERE id = ?",
@@ -381,6 +547,19 @@ class UserStore:
         normalized_role = Role.from_str(role).value
         now = utc_timestamp()
         claims_json = json.dumps(claims or {}, sort_keys=True)
+        if self._repo is not None:
+            user = self._upsert_external_user_repo(
+                provider=provider,
+                subject=subject,
+                normalized_email=normalized_email,
+                display_name=display_name,
+                normalized_role=normalized_role,
+                claims_json=claims_json,
+                now=now,
+            )
+            if user is None:
+                raise AuthError("Failed to provision SSO user.")
+            return user
         with self._connect() as connection:
             identity = connection.execute(
                 "SELECT user_id FROM external_identities WHERE provider = ? AND subject = ?",
@@ -477,7 +656,109 @@ class UserStore:
             raise AuthError("Failed to provision SSO user.")
         return user
 
+    def _upsert_external_user_repo(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        normalized_email: str,
+        display_name: str,
+        normalized_role: str,
+        claims_json: str,
+        now: str,
+    ) -> User | None:
+        """PlatformRepository-backed twin of upsert_external_user's sqlite body.
+
+        Each step commits independently (no single shared transaction) since
+        PlatformRepository._execute/_fetch_all each own their connection -
+        acceptable here as SSO provisioning races are rare and self-healing
+        on the next login.
+        """
+        p = self._repo.placeholder
+        is_superuser = normalized_role in ("super_admin", "administrator")
+        identity_rows = self._repo._fetch_all(
+            f"SELECT user_id FROM external_identities WHERE provider = {p} AND subject = {p}",
+            (provider, subject),
+        )
+        if identity_rows:
+            user_id = int(identity_rows[0]["user_id"])
+            self._repo._execute(
+                f"""
+                UPDATE users
+                SET email = {p}, display_name = {p}, is_verified = {p}, role = {p}, is_superuser = {p}, last_login = {p}
+                WHERE id = {p}
+                """,
+                (normalized_email, display_name.strip()[:64], True, normalized_role, is_superuser, now, user_id),
+            )
+            self._repo._execute(
+                f"""
+                UPDATE external_identities
+                SET email = {p}, claims_json = {p}, last_login = {p}
+                WHERE provider = {p} AND subject = {p}
+                """,
+                (normalized_email, claims_json, now, provider, subject),
+            )
+            return self.get_user_by_email(normalized_email)
+
+        existing_rows = self._repo._fetch_all(
+            f"SELECT id FROM users WHERE email = {p}", (normalized_email,)
+        )
+        if existing_rows:
+            user_id = int(existing_rows[0]["id"])
+            self._repo._execute(
+                f"""
+                UPDATE users
+                SET display_name = CASE WHEN display_name = '' THEN {p} ELSE display_name END,
+                    role = {p},
+                    is_superuser = {p},
+                    is_verified = {p},
+                    last_login = {p}
+                WHERE id = {p}
+                """,
+                (display_name.strip()[:64], normalized_role, is_superuser, True, now, user_id),
+            )
+        else:
+            self._repo._execute(
+                f"""
+                INSERT INTO users (
+                    email, hashed_password, is_active, is_superuser, is_verified, role, display_name, created_at, last_login
+                )
+                VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+                """,
+                (
+                    normalized_email,
+                    hash_password(secrets.token_urlsafe(48)),
+                    True,
+                    is_superuser,
+                    True,
+                    normalized_role,
+                    display_name.strip()[:64],
+                    now,
+                    now,
+                ),
+            )
+            user_rows = self._repo._fetch_all(
+                f"SELECT id FROM users WHERE email = {p}", (normalized_email,)
+            )
+            user_id = int(user_rows[0]["id"])
+        self._repo._execute(
+            f"""
+            INSERT INTO external_identities (
+                provider, subject, user_id, email, claims_json, created_at, last_login
+            )
+            VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
+            """,
+            (provider, subject, user_id, normalized_email, claims_json, now, now),
+        )
+        return self.get_user_by_email(normalized_email)
+
     def set_verified(self, user_id: int, verified: bool = True) -> bool:
+        if self._repo is not None:
+            p = self._repo.placeholder
+            self._repo._execute(
+                f"UPDATE users SET is_verified = {p} WHERE id = {p}", (verified, user_id)
+            )
+            return self.get_user_by_id(user_id) is not None
         with self._connect() as connection:
             cursor = connection.execute(
                 "UPDATE users SET is_verified = ? WHERE id = ?",
@@ -493,6 +774,21 @@ class UserStore:
             )
         admin = self.get_user_by_email("admin")
         if admin is None:
+            if self._repo is not None:
+                p = self._repo.placeholder
+                try:
+                    self._repo._execute(
+                        f"""
+                        INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                        VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
+                        """,
+                        ("admin", hash_password(env_password), True, True, True, "administrator", utc_timestamp()),
+                    )
+                except Exception:
+                    # Another instance/worker seeded it concurrently; nothing
+                    # left to do here.
+                    pass
+                return
             with self._connect() as connection:
                 connection.execute(
                     """
@@ -524,24 +820,41 @@ class UserStore:
             )
         existing = self.get_user_by_email(username)
         if existing is None:
-            try:
-                with self._connect() as connection:
-                    connection.execute(
-                        """
+            if self._repo is not None:
+                p = self._repo.placeholder
+                try:
+                    self._repo._execute(
+                        f"""
                         INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
-                        VALUES (?, ?, 1, 0, 1, 'read_only', ?)
+                        VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
                         """,
-                        (username, hash_password(password), utc_timestamp()),
+                        (username, hash_password(password), True, False, True, "read_only", utc_timestamp()),
                     )
-                return
-            except sqlite3.IntegrityError:
-                # Two concurrent first-time demo-login requests can both see
-                # "no existing user" and both attempt this insert; the loser
-                # of that race isn't a real failure, just a concurrent
-                # winner - reconcile against what's there instead of raising.
-                existing = self.get_user_by_email(username)
-                if existing is None:
-                    raise
+                    return
+                except Exception:
+                    # Two concurrent first-time demo-login requests can both
+                    # see "no existing user" and both attempt this insert;
+                    # the loser of that race isn't a real failure, just a
+                    # concurrent winner - reconcile against what's there
+                    # instead of raising.
+                    existing = self.get_user_by_email(username)
+                    if existing is None:
+                        raise
+            else:
+                try:
+                    with self._connect() as connection:
+                        connection.execute(
+                            """
+                            INSERT INTO users (email, hashed_password, is_active, is_superuser, is_verified, role, created_at)
+                            VALUES (?, ?, 1, 0, 1, 'read_only', ?)
+                            """,
+                            (username, hash_password(password), utc_timestamp()),
+                        )
+                    return
+                except sqlite3.IntegrityError:
+                    existing = self.get_user_by_email(username)
+                    if existing is None:
+                        raise
         # Internal automation account, not a real user's credential: keep it
         # in sync with the configured secret so rotating AEGISNEX_DEMO_PASSWORD
         # doesn't permanently lock demo login out.
@@ -557,8 +870,17 @@ class AuthManager:
         token_ttl_seconds: int = 60 * 30,  # 30 minutes default
         refresh_token_ttl_seconds: int = 60 * 60 * 24 * 7,  # 7 days
         session_store: SessionStore | None = None,
+        repository: Any | None = None,
     ) -> None:
-        self.user_store = user_store or UserStore()
+        """
+        repository: an optional src.platform_db.PlatformRepository. When
+        given (and user_store is not explicitly passed), user/token
+        persistence is routed through it instead of a standalone local
+        SQLite file - this is how production deployments get PostgreSQL/
+        Neon-backed authentication automatically, since dashboard.py already
+        constructs one PlatformRepository per process and can hand it here.
+        """
+        self.user_store = user_store or UserStore(repository=repository)
         # JWT secret MUST come from environment variable - no hardcoded fallback
         env_secret = os.getenv("AEGISNEX_JWT_SECRET")
         if jwt_secret:
@@ -581,7 +903,15 @@ class AuthManager:
         self.refresh_token_ttl_seconds = int(
             os.getenv("AEGISNEX_REFRESH_TOKEN_TTL_SECONDS", str(refresh_token_ttl_seconds))
         )
-        self.blacklist = TokenBlacklist(self.user_store.database_path)
+        # Follow the user_store's own backend (sqlite file vs. shared
+        # repository) so tokens and users are always revoked/looked-up
+        # against the same store, regardless of how this AuthManager was
+        # constructed.
+        user_store_repo = getattr(self.user_store, "_repo", None)
+        if user_store_repo is not None:
+            self.blacklist = TokenBlacklist(repository=user_store_repo)
+        else:
+            self.blacklist = TokenBlacklist(self.user_store.database_path)
         self.session_store = session_store
 
     def create_access_token(self, user: User) -> str:
@@ -828,7 +1158,9 @@ class AuthManager:
         return self.refresh_access_token(refresh_token)
 
 
-def row_to_user(row: sqlite3.Row | None) -> User | None:
+def row_to_user(row: Any | None) -> User | None:
+    """Build a User from a sqlite3.Row or a plain dict (PlatformRepository
+    rows are already dicts, from both its sqlite and postgres backends)."""
     if row is None:
         return None
     # Convert to dict for safe access with defaults

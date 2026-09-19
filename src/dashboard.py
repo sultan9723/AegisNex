@@ -1847,7 +1847,9 @@ def create_app(
         )
 
     app.state.services = services or create_services()
-    app.state.auth_manager = auth_manager or AuthManager()
+    app.state.auth_manager = auth_manager or AuthManager(
+        repository=getattr(app.state.services, "platform_repository", None)
+    )
     app.state.oidc_client = OIDCClient()
     if (
         is_production_environment()
@@ -1998,12 +2000,7 @@ def create_app(
         from src.reporting import OperationalReporter
 
         repo = getattr(app.state.services, "platform_repository", None)
-        database_path = (
-            str(getattr(repo, "_sqlite_path", lambda: Path("aegisnex.db"))())
-            if repo
-            else "aegisnex.db"
-        )
-        reporter = OperationalReporter(database_path)
+        reporter = OperationalReporter(repository=repo)
         report = reporter.weekly_report() if report_type == "weekly" else reporter.monthly_report()
         if report_format == "json":
             return Response(
@@ -3930,8 +3927,7 @@ def create_app(
             )
         store = app.state.auth_manager.user_store
         try:
-            with store._connect() as conn:
-                conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user_id))
+            store.update_role(user_id, normalized_role)
         except Exception:
             raise HTTPException(status_code=500, detail="Failed to update user role") from None
         app.state.services.platform_repository.record_audit_log(
@@ -4192,8 +4188,7 @@ def create_app(
             from src.auth import Role
 
             normalized_role = Role.from_str(invite.get("role", "read_only")).value
-            with auth_mgr.user_store._connect() as conn:
-                conn.execute("UPDATE users SET role = ? WHERE id = ?", (normalized_role, user.id))
+            auth_mgr.user_store.update_role(user.id, normalized_role)
             repo.accept_invite(token)
             repo.record_audit_log(
                 user.email, "accept_invite", "user", user.email, {"invited_role": normalized_role}

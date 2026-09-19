@@ -1,4 +1,4 @@
-"""Operational reporting from persisted AegisNex SQLite history."""
+"""Operational reporting from persisted AegisNex incident/metrics history."""
 
 from __future__ import annotations
 
@@ -33,10 +33,19 @@ class ReportWindow:
 
 
 class OperationalReporter:
-    """Builds human-readable operational reports from SQLite history."""
+    """Builds human-readable operational reports from incident/metrics history.
 
-    def __init__(self, database_path: str | Path = "aegisnex.db") -> None:
+    Reads through a shared src.platform_db.PlatformRepository when given
+    (the intended production mode - this is the same repository the rest of
+    the app writes incidents/metrics/notifications to, whether that's
+    PostgreSQL/Neon or local SQLite). Falls back to opening its own local
+    SQLite file directly when no repository is given, for standalone/legacy
+    use and existing tests.
+    """
+
+    def __init__(self, database_path: str | Path = "aegisnex.db", *, repository: Any | None = None) -> None:
         self.database_path = Path(database_path)
+        self._repo = repository
         # Database initialization is now handled by PlatformRepository
         # The AegisNexRepository is deprecated.
 
@@ -123,32 +132,64 @@ class OperationalReporter:
             connection.execute("PRAGMA busy_timeout=30000")
         return connection
 
-    def _incident_summary(self, window: ReportWindow) -> dict[str, Any]:
+    def _placeholder(self) -> str:
+        return self._repo.placeholder if self._repo is not None else "?"
+
+    def _query_one(self, sql: str, params: tuple = ()) -> dict[str, Any] | None:
+        """Run a report SELECT, returning the first row as a dict or None.
+
+        A missing table or bad query degrades to None rather than raising,
+        matching this class's historical best-effort reporting behavior
+        (e.g. a fresh database with no incidents table yet).
+        """
+        if self._repo is not None:
+            try:
+                rows = self._repo._fetch_all(sql, params)
+            except Exception:
+                return None
+            return dict(rows[0]) if rows else None
         with self._connect() as connection:
             try:
-                row = connection.execute(
-                    """
-                    SELECT
-                        COUNT(*) AS total_incidents,
-                        SUM(CASE WHEN status IN ('active', 'acknowledged') THEN 1 ELSE 0 END) AS active_incidents,
-                        SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
-                    FROM incidents
-                    WHERE timestamp >= ?
-                    """,
-                    _window_start_param(window),
-                ).fetchone()
-                recovery_rows = connection.execute(
-                    """
-                    SELECT timestamp, resolved_timestamp
-                    FROM incidents
-                    WHERE timestamp >= ?
-                        AND resolved_timestamp IS NOT NULL
-                    """,
-                    _window_start_param(window),
-                ).fetchall()
+                row = connection.execute(sql, params).fetchone()
             except sqlite3.OperationalError:
-                row = None
-                recovery_rows = []
+                return None
+            return dict(row) if row is not None else None
+
+    def _query_all(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+        if self._repo is not None:
+            try:
+                return [dict(row) for row in self._repo._fetch_all(sql, params)]
+            except Exception:
+                return []
+        with self._connect() as connection:
+            try:
+                rows = connection.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                return []
+            return [dict(row) for row in rows]
+
+    def _incident_summary(self, window: ReportWindow) -> dict[str, Any]:
+        p = self._placeholder()
+        row = self._query_one(
+            f"""
+            SELECT
+                COUNT(*) AS total_incidents,
+                SUM(CASE WHEN status IN ('active', 'acknowledged') THEN 1 ELSE 0 END) AS active_incidents,
+                SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents
+            FROM incidents
+            WHERE timestamp >= {p}
+            """,
+            _window_start_param(window),
+        )
+        recovery_rows = self._query_all(
+            f"""
+            SELECT timestamp, resolved_timestamp
+            FROM incidents
+            WHERE timestamp >= {p}
+                AND resolved_timestamp IS NOT NULL
+            """,
+            _window_start_param(window),
+        )
 
         recovery_seconds = [
             (
@@ -174,36 +215,19 @@ class OperationalReporter:
             "average_recovery_seconds": round(average_recovery_seconds, 2),
         }
 
-    def _safe_report_query(
-        self, connection: sqlite3.Connection, query: str, params: tuple = ()
-    ) -> Any:
-        try:
-            return connection.execute(query, params).fetchone()
-        except sqlite3.OperationalError:
-            return None
-
-    def _safe_report_query_all(
-        self, connection: sqlite3.Connection, query: str, params: tuple = ()
-    ) -> list[Any]:
-        try:
-            return connection.execute(query, params).fetchall()
-        except sqlite3.OperationalError:
-            return []
-
     def _remediation_summary(self, window: ReportWindow) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = self._safe_report_query(
-                connection,
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN successful = 1 THEN 1 ELSE 0 END) AS successful
-                FROM remediation_actions
-                WHERE timestamp >= ?
-                """,
-                _window_start_param(window),
-            )
-        row_dict = dict(row) if row else {}
+        p = self._placeholder()
+        row = self._query_one(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN successful = 1 THEN 1 ELSE 0 END) AS successful
+            FROM remediation_actions
+            WHERE timestamp >= {p}
+            """,
+            _window_start_param(window),
+        )
+        row_dict = row or {}
         total = int(row_dict.get("total") or 0)
         successful = int(row_dict.get("successful") or 0)
         return {
@@ -214,19 +238,18 @@ class OperationalReporter:
         }
 
     def _notification_summary(self, window: ReportWindow) -> dict[str, Any]:
-        with self._connect() as connection:
-            row = self._safe_report_query(
-                connection,
-                """
-                SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status IN ('ok', 'sent', 'success') THEN 1 ELSE 0 END) AS successful
-                FROM notifications
-                WHERE timestamp >= ?
-                """,
-                _window_start_param(window),
-            )
-        row_dict = dict(row) if row else {}
+        p = self._placeholder()
+        row = self._query_one(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status IN ('ok', 'sent', 'success') THEN 1 ELSE 0 END) AS successful
+            FROM notifications
+            WHERE timestamp >= {p}
+            """,
+            _window_start_param(window),
+        )
+        row_dict = row or {}
         total = int(row_dict.get("total") or 0)
         successful = int(row_dict.get("successful") or 0)
         return {
@@ -237,19 +260,18 @@ class OperationalReporter:
         }
 
     def _top_failing_services(self, window: ReportWindow, limit: int = 5) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = self._safe_report_query_all(
-                connection,
-                """
-                SELECT service_name, COUNT(*) AS incident_count
-                FROM incidents
-                WHERE timestamp >= ?
-                GROUP BY service_name
-                ORDER BY incident_count DESC, service_name ASC
-                LIMIT ?
-                """,
-                (*_window_start_param(window), limit),
-            )
+        p = self._placeholder()
+        rows = self._query_all(
+            f"""
+            SELECT service_name, COUNT(*) AS incident_count
+            FROM incidents
+            WHERE timestamp >= {p}
+            GROUP BY service_name
+            ORDER BY incident_count DESC, service_name ASC
+            LIMIT {p}
+            """,
+            (*_window_start_param(window), limit),
+        )
         return [
             {
                 "service_name": str(row["service_name"]),
@@ -262,20 +284,19 @@ class OperationalReporter:
         allowed_columns = {"cpu_percent", "memory_percent"}
         if column not in allowed_columns:
             raise ValueError(f"Unsupported metrics column: {column}")
-        with self._connect() as connection:
-            row = self._safe_report_query(
-                connection,
-                f"""
-                SELECT
-                    AVG({column}) AS average,
-                    MIN({column}) AS minimum,
-                    MAX({column}) AS maximum
-                FROM metrics_snapshots
-                WHERE timestamp >= ?
-                """,
-                _window_start_param(window),
-            )
-        row_dict = dict(row) if row else {}
+        p = self._placeholder()
+        row = self._query_one(
+            f"""
+            SELECT
+                AVG({column}) AS average,
+                MIN({column}) AS minimum,
+                MAX({column}) AS maximum
+            FROM metrics_snapshots
+            WHERE timestamp >= {p}
+            """,
+            _window_start_param(window),
+        )
+        row_dict = row or {}
         return {
             "average": round(float(row_dict.get("average") or 0.0), 2),
             "minimum": round(float(row_dict.get("minimum") or 0.0), 2),
@@ -285,28 +306,28 @@ class OperationalReporter:
     def _service_health(
         self, window: ReportWindow, service_name: str | None = None
     ) -> list[dict[str, Any]]:
-        filters = ["timestamp >= ?"]
+        p = self._placeholder()
+        filters = [f"timestamp >= {p}"]
         params: list[Any] = list(_window_start_param(window))
         if service_name:
-            filters.append("service_name = ?")
+            filters.append(f"service_name = {p}")
             params.append(service_name)
         where_clause = " AND ".join(filters)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT
-                    service_name,
-                    COUNT(*) AS total_incidents,
-                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_incidents,
-                    SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents,
-                    MAX(timestamp) AS last_incident_timestamp
-                FROM incidents
-                WHERE {where_clause}
-                GROUP BY service_name
-                ORDER BY total_incidents DESC, service_name ASC
-                """,
-                params,
-            ).fetchall()
+        rows = self._query_all(
+            f"""
+            SELECT
+                service_name,
+                COUNT(*) AS total_incidents,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_incidents,
+                SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) AS resolved_incidents,
+                MAX(timestamp) AS last_incident_timestamp
+            FROM incidents
+            WHERE {where_clause}
+            GROUP BY service_name
+            ORDER BY total_incidents DESC, service_name ASC
+            """,
+            tuple(params),
+        )
         return [
             {
                 "service_name": str(row["service_name"]),

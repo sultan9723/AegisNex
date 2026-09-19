@@ -94,6 +94,14 @@ providers:
 
 ## Production Deployment
 
+> **Deploying behind Cloudflare Tunnel with a Next.js frontend + FastAPI
+> backend + Neon PostgreSQL?** See
+> [`docs/CLOUDFLARE_TUNNEL_DEPLOYMENT.md`](CLOUDFLARE_TUNNEL_DEPLOYMENT.md)
+> and `docker-compose.production.yml` for that specific, fully-worked
+> architecture (same-origin frontend proxy, tunnel setup, migrations, demo
+> account, health checks, restart/recovery). The options below remain the
+> generic references for other reverse proxies and hosting targets.
+
 ### Option 1: Docker Compose (Recommended)
 
 ```yaml

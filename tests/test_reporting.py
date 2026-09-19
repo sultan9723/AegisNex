@@ -333,3 +333,51 @@ def test_monthly_report_counts_inserted_rows_using_incident_timestamp_column(
 
     assert reporter.weekly_report(now=NOW)["summary"]["total_incidents"] == 1
     assert reporter.monthly_report(now=NOW)["summary"]["total_incidents"] == 2
+
+
+# --- PlatformRepository-backed OperationalReporter ---
+#
+# Production wires OperationalReporter(repository=platform_repository) so
+# /api/reports reads through the same repository everything else writes to
+# (PostgreSQL/Neon in production) instead of a hardcoded local
+# "aegisnex.db" file that would be empty/stale there. This exercises that
+# path against a real (SQLite-backed) PlatformRepository - the SQL is
+# parameterized through repo.placeholder/_fetch_all exactly the way it
+# would run against PostgreSQL.
+
+
+def test_repo_backed_weekly_report_matches_legacy_path(tmp_path: Path) -> None:
+    db_path = tmp_path / "aegisnex.db"
+    seed_history(db_path)
+    repo = PlatformRepository(f"sqlite:///{db_path}")
+
+    legacy_report = OperationalReporter(db_path).weekly_report(now=NOW)
+    repo_report = OperationalReporter(repository=repo).weekly_report(now=NOW)
+
+    assert repo_report["summary"] == legacy_report["summary"]
+    assert repo_report["top_failing_services"] == legacy_report["top_failing_services"]
+    assert repo_report["trends"] == legacy_report["trends"]
+
+
+def test_repo_backed_service_health_report(tmp_path: Path) -> None:
+    db_path = tmp_path / "aegisnex.db"
+    seed_history(db_path)
+    repo = PlatformRepository(f"sqlite:///{db_path}")
+
+    report = OperationalReporter(repository=repo).service_health_report(now=NOW)
+
+    services = {row["service_name"]: row for row in report["services"]}
+    assert services["api"]["total_incidents"] == 2
+    assert services["db"]["total_incidents"] == 1
+
+
+def test_repo_backed_reporter_degrades_gracefully_on_missing_tables(tmp_path: Path) -> None:
+    """A brand-new repository whose schema exists but has no incident rows
+    yet must produce a well-formed empty report, not raise."""
+    repo = PlatformRepository(f"sqlite:///{tmp_path / 'fresh.db'}")
+    repo.initialize()
+
+    report = OperationalReporter(repository=repo).weekly_report(now=NOW)
+
+    assert report["summary"]["total_incidents"] == 0
+    assert report["top_failing_services"] == []

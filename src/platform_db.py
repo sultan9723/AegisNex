@@ -122,7 +122,11 @@ DATABASE_MODELS = {
             "is_active",
             "is_superuser",
             "is_verified",
+            "role",
             "created_at",
+            "display_name",
+            "last_login",
+            "mfa_enabled",
         ),
     ),
     "monitoring_targets": DatabaseModel(
@@ -475,6 +479,7 @@ class PlatformRepository:
             false_default = "FALSE"
             text = "TEXT"
             integer = "INTEGER"
+            bigint = "BIGINT"
             real = "DOUBLE PRECISION"
         else:
             serial = "INTEGER PRIMARY KEY AUTOINCREMENT"
@@ -483,6 +488,7 @@ class PlatformRepository:
             false_default = "0"
             text = "TEXT"
             integer = "INTEGER"
+            bigint = "BIGINT"
             real = "REAL"
         return [
             f"""
@@ -493,7 +499,32 @@ class PlatformRepository:
                 is_active {bool_type} NOT NULL DEFAULT {true_default},
                 is_superuser {bool_type} NOT NULL DEFAULT {false_default},
                 is_verified {bool_type} NOT NULL DEFAULT {true_default},
-                created_at {text} NOT NULL
+                role {text} NOT NULL DEFAULT 'read_only',
+                created_at {text} NOT NULL,
+                display_name {text} NOT NULL DEFAULT '',
+                last_login {text},
+                mfa_enabled {bool_type} NOT NULL DEFAULT {false_default}
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS external_identities (
+                provider {text} NOT NULL,
+                subject {text} NOT NULL,
+                user_id {integer} NOT NULL,
+                email {text} NOT NULL,
+                claims_json {text} NOT NULL DEFAULT '{{}}',
+                created_at {text} NOT NULL,
+                last_login {text},
+                PRIMARY KEY (provider, subject)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS ix_external_identities_user_id ON external_identities(user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_external_identities_email ON external_identities(email)",
+            f"""
+            CREATE TABLE IF NOT EXISTS token_blacklist (
+                jti {text} PRIMARY KEY,
+                expires_at {bigint} NOT NULL,
+                revoked_at {text} NOT NULL
             )
             """,
             f"""
@@ -831,6 +862,13 @@ class PlatformRepository:
                 "ALTER TABLE incidents ADD COLUMN IF NOT EXISTS remediation_history TEXT",
                 "UPDATE incidents SET incident_status = status",
                 "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
+                # Auth persistence migration: databases created before the
+                # users table grew role/display_name/last_login/mfa_enabled
+                # (see PlatformRepository-backed UserStore in src/auth.py).
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'read_only'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             ]
         existing = {
             str(row["name"])
@@ -907,8 +945,34 @@ class PlatformRepository:
             "UPDATE incidents SET incident_status = status",
             "UPDATE incidents SET resolved_at = resolved_timestamp WHERE resolved_timestamp IS NOT NULL",
         ]
+        # Auth persistence migration: databases created before the users
+        # table grew role/display_name/last_login/mfa_enabled (see
+        # PlatformRepository-backed UserStore in src/auth.py).
+        users_columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        users_migrations = []
+        if "role" not in users_columns:
+            users_migrations.append(
+                "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'read_only'"
+            )
+        if "display_name" not in users_columns:
+            users_migrations.append(
+                "ALTER TABLE users ADD COLUMN display_name TEXT NOT NULL DEFAULT ''"
+            )
+        if "last_login" not in users_columns:
+            users_migrations.append("ALTER TABLE users ADD COLUMN last_login TEXT")
+        if "mfa_enabled" not in users_columns:
+            users_migrations.append(
+                "ALTER TABLE users ADD COLUMN mfa_enabled INTEGER NOT NULL DEFAULT 0"
+            )
         return (
-            alter_statements + audit_migrations + api_key_migrations + incident_migrations + updates
+            alter_statements
+            + audit_migrations
+            + api_key_migrations
+            + incident_migrations
+            + updates
+            + users_migrations
         )
 
     @property

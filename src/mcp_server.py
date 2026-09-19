@@ -235,7 +235,7 @@ def create_services(config_path: str | Path = "config.yaml") -> AegisNexMCPServi
         if config.health_checks.tcp.enabled
         else None
     )
-    reporter = OperationalReporter(str(platform_repository._sqlite_path()))
+    reporter = OperationalReporter(repository=platform_repository)
     return AegisNexMCPServices(
         monitor=monitor,
         docker_scanner=docker_scanner,

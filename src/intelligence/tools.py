@@ -253,10 +253,7 @@ def _report_tool(
     try:
         from src.reporting import OperationalReporter
 
-        database_path = (
-            str(getattr(repo, "_sqlite_path", lambda: "aegisnex.db")()) if repo else "aegisnex.db"
-        )
-        reporter = OperationalReporter(database_path)
+        reporter = OperationalReporter(repository=repo)
         if report_type == "weekly":
             report = reporter.weekly_report()
         elif report_type == "monthly":

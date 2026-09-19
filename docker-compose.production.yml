@@ -1,0 +1,124 @@
+# Production deployment: Cloudflare Tunnel -> Next.js frontend -> FastAPI backend -> Neon PostgreSQL + Groq.
+#
+# The browser only ever talks to one public hostname (the Cloudflare Tunnel
+# hostname, routed to the "frontend" service below). The frontend proxies
+# /api/* and /ws/* internally to "backend" (see frontend/next.config.js) -
+# the backend container is never exposed publicly, only reachable on the
+# Docker-internal network.
+#
+# All secrets come from environment variables (see .env.example / your own
+# .env file, or your platform's secret manager). Nothing here is a
+# credential; do not hardcode real values into this file or a checked-in
+# .env.
+#
+# Usage:
+#   docker compose -f docker-compose.production.yml --env-file .env up -d --build
+#
+# See docs/production-deployment.md for the full runbook.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AEGISNEX_ENV: production
+      PORT: "8000"
+      # --- Database (Neon PostgreSQL) ---
+      AEGISNEX_DATABASE_URL: ${AEGISNEX_DATABASE_URL:?AEGISNEX_DATABASE_URL is required (Neon connection string)}
+      # --- Auth ---
+      AEGISNEX_JWT_SECRET: ${AEGISNEX_JWT_SECRET:?AEGISNEX_JWT_SECRET is required}
+      AEGISNEX_LOCAL_AUTH_ENABLED: ${AEGISNEX_LOCAL_AUTH_ENABLED:-false}
+      AEGISNEX_SEED_DEFAULT_ADMIN: ${AEGISNEX_SEED_DEFAULT_ADMIN:-false}
+      AEGISNEX_BOOTSTRAP_ADMIN_PASSWORD: ${AEGISNEX_BOOTSTRAP_ADMIN_PASSWORD:-}
+      AEGISNEX_DEMO_ENABLED: ${AEGISNEX_DEMO_ENABLED:-false}
+      AEGISNEX_DEMO_USERNAME: ${AEGISNEX_DEMO_USERNAME:-demo}
+      AEGISNEX_DEMO_PASSWORD: ${AEGISNEX_DEMO_PASSWORD:-}
+      AEGISNEX_REQUIRE_TENANT_MEMBERSHIP: ${AEGISNEX_REQUIRE_TENANT_MEMBERSHIP:-true}
+      # --- TLS / proxy posture: Cloudflare Tunnel terminates TLS at the
+      # edge and forwards to this container over plain HTTP, same as any
+      # other TLS-terminating reverse proxy - do not force a redirect here.
+      AEGISNEX_FORCE_HTTPS_REDIRECT: "false"
+      # --- Same-origin frontend: no cross-origin browser calls expected,
+      # so no CORS origins need to be allowed. Set this only if something
+      # else calls the API directly from a browser on another origin.
+      AEGISNEX_CORS_ORIGINS: ${AEGISNEX_CORS_ORIGINS:-}
+      AEGISNEX_FRONTEND_URL: ${AEGISNEX_FRONTEND_URL:?AEGISNEX_FRONTEND_URL is required (public https:// hostname behind the tunnel)}
+      # --- No Docker socket or host filesystem is available/relevant here ---
+      AEGISNEX_DOCKER_SCANNER_ENABLED: ${AEGISNEX_DOCKER_SCANNER_ENABLED:-false}
+      # --- Groq (LLM provider) ---
+      AEGIS_AI_PROVIDER: groq
+      AEGIS_AI_GROQ_API_KEY: ${AEGIS_AI_GROQ_API_KEY:?AEGIS_AI_GROQ_API_KEY is required}
+      AEGIS_AI_GROQ_MODEL: ${AEGIS_AI_GROQ_MODEL:-}
+      # --- Optional ---
+      AEGISNEX_SECRET_KEY: ${AEGISNEX_SECRET_KEY:-}
+      AEGISNEX_METRICS_TOKEN: ${AEGISNEX_METRICS_TOKEN:-}
+      AEGISNEX_LOG_LEVEL: ${AEGISNEX_LOG_LEVEL:-INFO}
+    expose:
+      - "8000"
+    # Not published to the host / internet - only "frontend" reaches this,
+    # over the Docker-internal network below.
+    networks:
+      - aegisnex-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health/live', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Left unset on purpose: keeping NEXT_PUBLIC_API_URL/NEXT_PUBLIC_WS_URL
+        # empty means frontend/lib/api.ts issues relative (/api/..., /ws/...)
+        # requests against the browser's own origin, which this frontend
+        # then proxies to "backend" server-side - see next.config.js. Set
+        # them only if the backend is intentionally reachable on its own
+        # public origin instead.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Server-only: how the Next.js server reaches FastAPI inside this
+      # compose network. Never prefixed NEXT_PUBLIC_, so it is never
+      # inlined into the browser bundle.
+      BACKEND_INTERNAL_URL: http://backend:8000
+    expose:
+      - "3000"
+    networks:
+      - aegisnex-internal
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      # Token for a remotely-managed tunnel (Zero Trust dashboard ->
+      # Networks -> Tunnels -> your tunnel -> "Docker" install command).
+      # This is the only credential cloudflared needs; no certificate/JSON
+      # file to mount or commit.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+    networks:
+      - aegisnex-internal
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+networks:
+  aegisnex-internal:
+    driver: bridge
