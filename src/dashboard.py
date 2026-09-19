@@ -122,7 +122,10 @@ class TLSRedirectMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: FastAPIRequest, call_next: Any) -> Any:
         environment = os.getenv("AEGISNEX_ENV", "development").strip().lower()
-        if environment not in {"development", "dev", "local", "test"} and force_https_redirect_enabled():
+        if (
+            environment not in {"development", "dev", "local", "test"}
+            and force_https_redirect_enabled()
+        ):
             if not self._request_is_https(request):
                 url = request.url.replace(scheme="https")
                 return StarletteRedirect(url=url, status_code=301)
@@ -599,6 +602,36 @@ def frontend_redirect_url(path: str) -> str:
     if base == "/":
         return clean_path
     return f"{base}{clean_path}"
+
+
+def resolve_telemetry_db_path(explicit: str | None = None) -> str:
+    """Resolve the SQLite path for TelemetryCollector.
+
+    Telemetry (API/workflow/agent/tool metrics) is local, disposable
+    storage - it is never migrated to PostgreSQL/Neon.
+
+    Priority: an explicit path passed to create_app() > AEGISNEX_TELEMETRY_DB_PATH
+    > AEGISNEX_DATA_DIR (existing behavior, preserved) > a container-safe
+    default in production > the existing bare relative-path default for
+    local development.
+
+    Production containers (Dockerfile sets AEGISNEX_ENV=production and
+    already creates+chowns /app/data) may not have a writable working
+    directory outside that path, which is what caused
+    sqlite3.OperationalError: unable to open database file when this
+    resolved to a bare "telemetry.db" with no AEGISNEX_DATA_DIR set.
+    """
+    if explicit:
+        return explicit
+    env_path = os.getenv("AEGISNEX_TELEMETRY_DB_PATH", "").strip()
+    if env_path:
+        return env_path
+    data_dir = os.getenv("AEGISNEX_DATA_DIR", "").strip()
+    if data_dir:
+        return str(Path(data_dir) / "telemetry.db")
+    if is_production_environment():
+        return "/app/data/telemetry.db"
+    return "telemetry.db"
 
 
 def get_cors_origins() -> list[str]:
@@ -1821,9 +1854,7 @@ def create_app(
     from src.telemetry.collector import TelemetryCollector
     from src.telemetry.middleware import TelemetryMiddleware
 
-    if not telemetry_db_path:
-        data_dir = os.getenv("AEGISNEX_DATA_DIR", "").strip()
-        telemetry_db_path = str(Path(data_dir) / "telemetry.db") if data_dir else "telemetry.db"
+    telemetry_db_path = resolve_telemetry_db_path(telemetry_db_path)
     telemetry_collector = TelemetryCollector(telemetry_db_path)
     app.add_middleware(TelemetryMiddleware, collector=telemetry_collector)
     app.add_middleware(AuthModeMiddleware)
@@ -2272,7 +2303,9 @@ def create_app(
                 pass
             except Exception:
                 logger.error(
-                    "Demo login seeding failed unexpectedly for username=%r", username, exc_info=True
+                    "Demo login seeding failed unexpectedly for username=%r",
+                    username,
+                    exc_info=True,
                 )
                 raise HTTPException(
                     status_code=503, detail="Demo login is temporarily unavailable"

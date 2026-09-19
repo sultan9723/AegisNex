@@ -534,15 +534,14 @@ def create_production_test_app(
 ):
     monkeypatch.setenv("AEGISNEX_ENV", "production")
     monkeypatch.setenv("AEGISNEX_LOCAL_AUTH_ENABLED", "true")
-    monkeypatch.setenv(
-        "AEGISNEX_FORCE_HTTPS_REDIRECT", "true" if force_https_redirect else "false"
-    )
+    monkeypatch.setenv("AEGISNEX_FORCE_HTTPS_REDIRECT", "true" if force_https_redirect else "false")
     return create_app(
         build_services(tmp_path),
         auth_manager=AuthManager(
             UserStore(tmp_path / "users.db"),
             jwt_secret="test-secret-32chars-long-please!",
         ),
+        telemetry_db_path=str(tmp_path / "telemetry.db"),
     )
 
 
@@ -682,9 +681,7 @@ def test_health_options_does_not_weaken_auth_on_other_endpoints(
     suddenly succeed."""
     app = create_production_test_app(tmp_path, monkeypatch)
 
-    status_code, _body, _headers = asyncio.run(
-        asgi_request(app, "OPTIONS", "/api/system-health")
-    )
+    status_code, _body, _headers = asyncio.run(asgi_request(app, "OPTIONS", "/api/system-health"))
 
     assert status_code in (401, 404, 405)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sqlite3
 import time
 from datetime import UTC, datetime
@@ -34,6 +35,13 @@ class TelemetryCollector:
                 _logger.debug("Recreating stale telemetry connection")
                 self._conn = None
         _logger.debug("TelemetryCollector opening connection to %s", self._db_path)
+        # The configured path's parent directory (e.g. /app/data in a
+        # container) is not guaranteed to exist yet - create it before
+        # sqlite3.connect(), which fails with "unable to open database
+        # file" rather than creating missing directories itself.
+        parent_dir = os.path.dirname(os.path.abspath(self._db_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
         conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=10)
         conn.row_factory = sqlite3.Row
         with contextlib.suppress(sqlite3.OperationalError):
