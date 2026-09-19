@@ -22,17 +22,10 @@ const nextConfig = {
       process.env.BACKEND_INTERNAL_URL || process.env.NEXT_PUBLIC_API_URL
     )?.replace(/\/$/, "");
     if (!backendUrl) return [];
-    // Next's server (next start / standalone) proxies both plain HTTP and
-    // WebSocket-upgrade requests for a rewritten destination - /ws/* works
-    // the same way /api/* does, using the same http(s) destination scheme
-    // (the WebSocket upgrade is itself an HTTP request; Next proxies it
-    // based on the Upgrade header, not the destination's URL scheme - a
-    // ws:// destination is not a documented/valid rewrite target).
+    // API requests are handled by app/api/[...path]/route.ts so the backend
+    // URL is read at request time. Keep the WebSocket rewrite here; Next's
+    // server proxies the HTTP Upgrade request using the configured scheme.
     return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/api/:path*`,
-      },
       {
         source: "/ws/:path*",
         destination: `${backendUrl}/ws/:path*`,
