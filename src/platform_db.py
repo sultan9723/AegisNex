@@ -1042,6 +1042,40 @@ class PlatformRepository:
                 params.append(int(offset))
         return self._fetch_all(sql, params)
 
+    def fetch_dashboard_rows(
+        self,
+        table_name: str,
+        *,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch the bounded, recent rows needed by the dashboard.
+
+        Dashboard tables all expose a text timestamp. Keeping the query in
+        the repository preserves SQLite/PostgreSQL placeholder handling while
+        avoiding full-table reads during normal page loads.
+        """
+        table_names = {
+            "metrics_snapshots": "metrics_snapshots",
+            "notifications": "notifications",
+            # The dashboard's legacy logical name maps to the current table.
+            "remediations": "remediation_actions",
+        }
+        if table_name not in table_names:
+            raise ValueError(f"Unsupported dashboard table: {table_name}")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        physical_table = table_names[table_name]
+        table = f'"{physical_table}"' if self.backend == "postgresql" else f"[{physical_table}]"
+        sql = f"SELECT * FROM {table}"
+        params: list[Any] = []
+        if since:
+            sql += " WHERE timestamp >= ?"
+            params.append(since)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(int(limit))
+        return self._fetch_all(sql, params)
+
     def table_names(self) -> set[str]:
         """Return the set of table names in the database."""
         if self.backend == "postgresql":

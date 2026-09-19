@@ -7,20 +7,24 @@ Uses cachetools for thread-safe TTL caches.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from threading import Lock
-from typing import Any
+from threading import Event, Lock
+from typing import Any, Callable, TypeVar
 
 from cachetools import TTLCache
 
 # Default TTLs in seconds
 DEFAULT_CACHE_TTLS = {
     "system_metrics": 10,
+    "platform_health": 7,
+    "governance_stats": 7,
     "container_states": 30,
     "incident_summaries": 30,
     "recent_check_results": 15,
     "chart_data": 15,
     "notification_stats": 30,
 }
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -36,6 +40,7 @@ class DashboardCache:
 
     def __post_init__(self) -> None:
         self._caches: dict[str, TTLCache] = {}
+        self._inflight: dict[str, Event] = {}
         for key, ttl in self.ttls.items():
             self._caches[key] = TTLCache(maxsize=100, ttl=ttl)
 
@@ -56,6 +61,47 @@ class DashboardCache:
             return
         with self._lock:
             cache[cache_key] = value
+
+    def get_or_compute(self, key: str, factory: Callable[[], T]) -> T:
+        """Return a cached value while coalescing concurrent cache misses.
+
+        Only one caller computes a missing value. Other callers wait for that
+        result, which prevents dashboard requests and websocket updates from
+        stampeding the database at cache expiry.
+        """
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+
+        with self._lock:
+            category, cache_key = self._parse_key(key)
+            cache = self._caches.get(category)
+            cached = cache.get(cache_key) if cache is not None else None
+            if cached is not None:
+                return cached
+            event = self._inflight.get(key)
+            if event is None:
+                event = Event()
+                self._inflight[key] = event
+                owner = True
+            else:
+                owner = False
+
+        if not owner:
+            event.wait()
+            cached = self.get(key)
+            if cached is not None:
+                return cached
+            return factory()
+
+        try:
+            value = factory()
+            self.set(key, value)
+            return value
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+                event.set()
 
     def invalidate(self, category: str) -> None:
         """Invalidate all cached values for a category."""

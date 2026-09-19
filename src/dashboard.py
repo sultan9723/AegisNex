@@ -745,11 +745,20 @@ def parse_timestamp(value: Any) -> datetime | None:
         return None
 
 
-def storage_rows(services: DashboardServices, table_name: str) -> list[dict[str, Any]]:
+def storage_rows(
+    services: DashboardServices,
+    table_name: str,
+    *,
+    since: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     repository = services.platform_repository
     if repository is None:
         return []
     try:
+        fetch_dashboard_rows = getattr(repository, "fetch_dashboard_rows", None)
+        if fetch_dashboard_rows is not None and limit is not None:
+            return list(fetch_dashboard_rows(table_name, since=since, limit=limit))
         return list(repository.fetch_all(table_name))
     except Exception:
         return []
@@ -1255,14 +1264,7 @@ def _boolish(value: Any) -> bool | None:
     return None
 
 
-def collect_dashboard_context(
-    services: DashboardServices, use_cache: bool = True
-) -> dict[str, Any]:
-    cache = getattr(services, "dashboard_cache", None)
-    if use_cache and cache is not None:
-        cached = cache.get_system_metrics()
-        if cached is not None:
-            return cached
+def _build_dashboard_context(services: DashboardServices) -> dict[str, Any]:
     timestamp = utc_now()
     metrics = services.monitor.run({})
     docker_report = services.docker_scanner.run({"include_all": True})
@@ -1271,12 +1273,13 @@ def collect_dashboard_context(
     active = [i for i in incidents if i.status in {"active", "acknowledged"}]
     resolved = [i for i in incidents if i.status == "resolved"]
     restart_history = load_restart_history(services.restart_history_path)
-    metric_rows = storage_rows(services, "metrics_snapshots")
-    notification_rows = storage_rows(services, "notifications")
-    remediation_rows = storage_rows(services, "remediations")
+    dashboard_since = (datetime.now(UTC) - timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+    metric_rows = storage_rows(services, "metrics_snapshots", since=dashboard_since, limit=24 * 60)
+    notification_rows = storage_rows(services, "notifications", since=dashboard_since, limit=500)
+    remediation_rows = storage_rows(services, "remediations", since=dashboard_since, limit=500)
     actions = build_remediation_actions(incidents, restart_history)
     container_rows = build_container_rows(containers, restart_history, timestamp)
-    result = {
+    return {
         "timestamp": timestamp,
         "metrics": metrics,
         "network": get_network_stats(),
@@ -1301,8 +1304,22 @@ def collect_dashboard_context(
         "ssl_monitoring": collect_ssl_monitoring(services),
         "tcp_monitoring": collect_tcp_monitoring(services),
     }
-    if cache is not None:
-        cache.set_system_metrics(result)
+
+
+def collect_dashboard_context(
+    services: DashboardServices, use_cache: bool = True
+) -> dict[str, Any]:
+    cache = getattr(services, "dashboard_cache", None)
+    if not use_cache or cache is None:
+        return _build_dashboard_context(services)
+    get_or_compute = getattr(cache, "get_or_compute", None)
+    if get_or_compute is not None:
+        return get_or_compute("system_metrics.latest", lambda: _build_dashboard_context(services))
+    cached = cache.get_system_metrics()
+    if cached is not None:
+        return cached
+    result = _build_dashboard_context(services)
+    cache.set_system_metrics(result)
     return result
 
 
@@ -3294,12 +3311,19 @@ def create_app(
             build_integration_status_center,
         )
 
-        status = build_integration_status_center(app.state.services)
-        return {
-            "platform_health": status["platform_health"],
-            "integrations": status["integrations"],
-            "timestamp": utc_now(),
-        }
+        def build_health() -> dict[str, Any]:
+            status = build_integration_status_center(app.state.services)
+            return {
+                "platform_health": status["platform_health"],
+                "integrations": status["integrations"],
+                "timestamp": utc_now(),
+            }
+
+        cache = getattr(app.state, "dashboard_cache", None)
+        get_or_compute = getattr(cache, "get_or_compute", None)
+        if get_or_compute is not None:
+            return get_or_compute("platform_health.latest", build_health)
+        return build_health()
 
     @app.post("/api/integrations/install")
     async def api_install_integration(request: FastAPIRequest) -> Any:
@@ -6333,11 +6357,22 @@ def create_app(
     def api_governance_action_stats(request: FastAPIRequest) -> dict[str, Any]:
         require_role(*VIEWER_ROLES)(request)
         hours = max(1, min(int(request.query_params.get("hours", 24)), 24 * 30))
-        return governance_manager().get_action_stats(
-            agent_id=request.query_params.get("agent_id"),
-            hours=hours,
-            tenant_id=governance_tenant_id(request),
-        )
+        agent_id = request.query_params.get("agent_id")
+        tenant_id = governance_tenant_id(request)
+
+        def build_stats() -> dict[str, Any]:
+            return governance_manager().get_action_stats(
+                agent_id=agent_id,
+                hours=hours,
+                tenant_id=tenant_id,
+            )
+
+        cache = getattr(app.state, "dashboard_cache", None)
+        get_or_compute = getattr(cache, "get_or_compute", None)
+        if get_or_compute is not None:
+            cache_key = f"governance_stats.{tenant_id}:{agent_id or ''}:{hours}"
+            return get_or_compute(cache_key, build_stats)
+        return build_stats()
 
     @app.get("/api/governance/policies")
     def api_governance_policies(request: FastAPIRequest) -> dict[str, Any]:

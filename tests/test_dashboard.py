@@ -25,6 +25,7 @@ from src.dashboard import (
     get_cors_origins,
     get_network_stats,
     load_restart_history,
+    run_dashboard_broadcaster,
 )
 from src.incidents import IncidentManager
 from src.platform_db import PlatformRepository
@@ -102,6 +103,7 @@ class FakeRepository:
             "ssl_checks": [],
             "tcp_checks": [],
         }
+        self.dashboard_queries: list[tuple[str, str | None, int]] = []
 
     def initialize(self) -> None:
         pass
@@ -112,6 +114,10 @@ class FakeRepository:
         return sqlite3.connect(str(self.database_path))
 
     def fetch_all(self, table_name):
+        return self.rows.get(table_name, [])
+
+    def fetch_dashboard_rows(self, table_name, *, since=None, limit=100):
+        self.dashboard_queries.append((table_name, since, limit))
         return self.rows.get(table_name, [])
 
     def record_audit_log(self, actor, action, resource_type, resource_id, details=None, **kwargs):
@@ -256,6 +262,90 @@ def test_collect_dashboard_context(tmp_path: Path, monkeypatch) -> None:
     assert len(context["notification_rows"]) == 3
     assert context["recent_incidents"]
     assert context["recent_remediations"][0]["service_name"] == "api"
+
+
+def test_collect_dashboard_context_uses_bounded_dashboard_reads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    services = build_services(tmp_path)
+    monkeypatch.setattr("src.dashboard.get_network_stats", lambda: {"status": "ok"})
+
+    collect_dashboard_context(services)
+
+    queries = services.platform_repository.dashboard_queries
+    assert [query[0] for query in queries] == [
+        "metrics_snapshots",
+        "notifications",
+        "remediations",
+    ]
+    assert [query[2] for query in queries] == [1440, 500, 500]
+    assert all(query[1] and query[1].endswith("Z") for query in queries)
+
+
+def test_collect_dashboard_context_reuses_cached_result(tmp_path: Path, monkeypatch) -> None:
+    services = build_services(tmp_path)
+    from src.cache import DashboardCache
+
+    services.dashboard_cache = DashboardCache()
+    monitor_calls = 0
+    original_run = services.monitor.run
+
+    def counted_run(params):
+        nonlocal monitor_calls
+        monitor_calls += 1
+        return original_run(params)
+
+    services.monitor.run = counted_run
+    monkeypatch.setattr("src.dashboard.get_network_stats", lambda: {"status": "ok"})
+
+    first = collect_dashboard_context(services)
+    second = collect_dashboard_context(services)
+
+    assert first is second
+    assert monitor_calls == 1
+
+
+def test_dashboard_broadcaster_reuses_cached_context(tmp_path: Path, monkeypatch) -> None:
+    services = build_services(tmp_path)
+    from src.cache import DashboardCache
+
+    services.dashboard_cache = DashboardCache()
+    services.platform_repository.list_monitoring_targets = list
+    monitor_calls = 0
+    original_run = services.monitor.run
+
+    def counted_run(params):
+        nonlocal monitor_calls
+        monitor_calls += 1
+        return original_run(params)
+
+    services.monitor.run = counted_run
+    monkeypatch.setattr("src.dashboard.get_network_stats", lambda: {"status": "ok"})
+
+    class StopLoop(BaseException):
+        pass
+
+    class Manager:
+        connection_count = 1
+
+        async def broadcast_with_backoff(self, *_args, **_kwargs):
+            return None
+
+        def reset_failures(self):
+            return None
+
+    async def stop_after_iteration(_interval):
+        raise StopLoop
+
+    app = SimpleNamespace(state=SimpleNamespace(websocket_manager=Manager(), services=services))
+    monkeypatch.setattr("src.dashboard.asyncio.sleep", stop_after_iteration)
+
+    with pytest.raises(StopLoop):
+        asyncio.run(run_dashboard_broadcaster(app, interval_seconds=0))
+    with pytest.raises(StopLoop):
+        asyncio.run(run_dashboard_broadcaster(app, interval_seconds=0))
+
+    assert monitor_calls == 1
 
 
 def test_build_dashboard_api_snapshot_matches_route_shapes(tmp_path: Path, monkeypatch) -> None:

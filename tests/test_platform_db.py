@@ -1,5 +1,5 @@
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -68,6 +68,33 @@ def test_platform_repository_saves_latest_check_results(tmp_path: Path) -> None:
     assert refreshed["last_response_time_ms"] == 3.2
     assert refreshed["last_successful_check_at"] == "2026-06-21T12:00:00Z"
     assert history[0]["details"]["status"] == "ok"
+
+
+def test_platform_repository_fetch_dashboard_rows_is_bounded_and_recent(
+    tmp_path: Path,
+) -> None:
+    repository = PlatformRepository(f"sqlite:///{tmp_path / 'platform.db'}")
+    repository.save_metrics_snapshot(
+        {"aegisnex_system_cpu_usage_percent": 10},
+        timestamp="2026-06-03T00:00:00Z",
+    )
+    repository.save_metrics_snapshot(
+        {"aegisnex_system_cpu_usage_percent": 20},
+        timestamp="2026-06-04T00:00:00Z",
+    )
+    repository.save_metrics_snapshot(
+        {"aegisnex_system_cpu_usage_percent": 30},
+        timestamp="2026-06-05T00:00:00Z",
+    )
+
+    rows = repository.fetch_dashboard_rows(
+        "metrics_snapshots",
+        since="2026-06-04T00:00:00Z",
+        limit=1,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["timestamp"] == "2026-06-05T00:00:00Z"
 
 
 def test_platform_repository_persists_incident_lifecycle_fields(tmp_path: Path) -> None:
@@ -150,7 +177,9 @@ def test_platform_repository_auto_migrates_legacy_audit_logs_schema(tmp_path: Pa
     repository = PlatformRepository(f"sqlite:///{db_path}")
     repository.initialize()
 
-    assert {"before_state", "after_state", "execution_id"}.issubset(_sqlite_columns(db_path, "audit_logs"))
+    assert {"before_state", "after_state", "execution_id"}.issubset(
+        _sqlite_columns(db_path, "audit_logs")
+    )
     assert repository.list_audit_logs() == []
 
 
@@ -159,7 +188,9 @@ def test_platform_repository_creates_fresh_schema_with_audit_columns(tmp_path: P
     repository = PlatformRepository(f"sqlite:///{db_path}")
     repository.initialize()
 
-    assert {"before_state", "after_state", "execution_id"}.issubset(_sqlite_columns(db_path, "audit_logs"))
+    assert {"before_state", "after_state", "execution_id"}.issubset(
+        _sqlite_columns(db_path, "audit_logs")
+    )
     repository.create_monitoring_target(
         {
             "name": "fresh-api",
@@ -219,7 +250,9 @@ class FakePgConnection:
         self.closed = True
 
 
-def _fake_postgres_repository(tmp_path: Path, connection: FakePgConnection) -> tuple[PlatformRepository, list[Any]]:
+def _fake_postgres_repository(
+    tmp_path: Path, connection: FakePgConnection
+) -> tuple[PlatformRepository, list[Any]]:
     repository = PlatformRepository(f"sqlite:///{tmp_path / 'unused.db'}")
     repository.backend = "postgresql"
     repository._initialized = True
